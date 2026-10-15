@@ -46,12 +46,14 @@ use tracing::{debug, error, info, warn};
 
 use super::protocol::{
     major_version_matches, ClipboardChanged, ClipboardSetParams, ClipboardText, ErrorCode, Event,
-    HelloParams, HelloResult, Request, RequestId, ResizeParams, Response, RpcError, StatusResult,
-    SubscribeParams, SubscribeResult, UnsubscribeResult, PROTOCOL_VERSION, SUPPORTED_METHODS,
+    HelloParams, HelloResult, Request, RequestId, ResizeParams, Response, RpcError, StatsResult,
+    StatusResult, SubscribeParams, SubscribeResult, UnsubscribeResult, PROTOCOL_VERSION,
+    SUPPORTED_METHODS,
 };
 use crate::channels::{align_monitor_dimension, ChannelEvent, DisplaySize, InputEvent};
 use crate::clipboard::MemoryClipboard;
 use crate::display::MAX_SURFACE_DIMENSION;
+use crate::snapshots::DisplaySnapshot;
 use crate::surface_mirror::SurfaceMirror;
 use shakenfist_spice_protocol::messages::agent_stream::MAX_AGENT_MESSAGE_SIZE;
 
@@ -90,6 +92,8 @@ pub struct SessionHandles {
     pub clipboard: Arc<MemoryClipboard>,
     /// The main channel's display-size queue, for `resize`.
     pub resize_tx: mpsc::Sender<DisplaySize>,
+    /// The display channel's published counters, for `stats`.
+    pub display_snapshot: Arc<std::sync::Mutex<DisplaySnapshot>>,
 }
 
 // ── Server ────────────────────────────────────────────────────────
@@ -1036,6 +1040,7 @@ async fn dispatch_request(
         ),
         "clipboard_get" => (handle_clipboard_get(id, &handles.clipboard), false),
         "resize" => (handle_resize(id, request.params, &handles.resize_tx), false),
+        "stats" => (handle_stats(id, &handles.display_snapshot), false),
         // Completely unknown:
         _ => (
             Response::err(
@@ -1108,6 +1113,27 @@ fn handle_status(id: RequestId, status_provider: &dyn StatusProvider) -> Respons
     Response::ok(
         id,
         serde_json::to_value(snapshot).unwrap_or(serde_json::Value::Object(Default::default())),
+    )
+}
+
+/// `stats` (v1.4): the display channel's counters, as it last
+/// published them. The channel publishes after each batch of messages
+/// it reads, so they trail the wire by at most one batch.
+fn handle_stats(id: RequestId, display_snapshot: &std::sync::Mutex<DisplaySnapshot>) -> Response {
+    let Ok(snapshot) = display_snapshot.lock() else {
+        return Response::err(
+            id,
+            ErrorCode::InternalError,
+            "the display snapshot lock is poisoned",
+        );
+    };
+    let result = StatsResult {
+        display: (&*snapshot).into(),
+    };
+    drop(snapshot);
+    Response::ok(
+        id,
+        serde_json::to_value(result).unwrap_or(serde_json::Value::Object(Default::default())),
     )
 }
 

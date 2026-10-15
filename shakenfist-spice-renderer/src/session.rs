@@ -21,7 +21,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::sync::{broadcast, mpsc, oneshot, watch, Notify};
@@ -86,15 +86,8 @@ const CONNECTION_JOIN_GRACE: Duration = Duration::from_secs(2);
 /// pressuring the SPICE channel producers.
 pub const EVENT_BROADCAST_CAPACITY: usize = 1024;
 
-/// Minimal stats tracker used by the headless event drain. The
-/// GUI tracks much richer stats inside `RyllApp`; headless only
-/// needs aggregated counters for the periodic info log.
-#[derive(Default)]
-struct HeadlessStats {
-    frames_received: u64,
-    bytes_in: u64,
-    bytes_out: u64,
-}
+/// How often headless logs its `Stats:` line.
+const HEADLESS_STATS_PERIOD: Duration = Duration::from_secs(10);
 
 /// Minimal `StatusProvider` implementation for headless mode.
 ///
@@ -695,6 +688,12 @@ pub async fn run_headless(
     // hold theirs.
     #[cfg_attr(not(unix), allow(unused_variables))]
     let (resize_tx, resize_rx) = mpsc::channel(32);
+    // The display channel's counters, for the control socket's `stats`
+    // verb; `snapshots` itself moves into the connection task.
+    #[cfg_attr(not(unix), allow(unused_variables))]
+    let display_snapshot = snapshots.display.clone();
+    // For the periodic `Stats:` line.
+    let stats_snapshots = snapshots.clone();
 
     // The clipboard the main channel syncs with the guest, which the
     // control socket's `clipboard_*` verbs read and write. Made only
@@ -859,6 +858,7 @@ pub async fn run_headless(
             surface_mirror: surface_mirror.clone(),
             clipboard,
             resize_tx: resize_tx.clone(),
+            display_snapshot: display_snapshot.clone(),
         };
         spawn_control_socket(
             server,
@@ -939,8 +939,12 @@ pub async fn run_headless(
     // broadcast bus rather than the original mpsc — exactly the
     // same `ChannelEvent` stream, fan-out architecture.
     let mut event_rx = stats_event_rx;
-    let mut stats = HeadlessStats::default();
-    let mut last_stats_print = Instant::now();
+    // Image draws seen on the event bus, for the `Stats:` line.
+    let mut images_received: u64 = 0;
+    let mut stats_tick = tokio::time::interval_at(
+        tokio::time::Instant::now() + HEADLESS_STATS_PERIOD,
+        HEADLESS_STATS_PERIOD,
+    );
     let mut paste_failed = false;
     // Set when the loop stops because the connection task finished.
     // Every other way out leaves it `None`, and the task is joined
@@ -990,11 +994,7 @@ pub async fn run_headless(
                     ChannelEvent::SurfaceCreated { .. } => {
                     }
                     ChannelEvent::ImageReady { .. } => {
-                        stats.frames_received += 1;
-                    }
-                    ChannelEvent::Statistics { bytes_in, bytes_out, .. } => {
-                        stats.bytes_in += bytes_in;
-                        stats.bytes_out += bytes_out;
+                        images_received += 1;
                     }
                     ChannelEvent::Disconnected(ChannelType::Main) => {
                         info!("Main channel disconnected, exiting");
@@ -1039,15 +1039,24 @@ pub async fn run_headless(
                     }
                     _ => {}
                 }
-
-                // Print stats periodically
-                if last_stats_print.elapsed() >= Duration::from_secs(10) {
-                    info!(
-                        "Stats: frames={}, bytes_in={}, bytes_out={}",
-                        stats.frames_received, stats.bytes_in, stats.bytes_out
-                    );
-                    last_stats_print = Instant::now();
-                }
+            }
+            // Logged on a timer, not when an event arrives, so an idle
+            // session still reports. Marks are the GUI's frame measure;
+            // the bytes are every channel's, as each last published them.
+            _ = stats_tick.tick() => {
+                let marks = stats_snapshots
+                    .display
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .messages_recv_by_opcode
+                    .get(&shakenfist_spice_protocol::display_server::MARK)
+                    .copied()
+                    .unwrap_or(0);
+                let (bytes_in, bytes_out) = stats_snapshots.bytes_totals();
+                info!(
+                    "Stats: marks={}, images={}, bytes_in={}, bytes_out={}",
+                    marks, images_received, bytes_in, bytes_out
+                );
             }
             join_result = &mut connection_handle => {
                 connection_join = Some(join_result);

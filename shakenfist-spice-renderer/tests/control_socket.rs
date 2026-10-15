@@ -22,6 +22,8 @@
 //!   would.
 //! - A resize `mpsc` whose receiver the test inspects to verify what
 //!   `resize` queued for the main channel.
+//! - A `DisplaySnapshot` that tests fill as the display channel would
+//!   publish it, for `stats`.
 //!
 //! Each test binds the server to a temporary Unix-socket path (via
 //! `tempfile::TempDir`), connects a client, drives one or more request/
@@ -54,7 +56,9 @@ use shakenfist_spice_renderer::control::protocol::{RequestId, StatusResult, Surf
 use shakenfist_spice_renderer::control::server::{Server, SessionHandles, StatusProvider};
 use shakenfist_spice_renderer::make_scancode;
 use shakenfist_spice_renderer::surface_mirror::SurfaceMirror;
-use shakenfist_spice_renderer::{ClipboardBackend, DisplaySize, MemoryClipboard};
+use shakenfist_spice_renderer::{
+    ClipboardBackend, DisplaySize, DisplaySnapshot, MemoryClipboard, StreamSnapshot,
+};
 
 // ── Mock status provider ──────────────────────────────────────────
 
@@ -131,6 +135,9 @@ struct TestInputs {
     pub clipboard: Arc<MemoryClipboard>,
     /// Read the sizes the `resize` verb queues for the main channel.
     pub resize_rx: mpsc::Receiver<DisplaySize>,
+    /// The display channel's counters `stats` reads. Tests write it as
+    /// the display channel publishes it.
+    pub display_snapshot: Arc<std::sync::Mutex<DisplaySnapshot>>,
 }
 
 // ── Helpers ───────────────────────────────────────────────────────
@@ -164,6 +171,7 @@ async fn spawn_server_with_line_limit(
     let (input_tx, input_rx) = mpsc::channel::<InputEvent>(256);
     let (resize_tx, resize_rx) = mpsc::channel::<DisplaySize>(32);
     let clipboard = Arc::new(MemoryClipboard::new());
+    let display_snapshot = Arc::new(std::sync::Mutex::new(DisplaySnapshot::default()));
 
     let shutdown = CancellationToken::new();
     // Bound before the task is spawned, so the caller can connect at
@@ -181,6 +189,7 @@ async fn spawn_server_with_line_limit(
             surface_mirror: mirror.clone(),
             clipboard: clipboard.clone(),
             resize_tx,
+            display_snapshot: display_snapshot.clone(),
         },
         shutdown.clone(),
     ));
@@ -196,6 +205,7 @@ async fn spawn_server_with_line_limit(
             status,
             clipboard,
             resize_rx,
+            display_snapshot,
         },
     )
 }
@@ -283,7 +293,7 @@ async fn hello_returns_protocol_version_and_supported_sets() {
     let (mut r, mut w) = connect_client(&path).await;
 
     let result = hello(&mut r, &mut w).await;
-    assert_eq!(result["protocol_version"], "1.3");
+    assert_eq!(result["protocol_version"], "1.4");
     assert_eq!(result["server_name"], "ryll");
 
     let methods: Vec<String> =
@@ -299,7 +309,9 @@ async fn hello_returns_protocol_version_and_supported_sets() {
     assert!(methods.contains(&"clipboard_set".into()));
     assert!(methods.contains(&"clipboard_get".into()));
     assert!(methods.contains(&"resize".into()));
-    assert_eq!(methods.len(), 10, "expected exactly 10 v1 methods");
+    // Added in v1.4.
+    assert!(methods.contains(&"stats".into()));
+    assert_eq!(methods.len(), 11, "expected exactly 11 v1 methods");
 
     let events: Vec<String> =
         serde_json::from_value(result["supported_events"].clone()).expect("supported_events");
@@ -1773,6 +1785,161 @@ async fn resize_refuses_bad_sizes() {
         assert_eq!(resp["error"]["code"], "bad_params", "{params}");
     }
     assert!(inputs.resize_rx.try_recv().is_err(), "nothing was queued");
+
+    handle.stop().await;
+}
+
+// ── Stats (v1.4) ──────────────────────────────────────────────────
+
+/// A stream as the display channel publishes it.
+fn stream_snapshot(stream_id: u32, codec_type: u8, decoded_ok: u64, failed: u64) -> StreamSnapshot {
+    StreamSnapshot {
+        stream_id,
+        codec_type,
+        stream_width: 1280,
+        stream_height: 720,
+        frames_received: decoded_ok + failed + 1,
+        frames_decoded_ok: decoded_ok,
+        frames_decode_failed: failed,
+        created_at_secs: 10.0,
+        ..Default::default()
+    }
+}
+
+/// Before the display channel publishes anything, `stats` is all zero.
+#[tokio::test]
+async fn stats_starts_at_zero() {
+    let status = MockStatusProvider::new(default_status());
+    let (path, handle, _inputs) = spawn_server(status, empty_mirror()).await;
+    let (mut r, mut w) = connect_client(&path).await;
+    hello(&mut r, &mut w).await;
+
+    send_request(&mut w, 2, "stats", serde_json::json!({})).await;
+    let resp = recv_line(&mut r).await;
+    assert_eq!(resp["ok"], true);
+    assert_eq!(
+        resp["result"],
+        serde_json::json!({ "display": {
+            "bytes_in": 0,
+            "messages_received": 0,
+            "marks_received": 0,
+            "streams_active": 0,
+            "streams_created_total": 0,
+            "streams_destroyed_total": 0,
+            "stream_data_orphan_count": 0,
+            "stream_reports_sent_total": 0,
+            "decodes": {},
+            "streams": [],
+            "streams_recently_destroyed": [],
+        }})
+    );
+
+    handle.stop().await;
+}
+
+/// `stats` follows a stream through its life as a test driver polling
+/// it would: open and decoding, then destroyed, when its codec and
+/// counts are still there to assert on.
+#[tokio::test]
+async fn stats_reports_a_stream_while_open_and_after_it_is_destroyed() {
+    let status = MockStatusProvider::new(default_status());
+    let (path, handle, inputs) = spawn_server(status, empty_mirror()).await;
+    let (mut r, mut w) = connect_client(&path).await;
+    hello(&mut r, &mut w).await;
+
+    {
+        let mut snap = inputs.display_snapshot.lock().unwrap();
+        snap.bytes_in = 123_456;
+        snap.message_count = 300;
+        // DISPLAY_MARK is opcode 102.
+        snap.messages_recv_by_opcode.insert(102, 30);
+        snap.messages_recv_by_opcode.insert(318, 200);
+        snap.streams_created_total = 1;
+        snap.streams_active = vec![stream_snapshot(7, 3, 40, 0)];
+        snap.stream_reports_sent_total = 8;
+        snap.h264_decode_total_count = 41;
+    }
+    send_request(&mut w, 2, "stats", serde_json::json!({})).await;
+    let resp = recv_line(&mut r).await;
+    assert_eq!(resp["ok"], true);
+    let open_stream = serde_json::json!({
+        "stream_id": 7,
+        "surface_id": 0,
+        "codec": "h264",
+        "codec_type": 3,
+        "width": 1280,
+        "height": 720,
+        "frames_received": 41,
+        "frames_decoded_ok": 40,
+        "frames_decode_failed": 0,
+        "created_at_secs": 10.0,
+        "destroyed_at_secs": null,
+    });
+    assert_eq!(
+        resp["result"],
+        serde_json::json!({ "display": {
+            "bytes_in": 123_456,
+            "messages_received": 300,
+            "marks_received": 30,
+            "streams_active": 1,
+            "streams_created_total": 1,
+            "streams_destroyed_total": 0,
+            "stream_data_orphan_count": 0,
+            "stream_reports_sent_total": 8,
+            "decodes": { "h264": { "decodes_total": 41, "decode_failures_total": 0 } },
+            "streams": [open_stream],
+            "streams_recently_destroyed": [],
+        }})
+    );
+
+    // The server destroys the stream.
+    {
+        let mut snap = inputs.display_snapshot.lock().unwrap();
+        let mut destroyed = snap.streams_active.remove(0);
+        destroyed.destroyed_at_secs = Some(12.5);
+        snap.streams_recently_destroyed.push_back(destroyed);
+        snap.streams_destroyed_total = 1;
+    }
+    send_request(&mut w, 3, "stats", serde_json::json!({})).await;
+    let resp = recv_line(&mut r).await;
+    let display = &resp["result"]["display"];
+    assert_eq!(display["streams_active"], 0);
+    assert_eq!(display["streams"], serde_json::json!([]));
+    assert_eq!(display["streams_destroyed_total"], 1);
+    let mut destroyed_stream = open_stream;
+    destroyed_stream["destroyed_at_secs"] = serde_json::json!(12.5);
+    assert_eq!(
+        display["streams_recently_destroyed"],
+        serde_json::json!([destroyed_stream])
+    );
+
+    handle.stop().await;
+}
+
+/// Codecs ryll cannot decode are still named, so a test can tell what
+/// the server offered.
+#[tokio::test]
+async fn stats_names_every_spice_video_codec() {
+    let status = MockStatusProvider::new(default_status());
+    let (path, handle, inputs) = spawn_server(status, empty_mirror()).await;
+    let (mut r, mut w) = connect_client(&path).await;
+    hello(&mut r, &mut w).await;
+
+    inputs.display_snapshot.lock().unwrap().streams_active = (0..=6)
+        .map(|codec| stream_snapshot(u32::from(codec), codec, 0, 0))
+        .collect();
+    send_request(&mut w, 2, "stats", serde_json::json!({})).await;
+    let resp = recv_line(&mut r).await;
+    let codecs: Vec<&str> = resp["result"]["display"]["streams"]
+        .as_array()
+        .expect("streams")
+        .iter()
+        .map(|s| s["codec"].as_str().expect("codec"))
+        .collect();
+    assert_eq!(
+        codecs,
+        ["unknown", "mjpeg", "vp8", "h264", "vp9", "h265", "unknown"]
+    );
 
     handle.stop().await;
 }

@@ -969,6 +969,33 @@ pub struct ChannelSnapshots {
 }
 
 impl ChannelSnapshots {
+    /// Bytes received and sent across every channel, as each last
+    /// published them: `(bytes_in, bytes_out)`.
+    pub fn bytes_totals(&self) -> (u64, u64) {
+        fn bytes<T>(snap: &Mutex<T>, get: impl Fn(&T) -> (u64, u64)) -> (u64, u64) {
+            let snap = snap
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            get(&snap)
+        }
+        [
+            bytes(&self.display, |s| (s.bytes_in, s.bytes_out)),
+            bytes(&self.inputs, |s| (s.bytes_in, s.bytes_out)),
+            bytes(&self.cursor, |s| (s.bytes_in, s.bytes_out)),
+            bytes(&self.main, |s| (s.bytes_in, s.bytes_out)),
+            bytes(&self.playback, |s| (s.bytes_in, s.bytes_out)),
+            bytes(&self.usbredir, |s| (s.bytes_in, s.bytes_out)),
+            bytes(&self.webdav, |s| (s.bytes_in, s.bytes_out)),
+        ]
+        .into_iter()
+        .fold((0, 0), |(total_in, total_out), (bytes_in, bytes_out)| {
+            (
+                total_in.saturating_add(bytes_in),
+                total_out.saturating_add(bytes_out),
+            )
+        })
+    }
+
     pub fn new() -> Self {
         ChannelSnapshots {
             display: Arc::new(Mutex::new(DisplaySnapshot::default())),
@@ -1054,5 +1081,26 @@ impl ChannelSnapshots {
 impl Default for ChannelSnapshots {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The headless `Stats:` line reports these, so every channel must
+    // count, in and out.
+    #[test]
+    fn bytes_totals_sums_every_channel() {
+        let snapshots = ChannelSnapshots::new();
+        assert_eq!(snapshots.bytes_totals(), (0, 0));
+        snapshots.display.lock().unwrap().bytes_in = 1000;
+        snapshots.inputs.lock().unwrap().bytes_out = 1;
+        snapshots.cursor.lock().unwrap().bytes_in = 20;
+        snapshots.main.lock().unwrap().bytes_out = 2;
+        snapshots.playback.lock().unwrap().bytes_in = 300;
+        snapshots.usbredir.lock().unwrap().bytes_out = 30;
+        snapshots.webdav.lock().unwrap().bytes_in = 4000;
+        assert_eq!(snapshots.bytes_totals(), (5320, 33));
     }
 }

@@ -24,8 +24,6 @@ const RECENT_LAG_RING_CAP: usize = 32;
 #[derive(Default)]
 pub(super) struct Statistics {
     pub(super) frames_received: u64,
-    pub(super) bytes_in: u64,
-    pub(super) bytes_out: u64,
     /// Inter-PING interval most recently observed on the main
     /// channel, in milliseconds.
     pub(super) last_latency_ms: Option<f64>,

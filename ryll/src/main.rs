@@ -579,6 +579,10 @@ fn run_web(
         let notifications: SharedNotifications =
             Arc::new(std::sync::Mutex::new(NotificationStore::new()));
         let snapshots = ChannelSnapshots::new();
+        // For a control socket's `stats` verb; `snapshots` itself
+        // moves into the connection task.
+        #[cfg(unix)]
+        let display_snapshot = snapshots.display.clone();
         let connection_config: shakenfist_spice_protocol::ConnectionConfig = (&config).into();
 
         // Pedantic-mode bug-report observer. As in headless,
@@ -886,6 +890,7 @@ fn run_web(
                 surface_mirror: surface_mirror.clone(),
                 clipboard,
                 resize_tx: resize_tx_for_control,
+                display_snapshot: display_snapshot.clone(),
             };
             shakenfist_spice_renderer::spawn_control_socket(
                 server,

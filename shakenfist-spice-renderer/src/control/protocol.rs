@@ -1,4 +1,4 @@
-//! Wire types for the Ryll control-socket protocol (version 1.3).
+//! Wire types for the Ryll control-socket protocol (version 1.4).
 //!
 //! All types derive `serde::Serialize` / `serde::Deserialize` so they
 //! can be round-tripped through NDJSON without any manual parsing.
@@ -24,13 +24,19 @@
 //! `resize` verbs and the `clipboard_changed` event, so a session
 //! with no host window can carry clipboard text both ways and ask
 //! the guest for a display size.  Additive, so a minor bump.
+//!
+//! v1.3 → v1.4 added the `stats` verb, so a test can read the display
+//! channel's byte, message, MARK and video-stream counters without a
+//! bug report.  Additive, so a minor bump.
 
 use serde::{Deserialize, Serialize};
+use shakenfist_spice_protocol::display_server;
 
 pub use crate::channels::RequestId;
+use crate::snapshots::{DisplaySnapshot, StreamSnapshot};
 
 /// Protocol version this server speaks.
-pub const PROTOCOL_VERSION: &str = "1.3";
+pub const PROTOCOL_VERSION: &str = "1.4";
 
 /// All v1 verb names the server recognises. Advertised in the `hello`
 /// response so clients can adapt at runtime rather than hard-coding
@@ -46,6 +52,7 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "clipboard_set",
     "clipboard_get",
     "resize",
+    "stats",
 ];
 
 /// All event names the server can emit. Advertised in the `hello`
@@ -311,6 +318,157 @@ pub struct ClipboardChanged {
 pub struct ResizeParams {
     pub width: u32,
     pub height: u32,
+}
+
+/// Result payload for the v1.4 `stats` verb.
+///
+/// Nested by channel so that later versions can add other channels'
+/// counters beside `display` without reshaping it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsResult {
+    pub display: DisplayStats,
+}
+
+/// The display channel's counters in a `stats` result, cumulative
+/// since the session connected unless a field says otherwise.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DisplayStats {
+    /// Bytes received on the display channel.
+    pub bytes_in: u64,
+    /// Messages received on the display channel.
+    pub messages_received: u64,
+    /// `DISPLAY_MARK` messages received. The GUI's frame rate is the
+    /// rate of these, so the difference between two polls over the
+    /// time between them is the same measure.
+    pub marks_received: u64,
+    /// Video streams open now: the length of `streams`.
+    pub streams_active: u64,
+    pub streams_created_total: u64,
+    pub streams_destroyed_total: u64,
+    /// `STREAM_DATA` messages naming no open stream.
+    pub stream_data_orphan_count: u64,
+    pub stream_reports_sent_total: u64,
+    /// Stream frame decodes by codec name (`"mjpeg"`, `"h264"`),
+    /// across every stream, open or destroyed. A codec appears once
+    /// a frame of it has been decoded.
+    pub decodes: std::collections::BTreeMap<String, CodecDecodeStats>,
+    /// The open video streams.
+    pub streams: Vec<StreamStats>,
+    /// The most recently destroyed streams, oldest first, at most 16.
+    pub streams_recently_destroyed: Vec<StreamStats>,
+}
+
+/// Stream frame decodes for one codec, in a `stats` result.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodecDecodeStats {
+    /// Frames handed to the decoder, including an H.264 packet that
+    /// completed no frame.
+    pub decodes_total: u64,
+    /// Frames the decoder failed on.
+    pub decode_failures_total: u64,
+}
+
+/// One video stream in a `stats` result.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StreamStats {
+    pub stream_id: u32,
+    pub surface_id: u32,
+    /// The codec's name (see [`video_codec_name`]).
+    pub codec: String,
+    /// The codec's SPICE `video_codec_type` number.
+    pub codec_type: u8,
+    /// The stream's size, from `STREAM_CREATE`.
+    pub width: u32,
+    pub height: u32,
+    /// `STREAM_DATA` messages received, decodable or not.
+    pub frames_received: u64,
+    pub frames_decoded_ok: u64,
+    pub frames_decode_failed: u64,
+    /// Session-relative seconds, on the clock both fields share.
+    pub created_at_secs: f64,
+    /// `null` while the stream is open.
+    pub destroyed_at_secs: Option<f64>,
+}
+
+/// The name a `stats` result gives a SPICE `video_codec_type`
+/// (`SpiceVideoCodecType` in spice-protocol's `enums.h`), or
+/// `"unknown"`.
+pub fn video_codec_name(codec_type: u8) -> &'static str {
+    match codec_type {
+        1 => "mjpeg",
+        2 => "vp8",
+        3 => "h264",
+        4 => "vp9",
+        5 => "h265",
+        _ => "unknown",
+    }
+}
+
+impl From<&StreamSnapshot> for StreamStats {
+    fn from(s: &StreamSnapshot) -> Self {
+        StreamStats {
+            stream_id: s.stream_id,
+            surface_id: s.surface_id,
+            codec: video_codec_name(s.codec_type).to_string(),
+            codec_type: s.codec_type,
+            width: s.stream_width,
+            height: s.stream_height,
+            frames_received: s.frames_received,
+            frames_decoded_ok: s.frames_decoded_ok,
+            frames_decode_failed: s.frames_decode_failed,
+            created_at_secs: s.created_at_secs,
+            destroyed_at_secs: s.destroyed_at_secs,
+        }
+    }
+}
+
+impl From<&DisplaySnapshot> for DisplayStats {
+    fn from(snap: &DisplaySnapshot) -> Self {
+        let mut decodes = std::collections::BTreeMap::new();
+        for (codec, decodes_total, decode_failures_total) in [
+            (
+                "mjpeg",
+                snap.mjpeg_decode_total_count,
+                snap.mjpeg_decode_failed_count,
+            ),
+            (
+                "h264",
+                snap.h264_decode_total_count,
+                snap.h264_decode_failed_count,
+            ),
+        ] {
+            if decodes_total > 0 {
+                decodes.insert(
+                    codec.to_string(),
+                    CodecDecodeStats {
+                        decodes_total,
+                        decode_failures_total,
+                    },
+                );
+            }
+        }
+        DisplayStats {
+            bytes_in: snap.bytes_in,
+            messages_received: u64::from(snap.message_count),
+            marks_received: snap
+                .messages_recv_by_opcode
+                .get(&display_server::MARK)
+                .copied()
+                .unwrap_or(0),
+            streams_active: snap.streams_active.len() as u64,
+            streams_created_total: snap.streams_created_total,
+            streams_destroyed_total: snap.streams_destroyed_total,
+            stream_data_orphan_count: snap.stream_data_orphan_count,
+            stream_reports_sent_total: snap.stream_reports_sent_total,
+            decodes,
+            streams: snap.streams_active.iter().map(StreamStats::from).collect(),
+            streams_recently_destroyed: snap
+                .streams_recently_destroyed
+                .iter()
+                .map(StreamStats::from)
+                .collect(),
+        }
+    }
 }
 
 // ── Version helpers ──────────────────────────────────────────────

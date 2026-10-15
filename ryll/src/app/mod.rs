@@ -1724,15 +1724,6 @@ impl RyllApp {
                     debug!("app: requested monitors config {}x{}", width, height);
                 }
 
-                ChannelEvent::Statistics {
-                    bytes_in,
-                    bytes_out,
-                    ..
-                } => {
-                    self.stats.bytes_in += bytes_in;
-                    self.stats.bytes_out += bytes_out;
-                }
-
                 ChannelEvent::Latency { sample_ms } => {
                     self.stats.last_latency_ms = Some(sample_ms as f64);
                     self.latency.record(sample_ms);
