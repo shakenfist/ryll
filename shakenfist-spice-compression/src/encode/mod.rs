@@ -1,10 +1,17 @@
 //! SPICE image encoders, for servers. The decoders in the other
 //! modules are what a client needs; this is the other direction.
-//! LZ4 and JPEG are the encoders.
+//! LZ4 and JPEG encode images, and H.264 ([`H264Encoder`]) encodes
+//! video streams.
 use anyhow::{anyhow, Result};
 use jpeg_encoder::{rgb_to_ycbcr, Encoder, ImageBuffer, JpegColorType, SamplingFactor};
 
 use crate::limits;
+
+mod h264;
+
+pub use h264::{
+    even_dimensions, target_bitrate_bps, H264Config, H264Encoder, H264Frame, H264RateControl,
+};
 
 /// A borrowed BGRX image: 32 bits a pixel, bytes B, G, R and an
 /// unused byte, rows `stride` bytes apart.
@@ -87,6 +94,32 @@ impl<'a> Bgrx<'a> {
             out.extend_from_slice(row);
         }
         out
+    }
+}
+
+/// A borrowed RGBX image: as [`Bgrx`], but with the bytes of each
+/// pixel in the order R, G, B and an unused byte.
+///
+/// This is how ryll's surfaces hold their pixels (the fourth byte is
+/// alpha there, and is ignored). Only [`H264Encoder::encode_rgbx`]
+/// takes one.
+#[derive(Debug, Clone, Copy)]
+pub struct Rgbx<'a>(Bgrx<'a>);
+
+impl<'a> Rgbx<'a> {
+    /// Wrap `data` as a `width` x `height` image whose rows start
+    /// `stride` bytes apart. Returns `None` in the same cases as
+    /// [`Bgrx::new`].
+    pub fn new(data: &'a [u8], width: u32, height: u32, stride: usize) -> Option<Self> {
+        Bgrx::new(data, width, height, stride).map(Self)
+    }
+
+    pub fn width(&self) -> u32 {
+        self.0.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.0.height
     }
 }
 

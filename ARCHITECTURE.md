@@ -27,7 +27,7 @@ The repository is a Cargo workspace with **6 crates**:
 |-------|------|
 | `ryll` | The binary: egui GUI, headless runner, CLI, Ctrl+C, trait impls for host-side concerns (capture, notifications, clipboard, USB devices, WebDAV server) |
 | `shakenfist-spice-protocol` | Protocol constants, message framing, link handshake and auth for both the client and server/proxy roles, HTTP CONNECT tunnelling through a proxy such as Proxmox VE's spiceproxy (`proxy`), the `BoundedReader` for panic-free parsing of untrusted input, warn-once gap registry. Fuzz targets for the internet-facing parsers live in `shakenfist-spice-protocol/fuzz/` (a detached workspace, run under nightly `cargo fuzz`) |
-| `shakenfist-spice-compression` | GLZ/LZ/LZ4 + QUIC decompression, LZ4 and JPEG image encoders for the server role (the non-default `encode` feature), shared (byte-bounded) GLZ dictionary (cross-channel), per-platform JPEG decoder selector (ImageIO / WIC / VA-API / libjpeg-turbo / pure-Rust fallback), MJPEG + H.264 video decoder traits |
+| `shakenfist-spice-compression` | GLZ/LZ/LZ4 + QUIC decompression, LZ4 and JPEG image encoders and the H.264 video encoder for the server role (the non-default `encode` feature, which the renderer enables for its encoder pipeline), shared (byte-bounded) GLZ dictionary (cross-channel), per-platform JPEG decoder selector (ImageIO / WIC / VA-API / libjpeg-turbo / pure-Rust fallback), MJPEG + H.264 video decoder traits |
 | `shakenfist-spice-usbredir` | usbredir wire-format parser and message types |
 | `shakenfist-spice-renderer` | SPICE substrate shared by all frontends: channels, display surface, encoder pipeline, session orchestrator, trait surface for host-side concerns |
 | `shakenfist-spice-webrtc` | WebRTC bridge: wraps an `Arc<dyn PeerConnection>` with a video track, audio track, and control datachannel; consumes `EncodedFrame`s from the renderer's encoder |
@@ -194,7 +194,8 @@ shakenfist-spice-renderer/src/
 ├── encoder/
 │   ├── mod.rs           # Re-exports
 │   ├── frame_source.rs  # FrameSource trait, FrameRef, SyntheticFrameSource
-│   ├── h264.rs          # H264Encoder, EncodedFrame
+│   ├── h264.rs          # H264Encoder (RGBA adapter over the compression
+│   │                    #   crate's encoder), EncodedFrame
 │   └── task.rs          # EncoderTask, EncoderControl
 ├── surface_mirror.rs    # SurfaceMirror: egui-free surface state for --web
 ├── audio_sink.rs        # OpusPacketSink trait (pre-decode playback tap)

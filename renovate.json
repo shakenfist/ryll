@@ -44,6 +44,14 @@
       "groupName": "webrtc-rs"
     },
     {
+      "description": "Group openh264 with openh264-sys2 so they upgrade in lockstep. shakenfist-spice-compression pins both exactly: its H.264 encoder sets options through openh264-sys2's raw types that openh264 does not re-export, so the pair must be the one openh264 was released with, and bumping either alone either fails to resolve or puts two openh264-sys2 builds in the graph.",
+      "matchPackageNames": [
+        "openh264",
+        "openh264-sys2"
+      ],
+      "groupName": "openh264"
+    },
+    {
       "description": "Hold sha1 < 0.11 until rsa 0.10 stable releases. sha1 0.11 moves to digest 0.11, but our transitive rsa 0.9 still requires digest 0.10, so Sha1 no longer satisfies rsa::Oaep::new's DynDigest bound. Tracked in shakenfist/ryll#93 / RustCrypto/RSA#647.",
       "matchPackageNames": [
         "sha1"

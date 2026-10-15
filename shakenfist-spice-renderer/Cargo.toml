@@ -62,8 +62,9 @@ lz4_flex = "0.14"
 # Extracted SPICE codecs. Path+version dual-spec: cargo uses the
 # path when building locally and the published crate when resolving
 # from crates.io. Versions are kept in lockstep via
-# cargo-release; see tools/cut-release.sh.
-shakenfist-spice-compression = { path = "../shakenfist-spice-compression", version = "0.1.7" }
+# cargo-release; see tools/cut-release.sh. `encode` is for the H.264
+# encoder the web frontend's pipeline and ryll's capture drive.
+shakenfist-spice-compression = { path = "../shakenfist-spice-compression", version = "0.1.7", features = ["encode"] }
 shakenfist-spice-protocol = { path = "../shakenfist-spice-protocol", version = "0.1.7" }
 shakenfist-spice-usbredir = { path = "../shakenfist-spice-usbredir", version = "0.1.7" }
 
@@ -102,9 +103,6 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 # image bytes (PNG or raw RGBA) are emitted as a base64 string in
 # the NDJSON response.
 base64 = "0.23"
-
-# H.264 encoding for the web frontend encoder pipeline.
-openh264 = "0.9"
 
 # Visual digest decoder for the `digest-decode` feature.  Pulled
 # in only when the test harness opts in; production builds carry
