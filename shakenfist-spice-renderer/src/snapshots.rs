@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
+use shakenfist_spice_protocol::link::H264Offer;
 
 /// Per-stream state for a single SPICE display video stream
 /// (e.g. an MJPEG stream the server promoted a region to). One
@@ -358,12 +359,10 @@ pub struct DisplaySnapshot {
     /// 105) message has been sent. One-shot per channel lifetime
     /// for the same reason as `pref_compression_sent`.
     pub pref_video_codec_type_sent: bool,
-    /// True when the session ran with `--experimental-h264`: the
-    /// channel advertised `DISPLAY_CODEC_H264` and listed H.264 ahead
-    /// of MJPEG in its video codec preference. Off by default until
-    /// ryll#398 is fixed, so a bug report can tell whether H.264 was
-    /// even on offer.
-    pub experimental_h264: bool,
+    /// How the channel offered H.264, so a bug report can tell whether
+    /// it was on offer and ahead of MJPEG: `after_mjpeg` by default,
+    /// `preferred` with `--experimental-h264`, `off` with `--no-h264`.
+    pub h264_offer: H264Offer,
 }
 
 /// A recorded input event for the inputs channel snapshot.

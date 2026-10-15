@@ -17,6 +17,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
+use shakenfist_spice_protocol::link::H264Offer;
 use shakenfist_spice_protocol::ConnectionConfig;
 use shakenfist_spice_renderer::{
     run_headless, ByteCounter, ChannelSnapshots, LogConfig, NotificationEntry, NotificationSink,
@@ -75,7 +76,7 @@ async fn headless_against(port: u16, control_socket: Option<PathBuf>) -> anyhow:
         Arc::new(NullNotifications),
         LogConfig::default(),
         Arc::new(AtomicBool::new(false)),
-        false, // experimental_h264
+        H264Offer::default(),
         64 * 1024 * 1024,
         64 * 1024 * 1024,
         2, // AUTO_GLZ

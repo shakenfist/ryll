@@ -2093,6 +2093,7 @@ mod tests {
     use super::*;
     use crate::notifications::NotificationStore;
     use serde_json::json;
+    use shakenfist_spice_protocol::link::H264Offer;
 
     #[test]
     fn test_ring_buffer_push_and_evict() {
@@ -2194,7 +2195,7 @@ mod tests {
             // Link-up preference-message send markers.
             pref_compression_sent: true,
             pref_video_codec_type_sent: true,
-            experimental_h264: true,
+            h264_offer: H264Offer::Preferred,
             ..Default::default()
         };
         snap.recent_decodes.push_back(DecodeResult {
@@ -2399,7 +2400,7 @@ mod tests {
         // whether H.264 was among them, without reading the pcap.
         assert_eq!(v["pref_compression_sent"], json!(true));
         assert_eq!(v["pref_video_codec_type_sent"], json!(true));
-        assert_eq!(v["experimental_h264"], json!(true));
+        assert_eq!(v["h264_offer"], json!("preferred"));
         // Bounded image-cache eviction and cap fields. These must appear in
         // bug reports so an operator can tell how much eviction pressure the
         // session experienced and what cap was in effect.

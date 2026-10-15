@@ -92,7 +92,8 @@ around it.
 | Full draw-op coverage (FILL, COPY, BLEND, etc.) | available | partial (same as display framebuffer — channel runs but output is discarded outside the control-socket mirror) | available (inherited from shared framebuffer) |
 | SPICE streaming / MJPEG | available | partial (decoded messages counted as frames, not rendered) | available (inherited) |
 | Display capabilities advertisement (COMPOSITE, MONITORS_CONFIG, etc.) | available | available | available |
-| Opt in to H.264 from spice-server (`--experimental-h264`) | available | available | available (affects only the SPICE side; the WebRTC encoder is unchanged) — temporary: remove once ryll#398 makes H.264 decode and it is advertised by default again |
+| Prefer H.264 from the server (`--experimental-h264`) | available | available | available (affects only the SPICE side; the WebRTC encoder is unchanged) |
+| Do not offer H.264 to the server (`--no-h264`) | available | available | available (affects only the SPICE side; the WebRTC encoder is unchanged) |
 | Window auto-resize to surface size | available | n/a — intrinsic (no window) | n/a — intrinsic (browser viewport is user-controlled) |
 | Obey guest size hints toggle (`--no-obey-guest-size` / hamburger toggle) | available | n/a — intrinsic (no window; flag accepted in headless for CLI symmetry but ignored, `_obey_guest_size` in ryll's `run_headless()`) | missing (out of MVP scope; the web frontend's "guest fits browser viewport" inverse is planned) |
 | Guest resolution follows viewport (`VDAgentMonitorsConfig`) | available | available (via the control socket `resize` verb, rounded to the GUI's 8-pixel grid; there is no viewport to follow) | available (also via the control socket `resize` verb, which shares the browser's resize queue) |

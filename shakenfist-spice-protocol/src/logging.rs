@@ -896,10 +896,9 @@ mod tests {
     }
 
     // Guard against DEFAULT_DISPLAY accidentally dropping the codec
-    // caps that make the server stream MJPEG to us, and against
-    // CODEC_H264 coming back before shakenfist/ryll#398 is fixed:
-    // advertising it lets the server stream H.264 that ryll cannot
-    // yet decode. See the comment on DEFAULT_DISPLAY.
+    // caps that let a server stream video to us: MJPEG for
+    // spice-server, H.264 for a server that encodes only H.264. See
+    // the comment on DEFAULT_DISPLAY.
     #[test]
     fn default_display_codec_caps() {
         use crate::constants::capabilities;
@@ -914,10 +913,10 @@ mod tests {
             0,
             "DEFAULT_DISPLAY must include DISPLAY_CODEC_MJPEG"
         );
-        assert_eq!(
+        assert_ne!(
             d & capabilities::DISPLAY_CODEC_H264,
             0,
-            "DEFAULT_DISPLAY must not include DISPLAY_CODEC_H264 until ryll#398 is fixed"
+            "DEFAULT_DISPLAY must include DISPLAY_CODEC_H264"
         );
     }
 

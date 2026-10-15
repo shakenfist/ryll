@@ -21,7 +21,7 @@ use shakenfist_spice_compression::{
     SPICE_VIDEO_CODEC_TYPE_H264, SPICE_VIDEO_CODEC_TYPE_MJPEG,
 };
 use shakenfist_spice_protocol::constants::{bitmap_flags, bitmap_fmt, ropd};
-use shakenfist_spice_protocol::link::SpiceStream;
+use shakenfist_spice_protocol::link::{H264Offer, SpiceStream};
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
     make_message, BinaryData, BitmapHeader, DisplayInit, DisplayMonitorsConfig, DrawBase,
@@ -158,34 +158,17 @@ const MAX_RECENT_DESTROYED_STREAMS: usize = 16;
 /// The video codecs ryll asks the server to stream, most preferred
 /// first, sent once at link-up in `PREFERRED_VIDEO_CODEC_TYPE`.
 ///
-/// MJPEG only. H.264 from spice-server's GStreamer encoder does not
-/// decode yet (shakenfist/ryll#398), so asking for it would leave video
-/// regions black or stale. Listing H.264 second would not be enough:
-/// spice-server only uses this list to reorder its own codec list, so a
-/// listed codec is never excluded. What actually keeps H.264 off the
-/// wire is leaving `DISPLAY_CODEC_H264` out of the advertised display
-/// capabilities (see `capabilities::DEFAULT_DISPLAY`); this list just
-/// stays consistent with that. The H.264 decoder is kept, so restoring
-/// `SPICE_VIDEO_CODEC_TYPE_H264` here and the capability bit is the
-/// whole change once #398 is fixed. Until then `--experimental-h264`
-/// opts a session in; see [`EXPERIMENTAL_H264_PREFERRED_VIDEO_CODECS`].
-const PREFERRED_VIDEO_CODECS: &[u8] = &[SPICE_VIDEO_CODEC_TYPE_MJPEG];
-
-/// The video codec preference sent when the user opts in to H.264 from
-/// spice-server with `--experimental-h264`: H.264 then MJPEG, as ryll
-/// sent before #398 disabled it. The session also advertises
-/// `DISPLAY_CODEC_H264` in that case (`link::display_channel_caps`),
-/// which is what actually lets the server choose H.264.
-const EXPERIMENTAL_H264_PREFERRED_VIDEO_CODECS: &[u8] =
-    &[SPICE_VIDEO_CODEC_TYPE_H264, SPICE_VIDEO_CODEC_TYPE_MJPEG];
-
-/// The video codec preference to send at link-up, given whether the
-/// `--experimental-h264` opt-in is on.
-fn preferred_video_codecs(experimental_h264: bool) -> &'static [u8] {
-    if experimental_h264 {
-        EXPERIMENTAL_H264_PREFERRED_VIDEO_CODECS
-    } else {
-        PREFERRED_VIDEO_CODECS
+/// MJPEG then H.264 by default. spice-server tries its codecs in this
+/// order, so it streams MJPEG, avoiding its GStreamer H.264, which does
+/// not decode in ryll (shakenfist/ryll#398), while a server that only
+/// encodes H.264 can still stream that. The capability bit, not this
+/// list, is what makes H.264 eligible at all (`link::display_channel_caps`).
+/// `--experimental-h264` puts H.264 first, and `--no-h264` drops it.
+fn preferred_video_codecs(h264: H264Offer) -> &'static [u8] {
+    match h264 {
+        H264Offer::Off => &[SPICE_VIDEO_CODEC_TYPE_MJPEG],
+        H264Offer::AfterMjpeg => &[SPICE_VIDEO_CODEC_TYPE_MJPEG, SPICE_VIDEO_CODEC_TYPE_H264],
+        H264Offer::Preferred => &[SPICE_VIDEO_CODEC_TYPE_H264, SPICE_VIDEO_CODEC_TYPE_MJPEG],
     }
 }
 
@@ -954,11 +937,11 @@ pub struct DisplayChannel {
     /// evaluates the STREAM_REPORT trigger predicate and computes
     /// `last_frame_delay` at send time.
     mm_clock: Arc<MmClock>,
-    /// Whether the user opted in to H.264 from spice-server with
-    /// `--experimental-h264` (ryll#398). Picks the link-up video codec
+    /// How the session offers H.264 (`--no-h264`,
+    /// `--experimental-h264`). Picks the link-up video codec
     /// preference; the matching capability bit was chosen when the
     /// channel linked.
-    experimental_h264: bool,
+    h264: H264Offer,
     /// Bounded ring of the most recent MJPEG decode durations in
     /// microseconds, newest at the back. Capped at `MAX_RECENT_DECODES`
     /// to match the non-stream recent-decode ring. Used by
@@ -1018,7 +1001,7 @@ impl DisplayChannel {
         glz_dictionary: SharedGlzDictionary,
         log_config: LogConfig,
         mm_clock: Arc<MmClock>,
-        experimental_h264: bool,
+        h264: H264Offer,
         image_cache_cap_bytes: usize,
         preferred_compression: u8,
     ) -> Self {
@@ -1070,7 +1053,7 @@ impl DisplayChannel {
             last_send_snapshot_publish: None,
             recently_destroyed_streams: VecDeque::new(),
             mm_clock,
-            experimental_h264,
+            h264,
             mjpeg_recent_durations: VecDeque::new(),
             mjpeg_decode_total_count: 0,
             mjpeg_decode_failed_count: 0,
@@ -1195,7 +1178,7 @@ impl DisplayChannel {
         // `auto-glz` is in docs/configuration.md.
         self.send_preferred_compression(self.preferred_compression)
             .await?;
-        self.send_preferred_video_codec_type(preferred_video_codecs(self.experimental_h264))
+        self.send_preferred_video_codec_type(preferred_video_codecs(self.h264))
             .await?;
         Ok(())
     }
@@ -3389,7 +3372,7 @@ impl DisplayChannel {
         // having to read the pcap.
         snap.pref_compression_sent = self.pref_compression_sent;
         snap.pref_video_codec_type_sent = self.pref_video_codec_type_sent;
-        snap.experimental_h264 = self.experimental_h264;
+        snap.h264_offer = self.h264;
 
         self.opcodes.publish_into(&mut *snap);
     }
@@ -4340,7 +4323,7 @@ mod tests {
             DisplayChannel::new_shared_glz_dictionary(1024 * 1024),
             LogConfig::default(),
             Arc::new(MmClock::new()),
-            false,
+            H264Offer::default(),
             1024 * 1024,
             image_compression::AUTO_GLZ,
         );
@@ -5669,9 +5652,8 @@ mod tests {
                 .await
                 .expect("send link-up preferences");
             assert_eq!(peers.read_sent(7).await, vec![103, 0, 1, 0, 0, 0, wire]);
-            // MJPEG (1) only until shakenfist/ryll#398 is fixed; see
-            // PREFERRED_VIDEO_CODECS.
-            assert_eq!(peers.read_sent(8).await, vec![105, 0, 2, 0, 0, 0, 1, 1]);
+            // MJPEG (1) then H.264 (3); see preferred_video_codecs.
+            assert_eq!(peers.read_sent(9).await, vec![105, 0, 3, 0, 0, 0, 2, 1, 3]);
         }
     }
 
@@ -5697,21 +5679,28 @@ mod tests {
             .expect("send PREFERRED_COMPRESSION");
         assert_eq!(peers.read_sent(7).await, vec![103, 0, 1, 0, 0, 0, 2]);
 
-        // What run_loop sends at link-up: MJPEG (1) only, until
-        // shakenfist/ryll#398 is fixed. See PREFERRED_VIDEO_CODECS.
+        // What run_loop sends at link-up by default: MJPEG (1) then
+        // H.264 (3). See preferred_video_codecs.
         channel
-            .send_preferred_video_codec_type(preferred_video_codecs(false))
+            .send_preferred_video_codec_type(preferred_video_codecs(H264Offer::default()))
             .await
             .expect("send PREFERRED_VIDEO_CODEC_TYPE");
-        assert_eq!(peers.read_sent(8).await, vec![105, 0, 2, 0, 0, 0, 1, 1]);
+        assert_eq!(peers.read_sent(9).await, vec![105, 0, 3, 0, 0, 0, 2, 1, 3]);
 
         // With --experimental-h264: H.264 (3) then MJPEG (1), the
         // multi-codec list keeping its order on the wire.
         channel
-            .send_preferred_video_codec_type(preferred_video_codecs(true))
+            .send_preferred_video_codec_type(preferred_video_codecs(H264Offer::Preferred))
             .await
             .expect("send PREFERRED_VIDEO_CODEC_TYPE");
         assert_eq!(peers.read_sent(9).await, vec![105, 0, 3, 0, 0, 0, 2, 3, 1]);
+
+        // With --no-h264: MJPEG (1) only.
+        channel
+            .send_preferred_video_codec_type(preferred_video_codecs(H264Offer::Off))
+            .await
+            .expect("send PREFERRED_VIDEO_CODEC_TYPE");
+        assert_eq!(peers.read_sent(8).await, vec![105, 0, 2, 0, 0, 0, 1, 1]);
 
         // More codecs than the u8 count can say: the first 255 are sent.
         let codecs: Vec<u8> = (0..300).map(|i| (i % 7) as u8).collect();
@@ -5725,16 +5714,22 @@ mod tests {
     }
 
     #[test]
-    fn preferred_video_codecs_follow_the_experimental_h264_opt_in() {
-        // Default: MJPEG only, until shakenfist/ryll#398 is fixed.
+    fn preferred_video_codecs_follow_the_h264_offer() {
+        // Default: MJPEG first, so spice-server keeps streaming MJPEG
+        // (shakenfist/ryll#398), then H.264.
         assert_eq!(
-            preferred_video_codecs(false),
-            &[SPICE_VIDEO_CODEC_TYPE_MJPEG]
+            preferred_video_codecs(H264Offer::default()),
+            &[SPICE_VIDEO_CODEC_TYPE_MJPEG, SPICE_VIDEO_CODEC_TYPE_H264]
         );
         // --experimental-h264: H.264 first, MJPEG as the fallback.
         assert_eq!(
-            preferred_video_codecs(true),
+            preferred_video_codecs(H264Offer::Preferred),
             &[SPICE_VIDEO_CODEC_TYPE_H264, SPICE_VIDEO_CODEC_TYPE_MJPEG]
+        );
+        // --no-h264: MJPEG only.
+        assert_eq!(
+            preferred_video_codecs(H264Offer::Off),
+            &[SPICE_VIDEO_CODEC_TYPE_MJPEG]
         );
     }
 

@@ -64,6 +64,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 #[cfg(feature = "gui")]
 use eframe::egui;
+use shakenfist_spice_protocol::link::H264Offer;
 use tracing::{info, warn, Level};
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
@@ -241,8 +242,12 @@ fn main() -> Result<()> {
         startup_connection_config.display_target(),
         config.tls_port.is_some()
     );
-    if args.experimental_h264 {
-        warn!("H.264 from spice-server enabled; experimental, see ryll#398");
+    match args.h264_offer() {
+        H264Offer::Preferred => {
+            warn!("Preferring H.264 video; spice-server's does not decode yet, see ryll#398")
+        }
+        H264Offer::Off => info!("Not offering H.264 video (--no-h264)"),
+        H264Offer::AfterMjpeg => {}
     }
 
     // Parse virtual disk configs (validates paths early)
@@ -363,7 +368,7 @@ fn run_headless(
     let paste_char_delay_ms = args.paste_char_delay_ms;
     let cadence = args.cadence;
     let monitors = args.monitors;
-    let experimental_h264 = args.experimental_h264;
+    let h264 = args.h264_offer();
     let image_cache_cap_bytes = mib_to_usize_bytes(args.image_cache_cap_mib);
     let glz_dictionary_cap_bytes = mib_to_usize_bytes(args.glz_dictionary_cap_mib);
     let preferred_compression = args.preferred_compression.wire_value();
@@ -464,7 +469,7 @@ fn run_headless(
             notifications_sink,
             log_config,
             cancel,
-            experimental_h264,
+            h264,
             image_cache_cap_bytes,
             glz_dictionary_cap_bytes,
             preferred_compression,
@@ -532,7 +537,7 @@ fn run_web(
     let udp_bind = crate::config::web_media_bind_policy(args)?;
     let ice_servers = crate::config::web_ice_servers(args)?;
     let monitors = args.monitors;
-    let experimental_h264 = args.experimental_h264;
+    let h264 = args.h264_offer();
     let image_cache_cap_bytes = mib_to_usize_bytes(args.image_cache_cap_mib);
     let glz_dictionary_cap_bytes = mib_to_usize_bytes(args.glz_dictionary_cap_mib);
     let preferred_compression = args.preferred_compression.wire_value();
@@ -772,7 +777,7 @@ fn run_web(
                 connection_cancel,
                 clipboard_for_conn,
                 /* opus_sink */ Some(opus_sink_dyn),
-                experimental_h264,
+                h264,
                 image_cache_cap_bytes,
                 glz_dictionary_cap_bytes,
                 preferred_compression,
@@ -1037,7 +1042,7 @@ fn run_gui(
     let debug_single_thread_runtime = args.debug_single_thread_runtime;
     let auto_snapshot_interval = args.auto_snapshot_interval;
     let auto_snapshot_cap = args.auto_snapshot_cap;
-    let experimental_h264 = args.experimental_h264;
+    let h264 = args.h264_offer();
     let image_cache_cap_bytes = mib_to_usize_bytes(args.image_cache_cap_mib);
     let glz_dictionary_cap_bytes = mib_to_usize_bytes(args.glz_dictionary_cap_mib);
     let preferred_compression = args.preferred_compression.wire_value();
@@ -1078,7 +1083,7 @@ fn run_gui(
                 debug_single_thread_runtime,
                 auto_snapshot_interval,
                 auto_snapshot_cap,
-                experimental_h264,
+                h264,
                 image_cache_cap_bytes,
                 glz_dictionary_cap_bytes,
                 preferred_compression,
