@@ -324,6 +324,12 @@ constructs a boxed `VideoDecoder` stored on `StreamState`. Each `STREAM_DATA`
 packet is dispatched through `stream.video_decoder.decode(packet)` regardless
 of codec — the per-codec logic lives in the impl, not the dispatch.
 
+A decoded frame is painted at the top-left corner of its dest rect (the
+`STREAM_DATA_SIZED` dest, else the stream's) as soon as it arrives. A frame
+larger than the dest, such as an H.264 frame rounded up to whole macroblocks,
+is cropped to the dest's size, keeping its top-left corner. Ryll does not
+scale frames, and ignores the stream's clip and its `TOP_DOWN` flag.
+
 Currently supported codec types:
 - `1` (MJPEG): decoded by `MJpegVideoDecoder`, which wraps the
   platform-optimised JPEG backend and maintains a DHT cache for frames

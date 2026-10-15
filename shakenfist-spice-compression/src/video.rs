@@ -61,8 +61,9 @@ pub const MAX_DECODED_VIDEO_DIMENSION: u32 = crate::limits::MAX_IMAGE_DIMENSION;
 /// Width and height are those reported by the underlying decoder
 /// and may differ slightly from the stream's advertised dimensions
 /// (particularly for H.264, where the codec rounds up to macroblock
-/// boundaries). The display channel clips to the stream's declared
-/// destination rect before painting.
+/// boundaries). The display channel crops each frame to its
+/// destination rect's size, keeping the top-left corner, before
+/// painting.
 pub struct DecodedFrame {
     pub rgba: Vec<u8>,
     pub width: u32,

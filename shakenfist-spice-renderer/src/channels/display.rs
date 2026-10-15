@@ -445,6 +445,59 @@ fn ltrb(rect: &Rect) -> (u32, u32, u32, u32) {
     )
 }
 
+/// Crop a decoded stream frame to its top-left `dest_w` x `dest_h`
+/// corner, or less where the frame is smaller.
+///
+/// `ImageReady` pixels are tightly packed, `width * 4` bytes a row. A
+/// frame wider than its dest (an H.264 frame rounded up to whole
+/// macroblocks, or a server's frame overhanging its dest rect) has rows
+/// longer than that, so each kept row is moved down to the cropped
+/// stride. Narrowing only the reported width would leave the rows at
+/// the frame's stride, and the frame would paint sheared. A frame no
+/// wider than its dest only loses its surplus rows.
+///
+/// A frame whose pixels are shorter than its dimensions claim is a
+/// decode failure. Neither decoder produces one.
+fn crop_frame_to_dest(
+    frame: video::DecodedFrame,
+    dest_w: u32,
+    dest_h: u32,
+) -> Result<video::DecodedFrame, VideoDecoderError> {
+    let video::DecodedFrame {
+        mut rgba,
+        width: frame_w,
+        height: frame_h,
+    } = frame;
+    let src_stride = (frame_w as usize) * 4;
+    if !matches!(src_stride.checked_mul(frame_h as usize), Some(n) if n <= rgba.len()) {
+        return Err(VideoDecoderError::Decode(format!(
+            "{}x{} frame carries only {} bytes of pixels",
+            frame_w,
+            frame_h,
+            rgba.len()
+        )));
+    }
+
+    let width = frame_w.min(dest_w);
+    let height = frame_h.min(dest_h);
+    let row_bytes = (width as usize) * 4;
+    if width < frame_w {
+        // Row y moves from y * src_stride down to y * row_bytes, which
+        // is never later, so a forward pass never overwrites a row it
+        // has yet to move.
+        for y in 1..height as usize {
+            let src = y * src_stride;
+            rgba.copy_within(src..src + row_bytes, y * row_bytes);
+        }
+    }
+    rgba.truncate(row_bytes * height as usize);
+    Ok(video::DecodedFrame {
+        rgba,
+        width,
+        height,
+    })
+}
+
 /// A draw's clip as the rectangle list its event carries: empty for an
 /// unclipped draw, otherwise the clip's union with `dest` as disjoint
 /// rectangles inside it (see [`clip_area`]). `None` means the draw
@@ -1889,6 +1942,14 @@ impl DisplayChannel {
                     let decode_result = stream.video_decoder.decode(jpeg_data);
                     let decode_duration_us =
                         u32::try_from(decode_start.elapsed().as_micros()).unwrap_or(u32::MAX);
+                    // Crop to the dest before the counters below, so a
+                    // frame too short for its own dimensions counts as
+                    // the decode failure it is.
+                    let decode_result = decode_result.and_then(|frame| {
+                        frame
+                            .map(|frame| crop_frame_to_dest(frame, w, h))
+                            .transpose()
+                    });
 
                     // Aggregate decode duration tracking per codec. Gate on
                     // codec_type so each ring receives only its own samples —
@@ -1922,7 +1983,7 @@ impl DisplayChannel {
                     match decode_result {
                         Ok(Some(frame)) => {
                             debug!(
-                                "display: stream {} {} frame {}x{} → ({},{})",
+                                "display: stream {} {} frame, cropped to {}x{} → ({},{})",
                                 stream_id,
                                 stream.video_decoder.name(),
                                 frame.width,
@@ -1940,8 +2001,8 @@ impl DisplayChannel {
                                     surface_id,
                                     left,
                                     top,
-                                    width: frame.width.min(w),
-                                    height: frame.height.min(h),
+                                    width: frame.width,
+                                    height: frame.height,
                                     pixels: frame.rgba,
                                     image_id: 0,
                                     produced_at_secs: now_secs,
@@ -3466,6 +3527,7 @@ mod tests {
     use shakenfist_spice_protocol::constants::{clip_type, image_compression};
     use shakenfist_spice_protocol::messages::{
         BitmapPalette, BitmapPayload, Clip, DrawCopyBuilder, ImagePayload, SpiceImage,
+        StreamDataHeader, StreamDataSized,
     };
 
     // -------------------------------------------------------------------------
@@ -4598,6 +4660,134 @@ mod tests {
             .expect("a short STREAM_DESTROY is ignored");
         assert!(channel.streams.contains_key(&7));
         assert_eq!(channel.streams_destroyed_total, 0);
+    }
+
+    // A frame wider than its dest used to be painted with its width
+    // narrowed but its rows left at the frame's stride, so each row
+    // started further into the frame than the last and the frame
+    // painted sheared. This drives a real frame through the channel and
+    // the surface mirror every mode paints with.
+    #[tokio::test]
+    async fn stream_frame_larger_than_its_dest_paints_its_top_left_corner() {
+        use crate::surface_mirror::SurfaceMirror;
+        use image::codecs::jpeg::JpegEncoder;
+
+        const SURFACE: u32 = 32;
+        const FRAME_W: u32 = 24;
+        const FRAME_H: u32 = 16;
+        let (left, top, dest_w, dest_h) = (4u32, 2u32, 16u32, 8u32);
+
+        // Each pixel differs from its neighbours, so a row read from
+        // the wrong offset shows.
+        let rgb: Vec<u8> = (0..FRAME_H)
+            .flat_map(|y| (0..FRAME_W).flat_map(move |x| [(x * 10) as u8, (y * 15) as u8, 128]))
+            .collect();
+        let mut jpeg = Vec::new();
+        JpegEncoder::new_with_quality(&mut jpeg, 90)
+            .encode(&rgb, FRAME_W, FRAME_H, image::ExtendedColorType::Rgb8)
+            .expect("encode the test frame");
+
+        let (mut channel, mut peers) = test_display_channel().await;
+        // JPEG is lossy, so the expected pixels are a separate decode.
+        let decoded = video::for_stream(SPICE_VIDEO_CODEC_TYPE_MJPEG, channel.jpeg_decoder.clone())
+            .expect("an MJPEG decoder")
+            .decode(&jpeg)
+            .expect("the test frame decodes")
+            .expect("MJPEG yields a frame per packet");
+        assert_eq!((decoded.width, decoded.height), (FRAME_W, FRAME_H));
+
+        channel
+            .handle_message(
+                display_server::STREAM_CREATE,
+                &stream_create_payload(7, SPICE_VIDEO_CODEC_TYPE_MJPEG),
+            )
+            .await
+            .expect("stream_create must not error");
+        let mut frame = Vec::new();
+        StreamDataSized {
+            base: StreamDataHeader {
+                id: 7,
+                multi_media_time: 0,
+            },
+            width: FRAME_W,
+            height: FRAME_H,
+            dest: Rect {
+                top: top as i32,
+                left: left as i32,
+                bottom: (top + dest_h) as i32,
+                right: (left + dest_w) as i32,
+            },
+            data: jpeg,
+        }
+        .write(&mut frame);
+        channel
+            .handle_message(display_server::STREAM_DATA_SIZED, &frame)
+            .await
+            .expect("stream_data_sized must not error");
+
+        let mut mirror = SurfaceMirror::new();
+        mirror.apply_event(&ChannelEvent::SurfaceCreated {
+            display_channel_id: 0,
+            surface_id: 0,
+            width: SURFACE,
+            height: SURFACE,
+        });
+        let mut painted = 0;
+        while let Ok(event) = peers.events.try_recv() {
+            if matches!(event, ChannelEvent::ImageReady { .. }) {
+                mirror.apply_event(&event);
+                painted += 1;
+            }
+        }
+        assert_eq!(painted, 1, "the frame is painted once");
+
+        let surface = mirror.primary_surface().expect("the surface exists");
+        let pixel = |pixels: &[u8], stride: u32, x: u32, y: u32| {
+            let i = ((y * stride + x) * 4) as usize;
+            pixels[i..i + 4].to_vec()
+        };
+        for y in 0..SURFACE {
+            for x in 0..SURFACE {
+                let in_dest =
+                    (left..left + dest_w).contains(&x) && (top..top + dest_h).contains(&y);
+                let expected = if in_dest {
+                    pixel(&decoded.rgba, FRAME_W, x - left, y - top)
+                } else {
+                    vec![0, 0, 0, 255]
+                };
+                assert_eq!(
+                    pixel(surface.pixels(), SURFACE, x, y),
+                    expected,
+                    "surface pixel ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_frame_within_its_dest_is_not_cropped() {
+        let rgba: Vec<u8> = (0..2 * 3 * 4).map(|b| b as u8).collect();
+        let frame = video::DecodedFrame {
+            rgba: rgba.clone(),
+            width: 2,
+            height: 3,
+        };
+        let cropped = crop_frame_to_dest(frame, 4, 3).expect("a whole frame crops");
+        assert_eq!((cropped.width, cropped.height), (2, 3));
+        assert_eq!(cropped.rgba, rgba);
+    }
+
+    #[test]
+    fn a_frame_short_of_its_dimensions_is_a_decode_failure() {
+        let frame = video::DecodedFrame {
+            rgba: vec![0; 2 * 2 * 4 - 1],
+            width: 2,
+            height: 2,
+        };
+        assert!(matches!(
+            crop_frame_to_dest(frame, 1, 1),
+            Err(VideoDecoderError::Decode(_))
+        ));
     }
 
     #[tokio::test]
