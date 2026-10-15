@@ -97,7 +97,7 @@ opus = "0.4"
 # Renderer crate: provides EncodedFrame, EncoderControl, EncoderTask,
 # H264Encoder, and SyntheticFrameSource used for the media pumps
 # and the integration test.
-shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.1.7", default-features = false }
+shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.2.0", default-features = false }
 
 [dev-dependencies]
 # Self dev-dependency purely to turn on `test-support` for this
