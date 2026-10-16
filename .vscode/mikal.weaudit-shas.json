@@ -620,6 +620,18 @@
     "tools/web-soak.sh": {
       "sha": "f320aa85e217ad9610042bd7c2ef62a03250cc22",
       "date": "2026-10-16"
+    },
+    "docs/control-socket-protocol.md": {
+      "sha": "296f86bd5a9f66bb789d1a1dbfa544d1ff64398e",
+      "date": "2026-10-17"
+    },
+    "docs/multi-mode-parity.md": {
+      "sha": "d0bfd672705478b9b825b50113f309d0fefe527f",
+      "date": "2026-10-17"
+    },
+    "docs/web-mode-internals.md": {
+      "sha": "fa062fb0e86fb7e3746b4a545461f7090fa80462",
+      "date": "2026-10-17"
     }
   }
 }
