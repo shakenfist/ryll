@@ -595,6 +595,12 @@ Use a bug report when you see:
    - **Cursor** — captures the cursor cache and position.
    - **Connection** — captures session info and main channel traffic.
    - **USB** — captures usbredir channel and device state.
+   - **Audio** — captures the playback channel and output device.
+   - **ryll itself** — for a problem in ryll's own window rather
+     than the guest's (a panel or menu that opened by itself, say):
+     captures a screenshot of the whole window, which panels, menus
+     and dialogs were open and when they opened, and recent
+     keyboard and mouse events.
 4. Optionally enter a brief **description** of what you observed.
 5. Click **Capture**.
 
@@ -617,7 +623,8 @@ ryll-bugreport-YYYY-MM-DDTHH-MM-SSZ.zip
 │                           (dialog-open), submitted uptime
 │                           and triggered uptime
 ├── session.json          — FPS, bandwidth, surfaces, uptime,
-│                           keyboard state and recent key events
+│                           keyboard state and recent key events,
+│                           ryll's open panels, menus and dialogs
 ├── channel-state.json    — snapshot of the affected channel
 ├── traffic.pcap          — recent protocol traffic (pcap format)
 ├── screenshot.png        — full display surface captured at the
@@ -626,6 +633,9 @@ ryll-bugreport-YYYY-MM-DDTHH-MM-SSZ.zip
 ├── screenshot-region.png — crop of the submit-time surface at
 │                           the selected region (Display reports
 │                           only, when a region was drawn)
+├── window-screenshot.png — ryll's whole window, panels and menus
+│                           included, as it was when the report
+│                           started ("ryll itself" reports only)
 └── runtime-metrics.json  — process and per-thread CPU / RSS
 ```
 

@@ -751,6 +751,11 @@ pub struct AppSnapshot {
     /// key left held down. `None` where no GUI maintains the snapshot,
     /// as for `audio_volume_percent`.
     pub keyboard: Option<KeyboardSnapshot>,
+    /// What ryll's own interface was showing: its open panels, menus
+    /// and dialogs, egui's claim on input, and their recent openings
+    /// and closings. `None` where no GUI maintains the snapshot, as for
+    /// `audio_volume_percent`.
+    pub ui: Option<UiSnapshot>,
 }
 
 impl Default for AppSnapshot {
@@ -780,8 +785,66 @@ impl Default for AppSnapshot {
             audio_volume_percent: None,
             audio_muted: None,
             keyboard: None,
+            ui: None,
         }
     }
+}
+
+/// What ryll's own interface was showing, for a report about ryll
+/// rather than the guest (#562).
+///
+/// The guest-surface screenshot can't show a panel or menu that ryll
+/// draws over it, and nothing else in a report says one was open. This
+/// records which were open and since when, and each opening and closing,
+/// on the session clock the key log and the pcap use, so a panel that
+/// opened unasked can be lined up with the key event before it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct UiSnapshot {
+    /// Times anything below changed since the session started.
+    pub updates_seen: u64,
+    /// The interface as of its latest change.
+    pub now: UiState,
+    /// The interface in the frame a bug report was last started (F12 or
+    /// the ☰ menu's Report), before its dialog was drawn. `now` shows the
+    /// dialog itself; this shows what the report is about.
+    pub at_report_trigger: Option<UiState>,
+    /// The most recent openings and closings, oldest first.
+    pub recent_changes: Vec<UiChange>,
+}
+
+/// The interface in one frame.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct UiState {
+    /// Seconds since session start: when the interface last changed,
+    /// for `now`, or when the report was started, for
+    /// `at_report_trigger`.
+    pub at_secs: f64,
+    /// The panels, menus and dialogs open, in a fixed order.
+    pub open: Vec<OpenUiElement>,
+    /// egui has a focused widget, so a key press goes to egui first. ryll
+    /// drops egui's focus every frame unless the bug report dialog is
+    /// open (#535), so this should be false otherwise.
+    pub egui_wants_keyboard: bool,
+    /// egui claims the pointer: over a window or panel, or dragging.
+    pub egui_wants_pointer: bool,
+    /// egui's id for the focused widget, if any.
+    pub focused_widget: Option<String>,
+}
+
+/// One open panel, menu or dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct OpenUiElement {
+    pub element: &'static str,
+    /// Seconds since session start when it was first seen open.
+    pub opened_at_secs: f64,
+}
+
+/// A panel, menu or dialog opening or closing.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct UiChange {
+    pub at_secs: f64,
+    pub element: &'static str,
+    pub open: bool,
 }
 
 /// The GUI's keyboard state, for diagnosing a key the guest was told is
@@ -1113,6 +1176,14 @@ pub enum BugReportType {
         notification_id: u64,
         snapshot_state: NotificationSnapshotState,
     },
+    /// A problem in ryll's own interface rather than the guest's: a
+    /// panel, menu or dialog that opened, closed or misbehaved. The
+    /// report carries a screenshot of the whole window
+    /// (`window-screenshot.png`), and the inputs channel's traffic and
+    /// state, because a UI that misbehaves usually does so after a key
+    /// or click. `session.json`'s `ui` and `keyboard` sections, which
+    /// every GUI report has, say what was open and what was typed.
+    Ui,
     /// Auto-generated periodically by `--auto-snapshot-interval`.
     /// Captures full session state across all channels so a single zip
     /// carries everything needed to diagnose any channel's behaviour at
@@ -1136,6 +1207,7 @@ impl BugReportType {
             BugReportType::Connection => "main",
             BugReportType::Usb => "usbredir",
             BugReportType::Audio => "playback",
+            BugReportType::Ui => "inputs",
             BugReportType::Pedantic { gap_key } => match gap_key.split(':').next() {
                 Some("display") => "display",
                 Some("cursor") => "cursor",
@@ -1407,6 +1479,10 @@ pub struct BugReport {
     /// moments and the trigger surface may have been a
     /// different size.
     screenshot_region_png: Option<Vec<u8>>,
+    /// PNG of ryll's whole window, panels and menus included, as the
+    /// frame the report was started in drew it. Set by the GUI for
+    /// `BugReportType::Ui` reports with `set_window_screenshot`.
+    window_screenshot_png: Option<Vec<u8>>,
     /// Runtime process and per-thread CPU metrics.
     runtime_metrics: RuntimeMetrics,
     /// Pretty-printed notifications.json content (Vec<NotificationEntry>).
@@ -1610,9 +1686,16 @@ impl BugReport {
             pcap_bytes,
             screenshot_png,
             screenshot_region_png,
+            window_screenshot_png: None,
             runtime_metrics,
             notifications_json,
         })
+    }
+
+    /// Add a PNG of ryll's whole window, written as
+    /// `window-screenshot.png`.
+    pub(crate) fn set_window_screenshot(&mut self, png: Vec<u8>) {
+        self.window_screenshot_png = Some(png);
     }
 
     /// Write the bug report as a zip file to `dir`.
@@ -1652,6 +1735,11 @@ impl BugReport {
 
         if let Some(ref png) = self.screenshot_region_png {
             zip.start_file("screenshot-region.png", opts)?;
+            zip.write_all(png)?;
+        }
+
+        if let Some(ref png) = self.window_screenshot_png {
+            zip.start_file("window-screenshot.png", opts)?;
             zip.write_all(png)?;
         }
 
@@ -1711,6 +1799,11 @@ impl BugReport {
 
         if let Some(ref png) = self.screenshot_region_png {
             zip.start_file("screenshot-region.png", opts)?;
+            zip.write_all(png)?;
+        }
+
+        if let Some(ref png) = self.window_screenshot_png {
+            zip.start_file("window-screenshot.png", opts)?;
             zip.write_all(png)?;
         }
 
@@ -3570,12 +3663,120 @@ mod tests {
     }
 
     #[test]
+    fn test_bug_report_assemble_ui() {
+        use std::io::Read;
+
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        let open = UiState {
+            at_secs: 41.5,
+            open: vec![OpenUiElement {
+                element: "notifications_panel",
+                opened_at_secs: 40.25,
+            }],
+            ..Default::default()
+        };
+        let app_snap = Mutex::new(AppSnapshot {
+            ui: Some(UiSnapshot {
+                updates_seen: 3,
+                now: open.clone(),
+                at_report_trigger: Some(open),
+                recent_changes: vec![UiChange {
+                    at_secs: 40.25,
+                    element: "notifications_panel",
+                    open: true,
+                }],
+            }),
+            ..Default::default()
+        });
+        let notifications = Mutex::new(NotificationStore::new());
+        let guest_png = encode_png(&[0, 0, 0, 255], 1, 1).unwrap();
+
+        let mut report = BugReport::assemble(
+            BugReportType::Ui,
+            "notifications panel opened unasked".to_string(),
+            None,
+            "10.0.0.1:5900",
+            &traffic,
+            &snapshots,
+            &app_snap,
+            &notifications,
+            None,
+            stub_metrics(),
+            None,
+            Some(guest_png),
+        )
+        .unwrap();
+        let window_png = encode_png(&[255, 255, 255, 255], 1, 1).unwrap();
+        report.set_window_screenshot(window_png.clone());
+
+        let tmp = std::env::temp_dir().join("ryll-test-bugreport-ui");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let path = report.write_zip(&tmp).unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().unwrap().into_owned())
+            .collect();
+        // The whole window, not the guest surface.
+        assert!(names.contains(&"window-screenshot.png".to_string()));
+        assert!(!names.contains(&"screenshot.png".to_string()));
+        let mut written = Vec::new();
+        archive
+            .by_name("window-screenshot.png")
+            .unwrap()
+            .read_to_end(&mut written)
+            .unwrap();
+        assert_eq!(written, window_png);
+
+        let mut metadata = String::new();
+        archive
+            .by_name("metadata.json")
+            .unwrap()
+            .read_to_string(&mut metadata)
+            .unwrap();
+        let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(metadata["report_type"], json!("Ui"));
+        assert_eq!(metadata["channel"], json!("inputs"));
+
+        let mut session = String::new();
+        archive
+            .by_name("session.json")
+            .unwrap()
+            .read_to_string(&mut session)
+            .unwrap();
+        let session: serde_json::Value = serde_json::from_str(&session).unwrap();
+        let ui = &session["ui"];
+        assert_eq!(ui["updates_seen"], json!(3));
+        assert_eq!(
+            ui["at_report_trigger"]["open"],
+            json!([{"element": "notifications_panel", "opened_at_secs": 40.25}])
+        );
+        assert_eq!(ui["now"]["egui_wants_keyboard"], json!(false));
+        assert!(ui["now"]["focused_widget"].is_null());
+        assert_eq!(
+            ui["recent_changes"],
+            json!([{"at_secs": 40.25, "element": "notifications_panel", "open": true}])
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn ui_snapshot_is_null_where_no_gui_keeps_it() {
+        let empty = serde_json::to_value(AppSnapshot::default()).unwrap();
+        assert!(empty["ui"].is_null());
+    }
+
+    #[test]
     fn test_bug_report_type_channel_name() {
         assert_eq!(BugReportType::Display.channel_name(), "display");
         assert_eq!(BugReportType::Input.channel_name(), "inputs");
         assert_eq!(BugReportType::Cursor.channel_name(), "cursor");
         assert_eq!(BugReportType::Connection.channel_name(), "main");
         assert_eq!(BugReportType::Audio.channel_name(), "playback");
+        assert_eq!(BugReportType::Ui.channel_name(), "inputs");
         assert_eq!(
             BugReportType::Pedantic {
                 gap_key: "playback:unsupported_mode".to_string()
