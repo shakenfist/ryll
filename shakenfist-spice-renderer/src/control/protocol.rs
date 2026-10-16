@@ -333,6 +333,10 @@ pub struct StatsResult {
 /// since the session connected unless a field says otherwise.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DisplayStats {
+    /// The display channel these counters are from. With several
+    /// display channels they are whichever published last, so a
+    /// client compares this between polls before taking differences.
+    pub channel_id: u8,
     /// Bytes received on the display channel.
     pub bytes_in: u64,
     /// Messages received on the display channel.
@@ -448,8 +452,9 @@ impl From<&DisplaySnapshot> for DisplayStats {
             }
         }
         DisplayStats {
+            channel_id: snap.channel_id,
             bytes_in: snap.bytes_in,
-            messages_received: u64::from(snap.message_count),
+            messages_received: snap.message_count,
             marks_received: snap
                 .messages_recv_by_opcode
                 .get(&display_server::MARK)
