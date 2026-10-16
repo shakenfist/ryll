@@ -473,8 +473,9 @@ impl HeldKeys {
 /// the key itself: a QEMU guest's kernel or X server does, but a server
 /// that injects keys through XTest, such as andris, gets no repeats
 /// unless the client sends them (#561). Releases are always forwarded,
-/// even for a key not recorded as held. Losing window focus releases every held key,
-/// because the matching key-ups will be delivered to another window.
+/// even for a key not recorded as held. Losing window focus releases
+/// every held key, because the matching key-ups will be delivered to
+/// another window.
 /// Keys in [`HostShortcut`] are ryll's own and are never forwarded.
 ///
 /// On macOS a key pressed while Cmd is held is a host shortcut (Cmd+Q,
@@ -1391,6 +1392,27 @@ mod tests {
             &mut held,
         );
         assert_eq!(wire(events), vec![(true, 0x1E), (false, 0x9E)]);
+    }
+
+    #[test]
+    fn repeat_is_forwarded_again_once_cmd_is_released() {
+        // A is held, Cmd goes down and comes back up while A stays
+        // held. The repeat under Cmd is withheld; the next one, with
+        // Cmd up, is a plain auto-repeat again and reaches the guest.
+        let mut held = HeldKeys::default();
+        let events = translate_key_events(
+            &[
+                key(egui::Key::A, egui::Key::A, true, false),
+                cmd_key(egui::Key::A, true),
+                key(egui::Key::A, egui::Key::A, true, true),
+                key(egui::Key::A, egui::Key::A, false, false),
+            ],
+            &mut held,
+        );
+        assert_eq!(
+            wire(events),
+            vec![(true, 0x1E), (true, 0x1E), (false, 0x9E)]
+        );
     }
 
     #[test]
