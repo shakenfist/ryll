@@ -564,10 +564,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/session_state.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-compression/src/limits.rs",
       "author": "mikal"
     },
