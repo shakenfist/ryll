@@ -65,6 +65,10 @@
       "sha": "c42f54754a55943a43daa3ddad2c9188db547984",
       "date": "2026-09-29"
     },
+    ".github/workflows/prune-reviews.yml": {
+      "sha": "91ff1783e6589e198ce5d14aab473112761b7ce2",
+      "date": "2026-10-16"
+    },
     ".github/workflows/release.yml": {
       "sha": "a42a5b84650dcd920936a3ddb045cc50359dd35f",
       "date": "2026-10-14"
@@ -85,9 +89,25 @@
       "sha": "4f075c1b65ff62c072d9ed7a09fc5a20be23eb8a",
       "date": "2026-10-05"
     },
+    "AGENTS.md": {
+      "sha": "c765748cb7527b7a6003ead9c00399313b194b94",
+      "date": "2026-10-16"
+    },
+    "ARCHITECTURE.md": {
+      "sha": "223895f1003e1a88f1a5b8b430a752cd575ac0b4",
+      "date": "2026-10-16"
+    },
     "MERGE-TEMPLATE.md": {
       "sha": "da51f6b87f9a89d7ab7cdd19cac6a741bc04cd43",
       "date": "2026-10-05"
+    },
+    "PLAN-TEMPLATE.md": {
+      "sha": "7d48f5894eeebbb18c29941f099463014b933994",
+      "date": "2026-10-16"
+    },
+    "PUSH-AUDIT.md": {
+      "sha": "eb4fd3752f9d19ed6e9dbebf6ada1fc85584626e",
+      "date": "2026-10-16"
     },
     "README.md": {
       "sha": "9e3a0c73e3dc38c1679b9fa6a34ddadf65618d34",
@@ -96,6 +116,10 @@
     "REVIEW-STATE-TEMPLATE.md": {
       "sha": "6a462431712cca819d2b86ac012a8b3d9d10ae1a",
       "date": "2026-07-29"
+    },
+    "STYLEGUIDE.md": {
+      "sha": "1075059b7bc465200b8d2279d8cbc7b5c0580a2f",
+      "date": "2026-10-16"
     },
     "clippy.toml": {
       "sha": "154626ef4e81f6aa3e7c271ef613fe017ad658f9",
@@ -429,9 +453,21 @@
       "sha": "7e3d345aa050de2ee9bde9c0a38cdab439d576f2",
       "date": "2026-09-23"
     },
+    "tools/build-ryll-wheel-in-container.sh": {
+      "sha": "b78e8411f92eb7d8f6934d96b9cff12e6401002b",
+      "date": "2026-10-16"
+    },
+    "tools/build-ryll-wheel.sh": {
+      "sha": "8dffe3df5a99e0a3b818bde3bcd13b92d3a5af2b",
+      "date": "2026-10-16"
+    },
     "tools/check-bidi.sh": {
       "sha": "ea7d6b5bc018c5be3c40f270ea6c5b222631cea7",
       "date": "2026-07-26"
+    },
+    "tools/ci-prune-reviews.sh": {
+      "sha": "b4ce5b64c79afb01e07b98f43457fa5ff842e896",
+      "date": "2026-10-16"
     },
     "tools/fuzz-targets.sh": {
       "sha": "b6cba20bf72f5b01a12e52b029aaadfee2dead8d",
@@ -445,13 +481,33 @@
       "sha": "2536d38324b70eaf5f81e39e6f8b730ed31cb030",
       "date": "2026-07-26"
     },
+    "tools/homebrew-formula.rb": {
+      "sha": "3d2b8e16f7c76d569274ed9f75041654847982c7",
+      "date": "2026-10-16"
+    },
     "tools/make-cloud-seed.sh": {
       "sha": "00f50deddb05a9189609a78a69e948aa8efb2d7f",
       "date": "2026-08-18"
     },
+    "tools/measure-idle-cpu.sh": {
+      "sha": "418f251cc97af7925e22563d4ec441aa7cad6c49",
+      "date": "2026-10-16"
+    },
     "tools/mermaid-lint.sh": {
       "sha": "22f14bf915f76875950bb5589212b55ab0a91db1",
       "date": "2026-10-05"
+    },
+    "tools/package-check-verify.sh": {
+      "sha": "9babf75f500e8b456c40531716b4e0d0bacef690",
+      "date": "2026-10-16"
+    },
+    "tools/pcap-inspect.py": {
+      "sha": "2771fe57b2233883b2d7ae1039d90ecfa718dab5",
+      "date": "2026-10-16"
+    },
+    "tools/propose-release.sh": {
+      "sha": "dde857639228ffe6d88b9a2da6db8e77d6c74c71",
+      "date": "2026-10-16"
     },
     "tools/proxmox-smoke.py": {
       "sha": "63a243a0d330982e367945942ef188ef58b4d4e3",
@@ -469,6 +525,10 @@
       "sha": "3b60592ec658db548536a3c9d5989d29c457adc1",
       "date": "2026-09-23"
     },
+    "tools/review-tracking.sh": {
+      "sha": "db83f953a7b90229111cf75bd24504a19a032c2f",
+      "date": "2026-10-16"
+    },
     "tools/run-shellcheck.sh": {
       "sha": "a070aa57d15755cd3543756bad447c58da0253d7",
       "date": "2026-07-26"
@@ -480,6 +540,10 @@
     "tools/start-desktop-qemu.sh": {
       "sha": "6d18104306851bcd1b1165fa47fa694da06af9f2",
       "date": "2026-09-23"
+    },
+    "tools/tag-release.sh": {
+      "sha": "d3545b318c6ab95acb661f2d9086ec2ee25c4983",
+      "date": "2026-10-16"
     },
     "tools/test-fuzz-targets.sh": {
       "sha": "f78dea5e65a3012838a13930a5f781bfb4b8cf68",
@@ -512,6 +576,10 @@
     "tools/web-smoke.sh": {
       "sha": "2140f1e6ff60e1f17205e83c3ed5681843dea5c4",
       "date": "2026-07-26"
+    },
+    "tools/web-soak.sh": {
+      "sha": "f320aa85e217ad9610042bd7c2ef62a03250cc22",
+      "date": "2026-10-16"
     }
   }
 }
