@@ -91,6 +91,43 @@ fn default_slices() -> u32 {
     DEFAULT_SLICES.min(u32::try_from(cores).unwrap_or(u32::MAX))
 }
 
+/// What the frames show, which decides the usage type openh264 is
+/// tuned for, and so how it holds the target bitrate.
+///
+/// The two behave very differently in [`H264RateControl::Bitrate`]
+/// mode, and the difference is easy to rediscover the hard way.
+/// For screen content, openh264 0.9.8 encodes P-frames at the bottom
+/// of the QP range whatever the target, and holds the target only by
+/// skipping frames: their size follows `qp_min` (about 19, 17, 4.4
+/// and 1.2 KB at a minimum of 12, 24, 30 and 36 for a grainy, panned
+/// 320x256 picture at 1 Mbit/s), not the bitrate. On moving pictures
+/// that means a few frames a second at the target, or, with
+/// skipping off, three and a half times the target at the full rate.
+/// For video it moves QP to fit each frame to its share of the
+/// target. Measured with that picture at 25 fps, one slice, QP 12 to
+/// 51:
+///
+/// | Content, skipping | 256 kbit/s target   | 1 Mbit/s target     |
+/// |-------------------|---------------------|---------------------|
+/// | Screen, on        | 6.4 fps, 275 kbit/s | 6.8 fps, 1059 kbit/s |
+/// | Screen, off       | 25 fps, 964 kbit/s  | 25 fps, 3520 kbit/s  |
+/// | Video, on         | 24.4 fps, 258 kbit/s | 24.4 fps, 998 kbit/s |
+/// | Video, off        | 25 fps, 260 kbit/s  | 25 fps, 1008 kbit/s  |
+///
+/// Video also encodes faster: 0.50 against 0.81 ms a frame without
+/// skipping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum H264Content {
+    /// A desktop: text, flat areas and sharp edges, which change in
+    /// patches and often not at all (`ScreenContentRealTime`). What
+    /// ryll's own WebRTC and capture output encode.
+    Screen,
+    /// A moving picture: an area a server already knows to be
+    /// photographic and changing every frame, such as a video stream
+    /// (`CameraVideoRealTime`).
+    Video,
+}
+
 /// How openh264 spends the target bitrate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum H264RateControl {
@@ -117,6 +154,8 @@ pub struct H264Config {
     pub bitrate_bps: u32,
     /// The frame rate the bitrate is budgeted over, in frames a second.
     pub max_frame_rate: f32,
+    /// What the frames show; see [`H264Content`].
+    pub content: H264Content,
     pub rate_control: H264RateControl,
     /// The quantiser range, from 0 (best) to 51 (smallest).
     ///
@@ -125,7 +164,9 @@ pub struct H264Config {
     /// narrows it to 26 to 35, which makes high targets unreachable
     /// (every target above about 2.4 Mbit/s at 640x360 gives the same
     /// output) and low ones too. The default here is 12 to 51; any
-    /// minimum from 1 to 12 behaves as 12.
+    /// minimum from 1 to 12 behaves as 12. For screen content in
+    /// bitrate mode, P-frames are encoded at this minimum, so it sets
+    /// their size; see [`H264Content`].
     pub qp_min: u8,
     pub qp_max: u8,
     /// Slices per frame, each encoded on its own thread. 1 is a
@@ -140,17 +181,18 @@ pub struct H264Config {
 }
 
 impl H264Config {
-    /// Defaults for `width` x `height` frames at up to `fps` frames a
-    /// second: a [`target_bitrate_bps`] target, budgeted in
-    /// [`H264RateControl::Bitrate`] mode, QP 12 to 51, four slices or
-    /// one per core if fewer, frame skipping on, and an IDR only at
-    /// the start.
+    /// Defaults for `width` x `height` frames of screen content at up
+    /// to `fps` frames a second: a [`target_bitrate_bps`] target,
+    /// budgeted in [`H264RateControl::Bitrate`] mode, QP 12 to 51,
+    /// four slices or one per core if fewer, frame skipping on, and an
+    /// IDR only at the start.
     pub fn new(width: u32, height: u32, fps: u32) -> Self {
         Self {
             width,
             height,
             bitrate_bps: target_bitrate_bps(width, height, fps),
             max_frame_rate: fps as f32,
+            content: H264Content::Screen,
             rate_control: H264RateControl::Bitrate,
             qp_min: MIN_SCREEN_QP,
             qp_max: 51,
@@ -308,13 +350,18 @@ impl H264Encoder {
             H264RateControl::Bitrate => RateControlMode::Bitrate,
             H264RateControl::Quality => RateControlMode::Quality,
         };
+        // Screen content is tuned for the sharp edges and large flat
+        // regions of a desktop, video for camera noise and motion; see
+        // H264Content for how differently they hold a bitrate.
+        let usage = match config.content {
+            H264Content::Screen => UsageType::ScreenContentRealTime,
+            H264Content::Video => UsageType::CameraVideoRealTime,
+        };
         let openh264_config = EncoderConfig::new()
             .bitrate(BitRate::from_bps(config.bitrate_bps))
             .max_frame_rate(FrameRate::from_hz(config.max_frame_rate))
             .rate_control_mode(rate_control)
-            // Tuned for the sharp edges and large flat regions of a
-            // desktop, not camera noise.
-            .usage_type(UsageType::ScreenContentRealTime)
+            .usage_type(usage)
             // WebRTC negotiates a baseline profile, which openh264
             // also picks by default; say so rather than rely on it.
             .profile(Profile::Baseline)
@@ -958,6 +1005,84 @@ mod tests {
             }
         }
         assert!(skipped > 0, "64 kbit/s of noise never skipped a frame");
+    }
+
+    /// Frame `frame` of a grainy photograph panning along a smooth
+    /// path, as andris's end-to-end test plays one: smooth gradients
+    /// and a fixed texture, moved a pixel or two a frame, with fresh
+    /// grain in the low three bits of every channel. Tightly packed
+    /// BGRX.
+    fn panned_frame(w: u32, h: u32, frame: u32, rng: &mut XorShift) -> Vec<u8> {
+        let t = f64::from(frame) / 25.0;
+        let dx = (32.0 + 31.0 * (t * 0.9).sin()) as u32;
+        let dy = (32.0 + 31.0 * (t * 0.7).cos()) as u32;
+        let mut v = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let (px, py) = (x + dx, y + dy);
+                let (sx, sy) = (f64::from(px), f64::from(py));
+                let r = 120.0 + 70.0 * (sx / 37.0 + sy / 91.0).sin() + 30.0 * (sy / 13.0).sin();
+                let g = 110.0 + 60.0 * (sy / 29.0 - sx / 71.0).sin() + 25.0 * (sx / 17.0).cos();
+                let b = 130.0 + 80.0 * ((sx + sy) / 53.0).cos();
+                let texture = f64::from(((px * 7919 + py * 104_729) ^ (px * py)) % 23) - 11.0;
+                let grain = rng.next();
+                let i = ((y * w + x) * 4) as usize;
+                for (c, (base, shift)) in [(b, 0), (g, 8), (r, 16)].into_iter().enumerate() {
+                    v[i + c] =
+                        (base + texture).clamp(0.0, 255.0) as u8 ^ ((grain >> shift) & 7) as u8;
+                }
+            }
+        }
+        v
+    }
+
+    /// Encode `frames` of [`panned_frame`] at 25 fps, at `bps` with
+    /// skipping on, as `content`. Returns how many frames were sent,
+    /// and the bitrate they came to, in kbit/s.
+    fn play(content: H264Content, bps: u32, frames: u32) -> (u32, f64) {
+        let (w, h) = (320, 256);
+        let config = H264Config {
+            content,
+            bitrate_bps: bps,
+            slices: 1,
+            ..H264Config::new(w, h, 25)
+        };
+        let mut enc = H264Encoder::new(config).expect("init");
+        let mut rng = XorShift(17);
+        let (mut sent, mut bytes) = (0, 0);
+        for f in 0..frames {
+            let data = panned_frame(w, h, f, &mut rng);
+            if let Some(frame) = enc.encode(&bgrx(&data, w, h)).expect("encode") {
+                sent += 1;
+                bytes += frame.data.len();
+            }
+        }
+        let seconds = f64::from(frames) / 25.0;
+        (sent, bytes as f64 * 8.0 / 1000.0 / seconds)
+    }
+
+    /// Video content holds the target by fitting each frame to it, so a
+    /// moving picture streams at nearly its full frame rate; screen
+    /// content holds the same target by skipping most frames. See
+    /// H264Content.
+    #[test]
+    fn video_content_holds_the_bitrate_at_the_full_frame_rate() {
+        let frames = 100;
+        let (sent, kbps) = play(H264Content::Video, 1_000_000, frames);
+        assert!(
+            sent * 10 >= frames * 9,
+            "video content sent {sent} of {frames} frames"
+        );
+        assert!(
+            (800.0..=1200.0).contains(&kbps),
+            "video content came to {kbps:.0} kbit/s for a 1000 kbit/s target"
+        );
+        let (sent, _) = play(H264Content::Screen, 1_000_000, frames);
+        assert!(
+            sent * 2 < frames,
+            "screen content sent {sent} of {frames} frames; if openh264 now fits its frames to the \
+             target, H264Content's notes are out of date"
+        );
     }
 
     /// Lowering the bitrate shrinks the frames within ~15 of them, and

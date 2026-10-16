@@ -56,7 +56,7 @@ pub use limits::{rgba_len, MAX_IMAGE_DIMENSION, MAX_IMAGE_PIXELS};
 #[cfg(feature = "encode")]
 pub use encode::{
     encode_spice_jpeg, encode_spice_lz4, even_dimensions, target_bitrate_bps, Bgrx, H264Config,
-    H264Encoder, H264Frame, H264RateControl, Rgbx,
+    H264Content, H264Encoder, H264Frame, H264RateControl, Rgbx,
 };
 
 #[cfg(feature = "glz")]

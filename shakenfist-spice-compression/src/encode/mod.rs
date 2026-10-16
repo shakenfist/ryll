@@ -10,7 +10,8 @@ use crate::limits;
 mod h264;
 
 pub use h264::{
-    even_dimensions, target_bitrate_bps, H264Config, H264Encoder, H264Frame, H264RateControl,
+    even_dimensions, target_bitrate_bps, H264Config, H264Content, H264Encoder, H264Frame,
+    H264RateControl,
 };
 
 /// A borrowed BGRX image: 32 bits a pixel, bytes B, G, R and an
