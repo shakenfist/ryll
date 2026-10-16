@@ -156,12 +156,16 @@ ryll-bugreport-YYYY-MM-DDTHH-MM-SSZ.zip
 │                         #   platform, target, timestamp
 │                         #   (submit), triggered_at (dialog-open),
 │                         #   session_uptime_secs (submit),
-│                         #   triggered_uptime_secs (dialog-open)
+│                         #   triggered_uptime_secs (dialog-open),
+│                         #   traffic_capture (what traffic.pcap
+│                         #   holds and what was left out)
 ├── session.json          # AppSnapshot (FPS, bandwidth, surfaces,
 │                         #   held keys and recent key events,
 │                         #   ryll's open panels, menus and dialogs)
 ├── channel-state.json    # snapshot of the affected channel
-├── traffic.pcap          # ring buffer pcap (capture feature only)
+├── traffic.pcap          # newest ring buffer traffic, within the
+│                         #   report's size budget (capture feature
+│                         #   only)
 ├── screenshot.png        # trigger-time full surface (Display only)
 ├── screenshot-region.png # submit-time crop at the selected region
 │                         #   (Display only, when a region was drawn)
@@ -272,6 +276,53 @@ after the closure returns.
 
 After a successful report, a transient status message ("Bug report
 saved to ...") is displayed in the status bar for 5 seconds.
+
+### Report size
+
+A report is only useful if it can be attached to an issue, and
+GitHub limits attachments to 25 MB. The display ring alone is 32 MB,
+and its payloads are mostly compressed images that the zip can't
+shrink (entries are stored, not deflated), so a Display report taken
+after a busy minute used to come out at 32 MB.
+
+`BugReport::assemble` therefore builds the pcap last and gives it
+what the other files leave of a 24 MB target
+(`REPORT_TARGET_BYTES`), less 256 KB for `metadata.json`, any
+`disconnect-cause.json` and the zip's headers. It keeps the
+**newest** traffic, the run-up to whatever the report is about, and
+leaves out the oldest. The cut never falls inside a SPICE message
+that was split into several TCP segments. A pcap is never given less
+than 4 MB, so a report with an unusually large screenshot can still
+come out over the limit. When a report saved from the GUI is over
+25 MB, a warning notification says so.
+
+The budget applies to every report: manual, notification,
+disconnect, `--pedantic` and auto-snapshot. The ring buffers
+themselves are unchanged, and `--capture` still writes complete
+per-channel pcaps, which is the way to keep everything.
+
+`metadata.json`'s `traffic_capture` records the result:
+
+| Field | Meaning |
+|-------|---------|
+| `budget_bytes` | Bytes the pcap was allowed to use |
+| `written_bytes` | Size of `traffic.pcap` |
+| `packets_written` | TCP segments in the pcap |
+| `packets_omitted` | Older segments in the ring that were left out |
+| `bytes_omitted` | Frame bytes of those segments |
+| `oldest_packet_secs` | Session uptime of the oldest packet kept: the capture runs from here to the report |
+| `truncated` | `true` when older traffic was left out |
+
+It is `null` in a build without the `capture` feature, which writes
+no pcap, and when the pcap writer failed, which is logged and leaves
+`traffic.pcap` out of the report.
+
+Report pcaps and `--capture` pcaps use a 262144-byte snaplen, as
+tcpdump does. With pcap-file's default of 65535, the writer refused
+the first segment of any SPICE message over 64 KB (a full segment is
+65549 bytes with its Ethernet header), so both used to lose part of
+every large display message. A `--capture` pcap that still refuses a
+frame logs a warning, once per channel.
 
 ### Display region selection
 
@@ -539,8 +590,10 @@ Key design points:
   `channel_name()` returns `"all"`. This causes `BugReport::
   assemble` to embed a merged JSON object in `channel-state.json`
   containing every channel's snapshot (display, inputs, cursor,
-  main, playback, usbredir, webdav). The traffic pcap also covers
-  all channels via `TrafficBuffers::drain_all_pcap_bytes()`.
+  main, playback, usbredir, webdav). The traffic pcap merges all
+  channels via `TrafficBuffers::drain_all_pcap_within()`, keeping
+  the newest traffic that fits the report's size budget (see
+  [Report size](#report-size)).
 - `AutoSnapshotState` in `ryll/src/auto_snapshot.rs` bundles the
   Arc handles the task needs (traffic, channel snapshots, app
   snapshot, notifications, target, output dir, cap,

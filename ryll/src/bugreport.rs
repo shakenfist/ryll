@@ -186,14 +186,9 @@ impl TrafficRingBuffer {
     /// Write all buffered pcap frames to a writer.
     #[cfg(feature = "capture")]
     pub fn write_pcap_to<W: std::io::Write>(&self, writer: W) -> anyhow::Result<usize> {
-        use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
-        use pcap_file::DataLink;
+        use pcap_file::pcap::{PcapPacket, PcapWriter};
 
-        let header = PcapHeader {
-            datalink: DataLink::ETHERNET,
-            ..Default::default()
-        };
-        let mut pcap = PcapWriter::with_header(writer, header)?;
+        let mut pcap = PcapWriter::with_header(writer, crate::capture::pcap_header())?;
 
         let mut count = 0;
         for entry in &self.entries {
@@ -205,13 +200,13 @@ impl TrafficRingBuffer {
                 // PcapPacket wants &[u8].
                 &entry.pcap_frame[..],
             );
-            pcap.write_packet(&packet).ok();
+            pcap.write_packet(&packet)?;
             // Additional segments for SPICE messages that exceeded the IPv4
             // frame limit. Written at the same timestamp — matches what the
             // live capture writer produces for the same payload.
             for seg in &entry.additional_segments {
                 let seg_packet = PcapPacket::new(entry.timestamp, seg.len() as u32, &seg[..]);
-                pcap.write_packet(&seg_packet).ok();
+                pcap.write_packet(&seg_packet)?;
             }
             // `count` reflects the number of SPICE messages, not segments.
             count += 1;
@@ -240,6 +235,148 @@ impl TrafficRingBuffer {
     pub fn max_bytes(&self) -> usize {
         self.max_bytes
     }
+}
+
+/// GitHub's limit for a file attached to an issue or comment.
+/// A bug report is only useful if it can be attached, so reports
+/// are sized to fit under it.
+pub const GITHUB_ATTACHMENT_LIMIT_BYTES: u64 = 25 * 1000 * 1000;
+
+/// Size a bug-report zip aims for: a megabyte under
+/// `GITHUB_ATTACHMENT_LIMIT_BYTES`. The pcap gets whatever the
+/// report's other files leave of it.
+const REPORT_TARGET_BYTES: usize = 24 * 1000 * 1000;
+
+/// Room left for what is sized only after the pcap is chosen:
+/// `metadata.json` (which records the pcap's summary), any
+/// `disconnect-cause.json`, and the zip's own headers. Each of
+/// those is a few kilobytes.
+const REPORT_OVERHEAD_BYTES: usize = 256 * 1024;
+
+/// The least traffic a report keeps, even when its other files
+/// (an unusually large screenshot) leave less than this of
+/// `REPORT_TARGET_BYTES`. The zip is then over the target, and the
+/// GUI says so when it saves it.
+const MIN_REPORT_PCAP_BYTES: usize = 4 * 1024 * 1024;
+
+/// pcap's file header, and the record header before each packet.
+#[cfg(feature = "capture")]
+const PCAP_FILE_HEADER_BYTES: usize = 24;
+#[cfg(feature = "capture")]
+const PCAP_RECORD_HEADER_BYTES: usize = 16;
+
+/// What a report's `traffic.pcap` holds. Written to
+/// `metadata.json` as `traffic_capture`, so an analyst can tell
+/// traffic that was cut to fit the report from a session that
+/// simply had no more.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct TrafficCaptureSummary {
+    /// Bytes the pcap was allowed to use.
+    pub budget_bytes: u64,
+    /// Size of the `traffic.pcap` written.
+    pub written_bytes: u64,
+    /// Packets (TCP segments) in the pcap.
+    pub packets_written: u64,
+    /// Older packets in the ring buffer that were left out to
+    /// stay within `budget_bytes`.
+    pub packets_omitted: u64,
+    /// Frame bytes of the packets left out.
+    pub bytes_omitted: u64,
+    /// Session uptime of the oldest packet kept: the capture
+    /// covers from here to the report. `None` for an empty pcap.
+    pub oldest_packet_secs: Option<f64>,
+    /// True when older traffic was left out.
+    pub truncated: bool,
+}
+
+/// Index of the oldest of `segments` (in time order) that a pcap
+/// of `segments[start..]` can begin at and stay within
+/// `budget_bytes`. The newest traffic is kept, since it is the
+/// run-up to whatever the report is about.
+///
+/// The cut moves forward past any segments sharing a timestamp
+/// with the newest one left out. A SPICE message too large for
+/// one frame is several segments with one timestamp, and a pcap
+/// holding only the tail of one would not decode.
+#[cfg(feature = "capture")]
+fn newest_within_budget(segments: &[(Duration, Arc<[u8]>)], budget_bytes: usize) -> usize {
+    let mut used = PCAP_FILE_HEADER_BYTES;
+    let mut start = segments.len();
+    while start > 0 {
+        let cost = PCAP_RECORD_HEADER_BYTES + segments[start - 1].1.len();
+        if used + cost > budget_bytes {
+            break;
+        }
+        used += cost;
+        start -= 1;
+    }
+    if start > 0 {
+        let cut = segments[start - 1].0;
+        while start < segments.len() && segments[start].0 == cut {
+            start += 1;
+        }
+    }
+    start
+}
+
+/// Write the newest of `segments` that fit in `budget_bytes` as a
+/// pcap, and say what was kept and what was left out.
+#[cfg(feature = "capture")]
+fn write_newest_pcap(
+    segments: &[(Duration, Arc<[u8]>)],
+    budget_bytes: usize,
+) -> Option<(Vec<u8>, TrafficCaptureSummary)> {
+    use pcap_file::pcap::{PcapPacket, PcapWriter};
+
+    let start = newest_within_budget(segments, budget_bytes);
+    let (omitted, kept) = segments.split_at(start);
+
+    let mut output = Vec::new();
+    let written: Result<(), pcap_file::PcapError> = (|| {
+        let mut pcap = PcapWriter::with_header(&mut output, crate::capture::pcap_header())?;
+        for (ts, seg) in kept {
+            pcap.write_packet(&PcapPacket::new(*ts, seg.len() as u32, &seg[..]))?;
+        }
+        Ok(())
+    })();
+    // A packet the writer refuses would leave a pcap that silently
+    // disagrees with the summary below, so the report goes without one.
+    if let Err(e) = written {
+        tracing::warn!(
+            "bugreport: traffic.pcap left out, the pcap writer failed: {}",
+            e
+        );
+        return None;
+    }
+
+    let summary = TrafficCaptureSummary {
+        budget_bytes: budget_bytes as u64,
+        written_bytes: output.len() as u64,
+        packets_written: kept.len() as u64,
+        packets_omitted: omitted.len() as u64,
+        bytes_omitted: omitted.iter().map(|(_, seg)| seg.len() as u64).sum(),
+        oldest_packet_secs: kept.first().map(|(ts, _)| ts.as_secs_f64()),
+        truncated: !omitted.is_empty(),
+    };
+    Some((output, summary))
+}
+
+/// The pcap budget for a report whose other files come to
+/// `other_bytes`: what they leave of `REPORT_TARGET_BYTES`, but
+/// never less than `MIN_REPORT_PCAP_BYTES`.
+fn report_pcap_budget(other_bytes: usize) -> usize {
+    REPORT_TARGET_BYTES
+        .saturating_sub(other_bytes)
+        .max(MIN_REPORT_PCAP_BYTES)
+}
+
+/// The size of the zip at `path` when it is over
+/// `GITHUB_ATTACHMENT_LIMIT_BYTES`, so the caller can tell the
+/// user it can't be attached to an issue as it is. `None` when it
+/// fits, or its size can't be read.
+pub fn oversized_for_attachment(path: &std::path::Path) -> Option<u64> {
+    let size = std::fs::metadata(path).ok()?.len();
+    (size > GITHUB_ATTACHMENT_LIMIT_BYTES).then_some(size)
 }
 
 // Per-channel ring-buffer caps. Total = 50 MB, weighted by
@@ -530,80 +667,75 @@ impl TrafficBuffers {
         }
     }
 
-    /// Drain a channel's ring buffer to pcap bytes in memory.
-    /// Returns `None` if the capture feature is disabled or the
-    /// channel name is unknown.
-    pub fn drain_channel_pcap_bytes(&self, channel: &str) -> Option<Vec<u8>> {
+    /// Every packet in the named channels' ring buffers, as
+    /// (timestamp, segment) pairs in time order.
+    ///
+    /// Each ring's mutex is held only for its own copy loop, and is
+    /// released before the sort and before the caller serialises
+    /// anything. Holding it longer would block that channel's
+    /// `record_sent` / `record_received` for the whole of a
+    /// multi-megabyte write. The copies are `Arc` clones, not byte
+    /// copies, and they are collected flat rather than one `Vec`
+    /// per entry, which saves an allocation per entry in a list
+    /// that runs to the hundreds of thousands.
+    #[cfg(feature = "capture")]
+    fn collect_segments(&self, channels: &[&str]) -> Vec<(Duration, Arc<[u8]>)> {
+        let mut segments: Vec<(Duration, Arc<[u8]>)> = Vec::new();
+        for name in channels {
+            if let Some(buf) = self.buffer_for(name) {
+                let guard = buf.lock().expect("lock poisoned");
+                segments.reserve(guard.entries().len());
+                for entry in guard.entries().iter() {
+                    segments.push((entry.timestamp, entry.pcap_frame.clone()));
+                    for seg in &entry.additional_segments {
+                        segments.push((entry.timestamp, seg.clone()));
+                    }
+                }
+            }
+        }
+        // Chronological across channels. `sort_by_key` is stable, so
+        // the segments of a single entry keep their relative order
+        // within one timestamp.
+        segments.sort_by_key(|(ts, _)| *ts);
+        segments
+    }
+
+    /// The newest of one channel's traffic that fits in
+    /// `budget_bytes`, as pcap bytes, with a summary of what was
+    /// kept. Returns `None` if the capture feature is disabled or
+    /// the channel name is unknown.
+    pub fn drain_channel_pcap_within(
+        &self,
+        channel: &str,
+        budget_bytes: usize,
+    ) -> Option<(Vec<u8>, TrafficCaptureSummary)> {
         #[cfg(feature = "capture")]
         {
-            let buf = self.buffer_for(channel)?;
-            let guard = buf.lock().expect("lock poisoned");
-            let mut output = Vec::new();
-            guard.write_pcap_to(&mut output).ok()?;
-            Some(output)
+            self.buffer_for(channel)?;
+            write_newest_pcap(&self.collect_segments(&[channel]), budget_bytes)
         }
         #[cfg(not(feature = "capture"))]
         {
-            let _ = channel;
+            let _ = (channel, budget_bytes);
             None
         }
     }
 
-    /// Drain pcap bytes from ALL channels, merged into a single pcap
-    /// stream. Used by `BugReportType::AutoSnapshot` so the zip's
-    /// `traffic.pcap` carries the full session picture rather than
-    /// a single channel's traffic.
-    ///
-    /// Entries from all six channels are interleaved in timestamp order.
-    /// Returns `None` when the `capture` feature is disabled.
-    pub fn drain_all_pcap_bytes(&self) -> Option<Vec<u8>> {
+    /// As `drain_channel_pcap_within`, for all six channels merged
+    /// into one chronological pcap. Used by
+    /// `BugReportType::AutoSnapshot`, so its `traffic.pcap` carries
+    /// the whole session picture rather than one channel's.
+    pub fn drain_all_pcap_within(
+        &self,
+        budget_bytes: usize,
+    ) -> Option<(Vec<u8>, TrafficCaptureSummary)> {
         #[cfg(feature = "capture")]
         {
-            use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
-            use pcap_file::DataLink;
-
-            // Snapshot every channel as a flat (timestamp, segment)
-            // list. Two things matter here. Each ring's mutex is held
-            // only for its own copy loop and released before the sort
-            // and the serialisation below — holding it across those
-            // would block that channel's record_sent / record_received
-            // for the whole of a ~50 MiB write. And segments are
-            // collected flat rather than one Vec per entry, which drops
-            // an allocation per entry from a list that runs to the
-            // hundreds of thousands.
-            let mut segments: Vec<(std::time::Duration, std::sync::Arc<[u8]>)> = Vec::new();
-            for name in &CHANNELS {
-                if let Some(buf) = self.buffer_for(name) {
-                    let guard = buf.lock().expect("lock poisoned");
-                    segments.reserve(guard.entries().len());
-                    for entry in guard.entries().iter() {
-                        segments.push((entry.timestamp, entry.pcap_frame.clone()));
-                        for seg in &entry.additional_segments {
-                            segments.push((entry.timestamp, seg.clone()));
-                        }
-                    }
-                }
-            }
-
-            // Sort by timestamp so the merged pcap is chronological.
-            // `sort_by_key` is stable, so the segments of a single
-            // entry keep their relative order within one timestamp.
-            segments.sort_by_key(|(ts, _)| *ts);
-
-            let header = PcapHeader {
-                datalink: DataLink::ETHERNET,
-                ..Default::default()
-            };
-            let mut output = Vec::new();
-            let mut pcap = PcapWriter::with_header(&mut output, header).ok()?;
-            for (ts, seg) in &segments {
-                let packet = PcapPacket::new(*ts, seg.len() as u32, &seg[..]);
-                pcap.write_packet(&packet).ok();
-            }
-            Some(output)
+            write_newest_pcap(&self.collect_segments(&CHANNELS), budget_bytes)
         }
         #[cfg(not(feature = "capture"))]
         {
+            let _ = budget_bytes;
             None
         }
     }
@@ -1457,6 +1589,10 @@ pub struct ReportMetadata {
     /// Equal to `session_uptime_secs` when no explicit
     /// trigger was supplied.
     pub triggered_uptime_secs: f64,
+    /// What `traffic.pcap` holds, and how much older traffic was
+    /// left out to keep the report attachable. `None` when there is
+    /// no pcap (a build without the `capture` feature).
+    pub traffic_capture: Option<TrafficCaptureSummary>,
 }
 
 /// A fully assembled bug report ready to write to disk.
@@ -1604,17 +1740,9 @@ impl BugReport {
             .unwrap_or_default();
         let notifications_json = serde_json::to_string_pretty(&notifications_snapshot)?;
 
-        // 4. Pcap traffic for the affected channel.
-        //    AutoSnapshot uses channel_name "all" → drain all six
-        //    channels merged into one pcap stream.
         let channel_name = report_type.channel_name();
-        let pcap_bytes = if channel_name == "all" {
-            traffic.drain_all_pcap_bytes()
-        } else {
-            traffic.drain_channel_pcap_bytes(channel_name)
-        };
 
-        // 5. PNG screenshot (display reports only). Prefer a
+        // 4. PNG screenshot (display reports only). Prefer a
         //    precomputed PNG from the trigger-time encoder thread
         //    over re-encoding the live surface at submit time; fall
         //    back to a live encode when the background thread was
@@ -1637,7 +1765,7 @@ impl BugReport {
             None
         };
 
-        // 5b. Region crop PNG (Display reports with a non-empty
+        // 4b. Region crop PNG (Display reports with a non-empty
         //     region only). Cropped from the submit-time surface
         //     pixels, deliberately *not* from the precomputed
         //     trigger PNG — the trigger surface may have been a
@@ -1650,6 +1778,37 @@ impl BugReport {
             }
         } else {
             None
+        };
+
+        // 5. Pcap traffic for the affected channel, last, so it gets
+        //    what the other files leave of REPORT_TARGET_BYTES. The
+        //    newest traffic is kept. AutoSnapshot uses channel_name
+        //    "all" → all six channels merged into one pcap stream.
+        let metrics_json_len = serde_json::to_string_pretty(&runtime_metrics)?.len();
+        let other_bytes = session_json.len()
+            + channel_state_json.len()
+            + notifications_json.len()
+            + metrics_json_len
+            + screenshot_png.as_ref().map_or(0, Vec::len)
+            + screenshot_region_png.as_ref().map_or(0, Vec::len)
+            + REPORT_OVERHEAD_BYTES;
+        let pcap_budget = report_pcap_budget(other_bytes);
+        let drained = if channel_name == "all" {
+            traffic.drain_all_pcap_within(pcap_budget)
+        } else {
+            traffic.drain_channel_pcap_within(channel_name, pcap_budget)
+        };
+        let (pcap_bytes, traffic_capture) = match drained {
+            Some((bytes, summary)) => {
+                if summary.truncated {
+                    debug!(
+                        "bugreport: kept the newest {} bytes of {} traffic, leaving out {} older packets",
+                        summary.written_bytes, channel_name, summary.packets_omitted
+                    );
+                }
+                (Some(bytes), Some(summary))
+            }
+            None => (None, None),
         };
 
         // 6. Report metadata. When the caller did not supply explicit
@@ -1677,6 +1836,7 @@ impl BugReport {
             session_uptime_secs: submit_uptime,
             triggered_at,
             triggered_uptime_secs,
+            traffic_capture,
         };
         let metadata_json = serde_json::to_string_pretty(&metadata)?;
 
@@ -3048,6 +3208,7 @@ mod tests {
             session_uptime_secs: 45.3,
             triggered_at: "2026-04-03T12:34:50Z".to_string(),
             triggered_uptime_secs: 39.1,
+            traffic_capture: None,
         };
         let json = serde_json::to_string_pretty(&meta).unwrap();
         assert!(json.contains("\"report_type\": \"Display\""));
@@ -3056,6 +3217,7 @@ mod tests {
         assert!(json.contains("\"left\": 10"));
         assert!(json.contains("\"triggered_at\": \"2026-04-03T12:34:50Z\""));
         assert!(json.contains("\"triggered_uptime_secs\": 39.1"));
+        assert!(json.contains("\"traffic_capture\": null"));
     }
 
     /// Stub metrics used by tests to avoid a 2-second sleep.
@@ -4023,7 +4185,190 @@ mod tests {
     #[test]
     fn test_drain_unknown_channel() {
         let buffers = TrafficBuffers::new();
-        assert!(buffers.drain_channel_pcap_bytes("nonexistent").is_none());
+        assert!(buffers
+            .drain_channel_pcap_within("nonexistent", usize::MAX)
+            .is_none());
+    }
+
+    /// `n` one-segment packets of `len` bytes, a millisecond apart.
+    #[cfg(feature = "capture")]
+    fn segments(n: u64, len: usize) -> Vec<(Duration, Arc<[u8]>)> {
+        (0..n)
+            .map(|i| (Duration::from_millis(i), Arc::from(vec![0u8; len])))
+            .collect()
+    }
+
+    #[cfg(feature = "capture")]
+    #[test]
+    fn newest_within_budget_keeps_everything_that_fits() {
+        let segs = segments(10, 100);
+        let whole = PCAP_FILE_HEADER_BYTES + 10 * (PCAP_RECORD_HEADER_BYTES + 100);
+        assert_eq!(newest_within_budget(&segs, whole), 0);
+        assert_eq!(newest_within_budget(&segs, usize::MAX), 0);
+    }
+
+    #[cfg(feature = "capture")]
+    #[test]
+    fn newest_within_budget_leaves_out_the_oldest() {
+        let segs = segments(10, 100);
+        // Room for exactly three packets, and one byte short of four.
+        let three = PCAP_FILE_HEADER_BYTES + 3 * (PCAP_RECORD_HEADER_BYTES + 100);
+        assert_eq!(newest_within_budget(&segs, three), 7);
+        assert_eq!(
+            newest_within_budget(&segs, three + PCAP_RECORD_HEADER_BYTES + 99),
+            7
+        );
+        // Not even one packet fits.
+        assert_eq!(newest_within_budget(&segs, PCAP_FILE_HEADER_BYTES), 10);
+    }
+
+    #[cfg(feature = "capture")]
+    #[test]
+    fn newest_within_budget_never_keeps_part_of_a_message() {
+        // A message split into three segments shares one timestamp:
+        // segments 4, 5 and 6 here.
+        let mut segs = segments(10, 100);
+        segs[5].0 = segs[4].0;
+        segs[6].0 = segs[4].0;
+        // Room for five packets would start at segment 5, inside the
+        // message. The cut moves past the whole of it instead.
+        let five = PCAP_FILE_HEADER_BYTES + 5 * (PCAP_RECORD_HEADER_BYTES + 100);
+        assert_eq!(newest_within_budget(&segs, five), 7);
+    }
+
+    #[cfg(feature = "capture")]
+    #[test]
+    fn drain_within_budget_keeps_the_newest_and_says_so() {
+        let buffers = TrafficBuffers::new();
+        for i in 0..200u16 {
+            let mut msg = vec![0u8; 1000];
+            msg[..2].copy_from_slice(&i.to_le_bytes());
+            buffers.record_received("display", 302, "draw_copy", &msg);
+        }
+
+        let (whole, summary) = buffers
+            .drain_channel_pcap_within("display", usize::MAX)
+            .unwrap();
+        assert!(!summary.truncated);
+        assert_eq!(summary.packets_written, 200);
+        assert_eq!(summary.packets_omitted, 0);
+        assert_eq!(summary.written_bytes, whole.len() as u64);
+
+        let budget = whole.len() / 4;
+        let (pcap, summary) = buffers
+            .drain_channel_pcap_within("display", budget)
+            .unwrap();
+        assert!(summary.truncated);
+        assert!(pcap.len() <= budget);
+        assert_eq!(summary.written_bytes, pcap.len() as u64);
+        assert_eq!(summary.budget_bytes, budget as u64);
+        assert_eq!(summary.packets_written + summary.packets_omitted, 200);
+        assert!(summary.packets_written > 0);
+        assert!(summary.bytes_omitted > 0);
+
+        // What was kept is the tail of the whole capture: the newest
+        // packets, ending with the last one recorded.
+        assert!(whole.ends_with(&pcap[PCAP_FILE_HEADER_BYTES..]));
+        let oldest = summary.oldest_packet_secs.unwrap();
+        let entries = buffers.display.lock().unwrap();
+        let first_kept = &entries.entries()[summary.packets_omitted as usize];
+        assert_eq!(oldest, first_kept.timestamp.as_secs_f64());
+    }
+
+    #[test]
+    fn report_pcap_budget_is_what_the_other_files_leave() {
+        assert_eq!(report_pcap_budget(0), REPORT_TARGET_BYTES);
+        assert_eq!(
+            report_pcap_budget(5_000_000),
+            REPORT_TARGET_BYTES - 5_000_000
+        );
+        // A huge screenshot still leaves the report some traffic.
+        assert_eq!(report_pcap_budget(30_000_000), MIN_REPORT_PCAP_BYTES);
+    }
+
+    /// The case from #563: a full 32 MiB display ring made a 32 MB
+    /// Display report, too big to attach to a GitHub issue.
+    #[cfg(feature = "capture")]
+    #[test]
+    fn display_report_with_a_full_ring_fits_a_github_attachment() {
+        let traffic = TrafficBuffers::new();
+        // 30 MB of large display messages, each split into two
+        // segments, all of which the 32 MiB ring keeps.
+        for _ in 0..300 {
+            traffic.record_received("display", 302, "draw_copy", &vec![7u8; 100_000]);
+        }
+        assert!(traffic.display.lock().unwrap().total_bytes() > REPORT_TARGET_BYTES);
+
+        let snapshots = ChannelSnapshots::new();
+        let app_snap = Mutex::new(AppSnapshot::default());
+        let notifications = Mutex::new(NotificationStore::new());
+        let pixels = vec![0u8; 4 * 4 * 4];
+        let report = BugReport::assemble(
+            BugReportType::Display,
+            "full ring".to_string(),
+            None,
+            "10.0.0.1:5900",
+            &traffic,
+            &snapshots,
+            &app_snap,
+            &notifications,
+            Some((&pixels, 4, 4)),
+            stub_metrics(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let metadata: serde_json::Value = serde_json::from_str(&report.metadata_json).unwrap();
+        let capture = &metadata["traffic_capture"];
+        assert_eq!(capture["truncated"], json!(true));
+        assert!(capture["packets_omitted"].as_u64().unwrap() > 0);
+        assert!(capture["written_bytes"].as_u64().unwrap() > MIN_REPORT_PCAP_BYTES as u64);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = report.write_zip(tmp.path()).unwrap();
+        let size = std::fs::metadata(&path).unwrap().len();
+        assert!(size <= REPORT_TARGET_BYTES as u64, "zip is {size} bytes");
+        assert_eq!(oversized_for_attachment(&path), None);
+
+        // Every packet the summary counts is in the pcap and parses,
+        // including each message's first, full-size segment, which a
+        // 65535-byte snaplen used to make the writer drop.
+        let file = std::fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut pcap = Vec::new();
+        std::io::Read::read_to_end(&mut archive.by_name("traffic.pcap").unwrap(), &mut pcap)
+            .unwrap();
+        let mut reader = pcap_file::pcap::PcapReader::new(&pcap[..]).unwrap();
+        let mut packets = 0u64;
+        while let Some(packet) = reader.next_packet() {
+            packet.unwrap();
+            packets += 1;
+        }
+        assert_eq!(packets, capture["packets_written"].as_u64().unwrap());
+        // Whole messages only: two segments each.
+        assert_eq!(packets % 2, 0);
+    }
+
+    #[test]
+    fn oversized_for_attachment_reports_only_what_is_over_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path();
+
+        let small = tmp.join("small.zip");
+        std::fs::write(&small, b"small").unwrap();
+        assert_eq!(oversized_for_attachment(&small), None);
+
+        // Sparse, so the test writes no 25 MB.
+        let big = tmp.join("big.zip");
+        let file = std::fs::File::create(&big).unwrap();
+        file.set_len(GITHUB_ATTACHMENT_LIMIT_BYTES + 1).unwrap();
+        assert_eq!(
+            oversized_for_attachment(&big),
+            Some(GITHUB_ATTACHMENT_LIMIT_BYTES + 1)
+        );
+
+        assert_eq!(oversized_for_attachment(&tmp.join("missing.zip")), None);
     }
 
     #[test]

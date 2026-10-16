@@ -626,7 +626,9 @@ ryll-bugreport-YYYY-MM-DDTHH-MM-SSZ.zip
 │                           keyboard state and recent key events,
 │                           ryll's open panels, menus and dialogs
 ├── channel-state.json    — snapshot of the affected channel
-├── traffic.pcap          — recent protocol traffic (pcap format)
+├── traffic.pcap          — recent protocol traffic (pcap format),
+│                           trimmed so the zip fits GitHub's
+│                           25 MB attachment limit
 ├── screenshot.png        — full display surface captured at the
 │                           moment the dialog opened (Display
 │                           reports only)

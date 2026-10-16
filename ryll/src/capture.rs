@@ -22,32 +22,52 @@ const CLIENT_IP: [u8; 4] = [10, 0, 0, 1];
 const SERVER_IP: [u8; 4] = [10, 0, 0, 2];
 const SERVER_PORT: u16 = 5900;
 
+/// The snapshot length in every pcap ryll writes: libpcap's maximum,
+/// as tcpdump writes. pcap-file refuses a packet longer than the
+/// header's snaplen, and its default of 65535 is shorter than a full
+/// segment of a large SPICE message (14 bytes of Ethernet ahead of a
+/// 65535-byte IPv4 packet), so the first segment of every message over
+/// 64 KB used to be dropped.
+pub(crate) const PCAP_SNAPLEN: u32 = 262_144;
+
+/// The header for every pcap ryll writes, live capture and bug report
+/// alike, so they cannot disagree about what they will accept.
+pub(crate) fn pcap_header() -> PcapHeader {
+    PcapHeader {
+        datalink: DataLink::ETHERNET,
+        snaplen: PCAP_SNAPLEN,
+        ..Default::default()
+    }
+}
+
 /// Per-channel pcap writer with TCP state tracking.
 ///
 /// Uses unbuffered I/O so that every packet is flushed to disk
 /// immediately.  This means the pcap files survive Ctrl+C / SIGINT
 /// without needing an explicit flush on shutdown.
 struct PcapChannelWriter {
+    path: PathBuf,
     writer: PcapWriter<File>,
     client_seq: u32,
     server_seq: u32,
     client_port: u16,
+    /// Frames the pcap writer refused. The first is logged; a pcap
+    /// missing frames is otherwise indistinguishable from a quiet one.
+    refused_frames: u64,
 }
 
 impl PcapChannelWriter {
     fn new(path: PathBuf, client_port: u16) -> anyhow::Result<Self> {
         let file = File::create(&path)?;
-        let header = PcapHeader {
-            datalink: DataLink::ETHERNET,
-            ..Default::default()
-        };
-        let writer = PcapWriter::with_header(file, header)?;
+        let writer = PcapWriter::with_header(file, pcap_header())?;
         info!("capture: opened {}", path.display());
         Ok(PcapChannelWriter {
+            path,
             writer,
             client_seq: 1000,
             server_seq: 2000,
             client_port,
+            refused_frames: 0,
         })
     }
 
@@ -102,7 +122,17 @@ impl PcapChannelWriter {
 
     fn write_frame(&mut self, frame: &[u8], elapsed: std::time::Duration) {
         let packet = PcapPacket::new(elapsed, frame.len() as u32, frame);
-        self.writer.write_packet(&packet).ok();
+        if let Err(e) = self.writer.write_packet(&packet) {
+            self.refused_frames += 1;
+            if self.refused_frames == 1 {
+                warn!(
+                    "capture: {} refused a {}-byte frame, so it is incomplete: {}",
+                    self.path.display(),
+                    frame.len(),
+                    e
+                );
+            }
+        }
     }
 }
 
@@ -1278,6 +1308,20 @@ mod tests {
         assert_eq!(count_pcap_packets(&dir.path().join("cursor.pcap")), 0);
         assert_eq!(count_pcap_packets(&dir.path().join("inputs.pcap")), 0);
         assert_eq!(count_pcap_packets(&dir.path().join("usbredir.pcap")), 0);
+    }
+
+    /// A message over 64 KB is two segments, the first a full 65549-byte
+    /// frame, and the live capture keeps both. With pcap-file's default
+    /// snaplen the writer refused the first, silently.
+    #[test]
+    fn live_capture_keeps_a_full_size_segment() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("display.pcap");
+        let mut w = PcapChannelWriter::new(path.clone(), channel_port("display")).expect("writer");
+        w.write_received(&vec![0u8; 130_000], Duration::from_millis(1));
+        assert_eq!(w.refused_frames, 0);
+        drop(w);
+        assert_eq!(count_pcap_packets(&path), 2);
     }
 
     #[test]
