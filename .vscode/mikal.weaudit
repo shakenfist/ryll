@@ -602,6 +602,150 @@
     {
       "path": ".github/workflows/renovate.yml",
       "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/prune-reviews.yml",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/build-ryll-wheel-in-container.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/build-ryll-wheel.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/ci-prune-reviews.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/homebrew-formula.rb",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/measure-idle-cpu.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/package-check-verify.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/pcap-inspect.py",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/propose-release.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/review-tracking.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/tag-release.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/web-soak.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools",
+      "author": "mikal"
+    },
+    {
+      "path": "AGENTS.md",
+      "author": "mikal"
+    },
+    {
+      "path": "ARCHITECTURE.md",
+      "author": "mikal"
+    },
+    {
+      "path": "PLAN-TEMPLATE.md",
+      "author": "mikal"
+    },
+    {
+      "path": "PUSH-AUDIT.md",
+      "author": "mikal"
+    },
+    {
+      "path": "STYLEGUIDE.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/channel-diagnostics-audit.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/ci.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/configuration.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/design-decisions.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/development.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/device-redirection.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/diagnostics.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/features.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/installation.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/libvirt-spice-recommendations.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/portability.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/releasing.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/rendering-pipeline.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/session-lifecycle.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/spice-protocol.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/troubleshooting.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/web-frontend.md",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
