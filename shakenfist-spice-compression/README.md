@@ -18,7 +18,10 @@ for servers (see the Encoders item below):
   `Bgrx` image: LZ4 (`encode_spice_lz4`), baseline 4:2:0 JPEG
   (`encode_spice_jpeg`, via the pure-Rust `jpeg-encoder`), and H.264
   video streams (`H264Encoder`, via openh264), whose bitrate and
-  frame rate can change while it runs.
+  frame rate can change while it runs. Its `H264Content` says
+  whether the frames are a desktop or a moving picture, which
+  decides how openh264 holds the bitrate: a stream of video should
+  be encoded as `Video`.
 
 The crate name covers both directions. Decompression is the
 default; compression is opt-in through `encode`.
