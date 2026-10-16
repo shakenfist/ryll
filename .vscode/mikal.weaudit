@@ -452,10 +452,6 @@
       "author": "mikal"
     },
     {
-      "path": "Cargo.toml",
-      "author": "mikal"
-    },
-    {
       "path": "clippy.toml",
       "author": "mikal"
     },
