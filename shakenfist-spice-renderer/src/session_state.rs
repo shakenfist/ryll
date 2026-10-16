@@ -124,7 +124,8 @@ mod tests {
 
         // Fill the only slot; `_rx` is held and never polled.
         sink.emit(ChannelEvent::SessionInitialized(1)).await;
-        sink.emit(ChannelEvent::Latency { sample_ms: 1.0 }).await;
+        sink.emit(ChannelEvent::PingInterval { interval_ms: 1.0 })
+            .await;
         assert_eq!(sink.drop_stats().total, 1, "the queue should be wedged");
         // Discard the permits those emits left, so the check below is
         // about the wake that goes with the publish.

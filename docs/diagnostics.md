@@ -15,16 +15,27 @@ Ryll tracks:
   The window keeps the most recent 120 timestamps for an accurate
   short-term reading.
 - **Bytes in/out**: Network throughput per channel
+- **RTT**: Round trip on the inputs channel, in milliseconds, shown in
+  the status bar as `RTT` once the pointer has moved. SPICE has no
+  client-originated probe (`SPICE_MSG_PING` is server→client only), but
+  the server acknowledges every fourth pointer message with
+  `MOUSE_MOTION_ACK`. The inputs channel times each bunch from sending
+  its fourth message to the ack for it (`MotionRoundTrip` in
+  `shakenfist-spice-renderer/src/channels/inputs.rs`) and emits
+  `ChannelEvent::InputRoundTrip`. It includes the server's time to read
+  and answer, and is only sampled while the pointer moves. Recorded as
+  `last_input_rtt_ms` in `session.json`, `last_round_trip_ms` in the
+  inputs channel's state, and the control socket's `input_rtt` event.
 - **PING interval**: Client-observed interval between server PINGs on the
   main channel, in milliseconds, shown in the status bar under that
-  label. SPICE has no client-originated probe (`SPICE_MSG_PING`
-  is server→client only), so ryll cannot measure absolute network RTT.
-  Instead, the main-channel PING handler records `Instant::now()` and
-  emits the gap to the previous PING as a sample. The number includes
-  the server's send cadence and the client's receive turnaround;
-  spikes indicate a network or server stall. Sparkline mirrors the
-  bandwidth one (60-sample rolling history, amber bars). Implemented
-  via `LatencyTracker` in `ryll/src/app/stats.rs`.
+  label. It is not a round trip: the main-channel PING handler records
+  `Instant::now()` and emits the gap to the previous PING as
+  `ChannelEvent::PingInterval`. The number is mostly the server's send
+  cadence: about 30 000 ms against andris, which pings every 30 s.
+  Spikes beyond the cadence indicate a network or server stall.
+  Sparkline mirrors the bandwidth one (60-sample rolling history, amber
+  bars). Implemented via `LatencyTracker` in `ryll/src/app/stats.rs`,
+  and recorded as `last_ping_interval_ms` in `session.json`.
 - **Bandwidth sparkline**: A rolling 60-sample history of bytes/sec is
   displayed in the status bar as a small bar chart. Channel read loops
   increment a shared `AtomicU64` byte counter; the `BandwidthTracker`
@@ -433,12 +444,29 @@ or `ChannelEvent::Disconnected` triggers a best-effort
 auto-snapshot via `BugReport::write_disconnect`. The
 zip carries a `disconnect-cause.json` record alongside
 the usual pcap / channel-state / metadata files. The
-record names the channel that fired, captures whether
-the main-channel client-side keepalive timeout fired
-(distinguishing "we timed ourselves out" from a server
-RST), and embeds a per-channel diagnostics map so a
-maintainer can compare the dropped channel against the
-others' last-known traffic state. ryll sends no
+record names the channel that fired and says how its
+connection ended in `disconnect_kind`:
+
+| `disconnect_kind` | Meaning |
+|---|---|
+| `ServerClosed` | A read returned no bytes: the server closed the socket cleanly |
+| `ServerAnnounced` | The server sent the main channel's `DISCONNECTING` |
+| `KeepaliveTimeout` | The main channel heard nothing for its keepalive timeout, and ryll gave up |
+| `Error` | The channel failed; `error_message` says how (a reset, for example) |
+| `ConnectFailed` | A connection attempt failed |
+
+It also captures whether the main-channel client-side
+keepalive timeout fired, and embeds a per-channel
+diagnostics map so a maintainer can compare the dropped
+channel against the others' last-known traffic state.
+Each entry's `state` is `ended` (with `ended_by`, a
+`disconnect_kind`, and `ended_at_secs`), `open` (no end
+reported), or `no_traffic` (no end reported and nothing
+ever received, usually a channel the server never
+offered). The report is written once the frame's queued
+channel events have been handled, so channels that ended
+together all show as ended, not just the one that named
+the report. ryll sends no
 application-level keepalive on any channel: an idle
 channel is kept alive by TCP keepalive on the socket and
 by answering the server's PINGs.

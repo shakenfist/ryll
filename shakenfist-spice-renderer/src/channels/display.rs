@@ -38,7 +38,7 @@ use shakenfist_spice_protocol::{
     IMAGE_FLAGS_CACHE_ME, IMAGE_FLAGS_CACHE_REPLACE_ME,
 };
 
-use super::{ChannelEvent, EventSink, MAX_MESSAGE_BODY};
+use super::{ChannelEvent, DisconnectReason, EventSink, MAX_MESSAGE_BODY};
 
 struct StreamState {
     surface_id: u32,
@@ -1248,7 +1248,10 @@ impl DisplayChannel {
             if n == 0 {
                 info!("display: channel disconnected");
                 self.events
-                    .emit(ChannelEvent::Disconnected(ChannelType::Display))
+                    .emit(ChannelEvent::Disconnected(
+                        ChannelType::Display,
+                        DisconnectReason::ServerClosed,
+                    ))
                     .await;
                 break;
             }

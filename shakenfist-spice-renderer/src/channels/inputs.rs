@@ -22,7 +22,7 @@ use shakenfist_spice_protocol::{
     inputs_client, inputs_server, keyboard_modifiers, ChannelType, NotifySeverity,
 };
 
-use super::{ChannelEvent, EventSink, InputEvent, MAX_MESSAGE_BODY};
+use super::{ChannelEvent, DisconnectReason, EventSink, InputEvent, MAX_MESSAGE_BODY};
 
 /// spice-gtk throttles motion messages to this many pending before an ACK
 const MOTION_ACK_BUNCH: u32 = 4;
@@ -81,6 +81,52 @@ impl MotionWedgeDetector {
     }
 }
 
+/// Most motion bunches [`MotionRoundTrip`] waits on at once. The send
+/// throttle keeps two outstanding, and the position updates sent with
+/// each button press and release can add a few more. Past this the
+/// server is not acknowledging what ryll sends (see
+/// [`MotionWedgeDetector`]), so a later ack could not be matched to the
+/// message it answers.
+const MAX_ROUND_TRIPS_PENDING: usize = 8;
+
+/// Times a round trip on the inputs channel, the one place SPICE lets a
+/// client measure one: from sending the pointer message that completes
+/// a bunch of [`MOTION_ACK_BUNCH`], to the server's `MOUSE_MOTION_ACK`
+/// for it.
+///
+/// spice-server counts every `MOUSE_POSITION` and `MOUSE_MOTION` it
+/// receives and acknowledges each `MOTION_ACK_BUNCH`-th, as andris does,
+/// so the n-th ack answers the (n x `MOTION_ACK_BUNCH`)-th pointer
+/// message ryll sent. That includes the position update sent with each
+/// button press and release, which the send throttle does not count.
+#[derive(Default)]
+struct MotionRoundTrip {
+    /// Pointer messages sent.
+    sent: u64,
+    /// When each bunch still awaiting its ack was completed, oldest first.
+    pending: VecDeque<Instant>,
+}
+
+impl MotionRoundTrip {
+    /// Record a pointer message sent at `now`.
+    fn note_sent(&mut self, now: Instant) {
+        self.sent += 1;
+        if self.sent.is_multiple_of(u64::from(MOTION_ACK_BUNCH)) {
+            if self.pending.len() >= MAX_ROUND_TRIPS_PENDING {
+                self.pending.clear();
+            }
+            self.pending.push_back(now);
+        }
+    }
+
+    /// Record an ack received at `now`: the round trip in milliseconds,
+    /// or `None` for an ack with no bunch waiting on it.
+    fn note_ack(&mut self, now: Instant) -> Option<f32> {
+        let sent_at = self.pending.pop_front()?;
+        Some(now.saturating_duration_since(sent_at).as_secs_f32() * 1000.0)
+    }
+}
+
 /// Maximum number of recent input events to keep in the snapshot.
 const MAX_RECENT_EVENTS: usize = 50;
 
@@ -129,6 +175,10 @@ pub struct InputsChannel {
     /// Distinguishes a busy ack window from a wedged one. See
     /// [`MotionWedgeDetector`].
     motion_wedge: MotionWedgeDetector,
+    /// See [`MotionRoundTrip`].
+    motion_round_trip: MotionRoundTrip,
+    /// The last round trip it measured, in milliseconds.
+    last_round_trip_ms: Option<f32>,
     capture: Option<Arc<dyn CaptureSink>>,
     byte_counter: Arc<ByteCounter>,
     traffic: Arc<dyn TrafficSink>,
@@ -178,6 +228,8 @@ impl InputsChannel {
             button_state: 0,
             motion_count: 0,
             motion_wedge: MotionWedgeDetector::default(),
+            motion_round_trip: MotionRoundTrip::default(),
+            last_round_trip_ms: None,
             capture,
             byte_counter,
             traffic,
@@ -280,7 +332,7 @@ impl InputsChannel {
                     match result {
                         Ok(0) => {
                             info!("inputs: channel disconnected");
-                            self.events.emit(ChannelEvent::Disconnected(ChannelType::Inputs)).await;
+                            self.events.emit(ChannelEvent::Disconnected(ChannelType::Inputs, DisconnectReason::ServerClosed)).await;
                             break;
                         }
                         Ok(_) => {
@@ -461,6 +513,12 @@ impl InputsChannel {
                 self.motion_count = self.motion_count.saturating_sub(MOTION_ACK_BUNCH);
                 self.motion_wedge.note_ack();
                 debug!("inputs: mouse motion ack (pending={})", self.motion_count);
+                if let Some(rtt_ms) = self.motion_round_trip.note_ack(Instant::now()) {
+                    self.last_round_trip_ms = Some(rtt_ms);
+                    self.events
+                        .emit(ChannelEvent::InputRoundTrip { rtt_ms })
+                        .await;
+                }
             }
 
             inputs_server::SET_ACK => {
@@ -915,6 +973,7 @@ impl InputsChannel {
         snap.pong_send_count = self.pong_send_count;
         snap.last_ping_recv_ts_secs = self.last_ping_recv_ts_secs;
         snap.writer_dropped_count = self.capture_dropped_count;
+        snap.last_round_trip_ms = self.last_round_trip_ms;
         self.opcodes.publish_into(&mut *snap);
     }
 
@@ -935,6 +994,12 @@ impl InputsChannel {
         // Single send path, so this is the only send-count site.
         self.opcodes.record_send(msg_type);
         let result = self.send(data).await;
+        if result.is_ok()
+            && (msg_type == inputs_client::MOUSE_POSITION
+                || msg_type == inputs_client::MOUSE_MOTION)
+        {
+            self.motion_round_trip.note_sent(Instant::now());
+        }
         self.update_snapshot();
         result
     }
@@ -1481,9 +1546,11 @@ pub fn translate_paste(text: &str) -> Result<Vec<PasteKey>, PasteError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        scancode_for_logical_key, translate_paste, Direction, LogicalKey, MotionWedgeDetector,
-        PasteError, PasteKey, WSKey, MOTION_WEDGE_THRESHOLD,
+        scancode_for_logical_key, translate_paste, Direction, LogicalKey, MotionRoundTrip,
+        MotionWedgeDetector, PasteError, PasteKey, WSKey, MAX_ROUND_TRIPS_PENDING,
+        MOTION_ACK_BUNCH, MOTION_WEDGE_THRESHOLD,
     };
+    use std::time::{Duration, Instant};
 
     /// A burst that clears is not a wedge, and must say nothing.
     #[test]
@@ -1524,6 +1591,73 @@ mod tests {
             .filter(|_| d.note_drop())
             .count();
         assert_eq!(second, 1, "the second wedge went unreported");
+    }
+
+    /// Each ack is timed from the message that completed its bunch, not
+    /// from the bunch's first message or from the previous ack.
+    #[test]
+    fn a_round_trip_runs_from_the_bunchs_last_message_to_its_ack() {
+        let mut rt = MotionRoundTrip::default();
+        let t0 = Instant::now();
+        for i in 0..MOTION_ACK_BUNCH {
+            rt.note_sent(t0 + Duration::from_millis(u64::from(i) * 10));
+        }
+        let completed = t0 + Duration::from_millis(u64::from(MOTION_ACK_BUNCH - 1) * 10);
+        let rtt = rt
+            .note_ack(completed + Duration::from_millis(25))
+            .expect("a completed bunch is timed");
+        assert!((rtt - 25.0).abs() < 0.5, "expected 25 ms, got {rtt}");
+    }
+
+    /// Two bunches outstanding are answered in order.
+    #[test]
+    fn round_trips_pair_acks_with_bunches_in_order() {
+        let mut rt = MotionRoundTrip::default();
+        let t0 = Instant::now();
+        for _ in 0..MOTION_ACK_BUNCH {
+            rt.note_sent(t0);
+        }
+        let t1 = t0 + Duration::from_millis(100);
+        for _ in 0..MOTION_ACK_BUNCH {
+            rt.note_sent(t1);
+        }
+        let first = rt.note_ack(t1 + Duration::from_millis(5)).expect("first");
+        let second = rt.note_ack(t1 + Duration::from_millis(6)).expect("second");
+        assert!((first - 105.0).abs() < 0.5, "first bunch: {first}");
+        assert!((second - 6.0).abs() < 0.5, "second bunch: {second}");
+    }
+
+    /// An incomplete bunch, or an ack nothing is waiting on, gives no
+    /// sample rather than a made-up one.
+    #[test]
+    fn an_ack_without_a_completed_bunch_is_not_timed() {
+        let mut rt = MotionRoundTrip::default();
+        let now = Instant::now();
+        assert_eq!(rt.note_ack(now), None);
+        for _ in 0..MOTION_ACK_BUNCH - 1 {
+            rt.note_sent(now);
+        }
+        assert_eq!(rt.note_ack(now), None);
+    }
+
+    /// A server that stops acknowledging cannot grow the queue without
+    /// bound, and the bunches sent before it gave up are forgotten.
+    #[test]
+    fn unanswered_bunches_are_bounded() {
+        let mut rt = MotionRoundTrip::default();
+        let t0 = Instant::now();
+        for _ in 0..(MAX_ROUND_TRIPS_PENDING as u32 * MOTION_ACK_BUNCH) {
+            rt.note_sent(t0);
+        }
+        let later = t0 + Duration::from_secs(10);
+        for _ in 0..MOTION_ACK_BUNCH {
+            rt.note_sent(later);
+        }
+        assert!(rt.pending.len() <= MAX_ROUND_TRIPS_PENDING);
+        let rtt = rt
+            .note_ack(later + Duration::from_millis(3))
+            .expect("timed");
+        assert!((rtt - 3.0).abs() < 0.5, "a stale bunch was answered: {rtt}");
     }
 
     // make_scancode logic for reference:

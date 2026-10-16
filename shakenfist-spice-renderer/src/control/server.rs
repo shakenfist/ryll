@@ -793,6 +793,28 @@ async fn emit_dropped(out_tx: &mpsc::Sender<OutboundMessage>, dropped_count: &mu
     }
 }
 
+/// A millisecond sample as a wire event named `name`, with the sample
+/// under `field` and a `wallclock_us`, if the client subscribed to it.
+fn sample_event(state: &ClientState, name: &str, field: &str, value_ms: f32) -> Option<Event> {
+    if !state.is_subscribed(name) {
+        return None;
+    }
+    // Wallclock timestamp is captured at translation time.  Wallclock
+    // can jump; this is "client-observable timestamp", not a monotonic
+    // stamp.  Documented as such in the protocol doc.
+    let wallclock_us = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0);
+    let mut data = serde_json::Map::new();
+    data.insert(field.to_string(), serde_json::json!(value_ms as f64));
+    data.insert("wallclock_us".to_string(), serde_json::json!(wallclock_us));
+    Some(Event {
+        event: name.into(),
+        data: serde_json::Value::Object(data),
+    })
+}
+
 /// Map a `ChannelEvent` to a wire `Event` if the client is currently
 /// subscribed to a matching event name.
 ///
@@ -801,25 +823,13 @@ async fn emit_dropped(out_tx: &mpsc::Sender<OutboundMessage>, dropped_count: &mu
 /// `agent_connected` is not here: see `translate_agent_connected`.
 fn translate_event(event: &ChannelEvent, state: &ClientState) -> Option<Event> {
     match event {
-        ChannelEvent::Latency { sample_ms } => {
-            if !state.is_subscribed("latency") {
-                return None;
-            }
-            // Wallclock timestamp is captured at translation time.
-            // Wallclock can jump; this is "client-observable
-            // timestamp", not a monotonic stamp.  Documented as
-            // such in the protocol doc.
-            let wallclock_us = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_micros() as u64)
-                .unwrap_or(0);
-            Some(Event {
-                event: "latency".into(),
-                data: serde_json::json!({
-                    "sample_ms": *sample_ms as f64,
-                    "wallclock_us": wallclock_us,
-                }),
-            })
+        ChannelEvent::PingInterval { interval_ms } => {
+            // The wire name predates the rename: `latency` has always
+            // carried the interval between server PINGs.
+            sample_event(state, "latency", "sample_ms", *interval_ms)
+        }
+        ChannelEvent::InputRoundTrip { rtt_ms } => {
+            sample_event(state, "input_rtt", "rtt_ms", *rtt_ms)
         }
         ChannelEvent::PasteCompleted {
             chars,

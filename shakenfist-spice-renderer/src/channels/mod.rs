@@ -224,6 +224,31 @@ impl EventSink {
     }
 }
 
+/// Why a channel's connection ended, when it ended without an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DisconnectReason {
+    /// A read returned no bytes: the server closed the socket.
+    ServerClosed,
+    /// The server sent the main channel's `DISCONNECTING`. The close
+    /// that follows is reported as [`DisconnectReason::ServerClosed`].
+    ServerAnnounced,
+    /// The main channel received nothing for its keepalive timeout, so
+    /// ryll gave up on the session.
+    KeepaliveTimeout,
+}
+
+impl DisconnectReason {
+    /// A stable name for logs and bug reports.
+    pub fn name(&self) -> &'static str {
+        match self {
+            DisconnectReason::ServerClosed => "ServerClosed",
+            DisconnectReason::ServerAnnounced => "ServerAnnounced",
+            DisconnectReason::KeepaliveTimeout => "KeepaliveTimeout",
+        }
+    }
+}
+
 /// Events sent from channels to the main application
 #[derive(Debug, Clone)]
 pub enum ChannelEvent {
@@ -361,9 +386,20 @@ pub enum ChannelEvent {
         height: u32,
     },
 
-    /// Latency measurement (sample in milliseconds)
-    Latency {
-        sample_ms: f32,
+    /// The interval between the last two server PINGs on the main
+    /// channel, in milliseconds. SPICE gives a client no probe of its
+    /// own, so this is the server's ping cadence plus any stall, not a
+    /// round trip: about 30 000 against a server that pings every 30 s.
+    PingInterval {
+        interval_ms: f32,
+    },
+
+    /// A round trip on the inputs channel, in milliseconds: from sending
+    /// the pointer message that completes a bunch of
+    /// `MOTION_ACK_BUNCH`, to the server's `MOUSE_MOTION_ACK` for it.
+    /// Only sampled while the pointer moves.
+    InputRoundTrip {
+        rtt_ms: f32,
     },
 
     /// Paste-as-keystrokes sequence completed.
@@ -430,8 +466,9 @@ pub enum ChannelEvent {
     /// A WebDAV error occurred
     WebdavError(String),
 
-    /// Channel disconnected
-    Disconnected(ChannelType),
+    /// A channel's connection ended without an error, and why. An I/O
+    /// or protocol failure is [`ChannelEvent::Error`] instead.
+    Disconnected(ChannelType, DisconnectReason),
 
     /// A new visual digest was decoded from the primary surface.
     ///
@@ -551,7 +588,8 @@ impl ChannelEvent {
             ChannelEvent::CursorPosition { .. } => "CursorPosition",
             ChannelEvent::CursorShape { .. } => "CursorShape",
             ChannelEvent::MonitorsConfig { .. } => "MonitorsConfig",
-            ChannelEvent::Latency { .. } => "Latency",
+            ChannelEvent::PingInterval { .. } => "PingInterval",
+            ChannelEvent::InputRoundTrip { .. } => "InputRoundTrip",
             ChannelEvent::PasteCompleted { .. } => "PasteCompleted",
             ChannelEvent::PasteFailed { .. } => "PasteFailed",
             ChannelEvent::Error { .. } => "Error",
@@ -675,11 +713,12 @@ mod tests {
         assert_eq!(sink.drop_stats().total, 0);
 
         // The slot is full and never drained, so this one times out.
-        sink.emit(ChannelEvent::Latency { sample_ms: 2.0 }).await;
+        sink.emit(ChannelEvent::PingInterval { interval_ms: 2.0 })
+            .await;
 
         let stats = sink.drop_stats();
         assert_eq!(stats.total, 1);
-        assert_eq!(stats.by_kind.get("Latency"), Some(&1));
+        assert_eq!(stats.by_kind.get("PingInterval"), Some(&1));
         assert_eq!(stats.by_kind.len(), 1);
         assert!(stats.since_last_drop.is_some());
     }
@@ -691,7 +730,9 @@ mod tests {
         let clone = sink.clone();
 
         sink.emit(ChannelEvent::SessionInitialized(1)).await;
-        clone.emit(ChannelEvent::Latency { sample_ms: 2.0 }).await;
+        clone
+            .emit(ChannelEvent::PingInterval { interval_ms: 2.0 })
+            .await;
 
         // `since_last_drop` is a live elapsed time, so compare the counts.
         let (a, b) = (sink.drop_stats(), clone.drop_stats());
@@ -714,8 +755,11 @@ mod tests {
         let terminal = tokio::spawn({
             let sink = sink.clone();
             async move {
-                sink.emit_terminal(ChannelEvent::Disconnected(ChannelType::Main))
-                    .await
+                sink.emit_terminal(ChannelEvent::Disconnected(
+                    ChannelType::Main,
+                    DisconnectReason::ServerClosed,
+                ))
+                .await
             }
         });
 
@@ -738,7 +782,7 @@ mod tests {
             .expect("emit_terminal task panicked");
         assert!(matches!(
             rx.try_recv(),
-            Ok(ChannelEvent::Disconnected(ChannelType::Main))
+            Ok(ChannelEvent::Disconnected(ChannelType::Main, _))
         ));
         tokio::time::timeout(Duration::from_millis(100), repaint.notified())
             .await
@@ -749,12 +793,15 @@ mod tests {
     async fn a_terminal_event_without_a_deadline_is_delivered() {
         let (sink, mut rx, _repaint) = sink_pair(1);
 
-        sink.emit_terminal(ChannelEvent::Disconnected(ChannelType::Main))
-            .await;
+        sink.emit_terminal(ChannelEvent::Disconnected(
+            ChannelType::Main,
+            DisconnectReason::ServerClosed,
+        ))
+        .await;
 
         assert!(matches!(
             rx.try_recv(),
-            Ok(ChannelEvent::Disconnected(ChannelType::Main))
+            Ok(ChannelEvent::Disconnected(ChannelType::Main, _))
         ));
     }
 
@@ -768,8 +815,11 @@ mod tests {
         // A full queue whose receiver has gone must not be waited on: that
         // is the GUI having replaced its queue on reconnect, or exited.
         let started = tokio::time::Instant::now();
-        sink.emit_terminal(ChannelEvent::Disconnected(ChannelType::Main))
-            .await;
+        sink.emit_terminal(ChannelEvent::Disconnected(
+            ChannelType::Main,
+            DisconnectReason::ServerClosed,
+        ))
+        .await;
         assert_eq!(started.elapsed(), Duration::ZERO);
 
         tokio::time::timeout(Duration::from_millis(100), repaint.notified())
@@ -782,21 +832,25 @@ mod tests {
         let (sink, _rx, _repaint) = sink_pair(4);
 
         sink.emit(ChannelEvent::SessionInitialized(1)).await;
-        sink.emit(ChannelEvent::Latency { sample_ms: 2.0 }).await;
+        sink.emit(ChannelEvent::PingInterval { interval_ms: 2.0 })
+            .await;
 
         assert_eq!(sink.drop_stats(), EventDropStats::default());
     }
 
     #[test]
     fn kind_names_the_variant() {
-        assert_eq!(ChannelEvent::Latency { sample_ms: 2.0 }.kind(), "Latency");
+        assert_eq!(
+            ChannelEvent::PingInterval { interval_ms: 2.0 }.kind(),
+            "PingInterval"
+        );
         assert_eq!(
             ChannelEvent::SessionInitialized(1).kind(),
             "SessionInitialized"
         );
         assert_eq!(ChannelEvent::UsbChannelReady.kind(), "UsbChannelReady");
         assert_eq!(
-            ChannelEvent::Disconnected(ChannelType::Main).kind(),
+            ChannelEvent::Disconnected(ChannelType::Main, DisconnectReason::ServerClosed).kind(),
             "Disconnected"
         );
     }

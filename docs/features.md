@@ -46,7 +46,8 @@ for how each subsystem works internally see
 
 - **Statistics tracking** - Sliding-window FPS (from MARK boundaries), throughput, and latency measurements.
 - **Bandwidth sparkline** - Real-time bandwidth graph in the status bar showing rolling bytes/sec history.
-- **Latency sparkline** - Bottom stats panel shows client-observed inter-PING interval from the main channel (lower variance is better; spikes indicate network or server stalls).
+- **Round trip** - `RTT` in the status bar is the inputs channel's round trip, from a pointer move to the server's acknowledgement of it. It updates while the pointer moves.
+- **PING interval sparkline** - Bottom stats panel shows client-observed inter-PING interval from the main channel. It is mostly the server's ping cadence (about 30 s against andris), not a round trip; spikes beyond the cadence indicate network or server stalls.
 - **Streaming indicator** - Small triangle (▶) glyph in the status bar reflects the live SPICE display-stream state: grey (off), green (active), amber (a stream was destroyed in the last 5 s), red (≥3 destroys in 30 s with mean lifetime <3 s — fires a `Warn` notification once per minute). Hover for per-stream codec, dimensions, and decoded-frame counts. See [troubleshooting § Streaming indicator](troubleshooting.md#streaming-indicator).
 - **Guest agent indicator** - `Agent` label in the status bar shows the SPICE guest agent, which carries clipboard sync and guest resizing: green when connected, grey when the server has none (or before the session connects), amber when it was connected and went away. Hover for what that means for the clipboard and resizing.
 - **Protocol-gap counter** - `Gaps: N` button in the status bar tracks the number of distinct protocol edge cases seen this session (unknown opcodes, deferred ops, recoverable decode failures). Highlights red when N > 0; click to open a floating window listing the keys. Complements `--pedantic` mode.
