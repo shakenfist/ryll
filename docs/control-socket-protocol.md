@@ -85,11 +85,11 @@ Version history:
   the guest's through the SPICE vdagent, and asking the guest for a
   display size.
 - Subscribing to an asynchronous stream of events: the server's PING
-  interval and inputs-channel round trips, agent connect/disconnect transitions, paste completion
-  notifications, text the guest copied, per-draw surface
-  notifications, decoded
-  visual-digest updates (on `digest-decode` builds, in both
-  `--headless` and `--web`), and queue-overflow notifications.
+  interval and inputs-channel round trips, agent connect/disconnect
+  transitions, paste completion notifications, text the guest copied,
+  per-draw surface notifications, decoded visual-digest updates (on
+  `digest-decode` builds, in both `--headless` and `--web`), and
+  queue-overflow notifications.
 - Negotiating the protocol version at connection time so clients and
   servers can evolve independently within a major version.
 

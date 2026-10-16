@@ -461,12 +461,16 @@ diagnostics map so a maintainer can compare the dropped
 channel against the others' last-known traffic state.
 Each entry's `state` is `ended` (with `ended_by`, a
 `disconnect_kind`, and `ended_at_secs`), `open` (no end
-reported), or `no_traffic` (no end reported and nothing
-ever received, usually a channel the server never
-offered). The report is written once the frame's queued
-channel events have been handled, so channels that ended
-together all show as ended, not just the one that named
-the report. ryll sends no
+reported yet), or `no_traffic` (no end reported and
+nothing ever received, usually a channel the server never
+offered). The report is written once the UI frame's
+queued channel events have been handled, so every channel
+whose end reached the app in that frame shows as ended,
+not just the one that named the report. A channel that
+noticed the same failure a few milliseconds later, in
+the next frame, still shows as `open`: read `open` as
+"no end reported when the report was written", not as
+"survived the disconnect". ryll sends no
 application-level keepalive on any channel: an idle
 channel is kept alive by TCP keepalive on the socket and
 by answering the server's PINGs.

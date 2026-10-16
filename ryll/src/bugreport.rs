@@ -1207,12 +1207,13 @@ pub struct PerChannelDiagnostics {
 }
 
 /// A channel's state when a disconnect report was written, as far as
-/// the app had heard. The report is written once the frame's queued
-/// events are handled, so channels that ended together all show it.
+/// the app had heard. The report is written once the UI frame's queued
+/// events are handled, so a channel whose end arrived in a later frame
+/// is still `Open` here.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChannelState {
-    /// No end reported. The channel was up, as far as ryll knew.
+    /// No end reported yet. The channel was up, as far as ryll knew.
     #[default]
     Open,
     /// The channel reported that it ended.

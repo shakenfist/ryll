@@ -84,9 +84,9 @@ impl MotionWedgeDetector {
 /// Most motion bunches [`MotionRoundTrip`] waits on at once. The send
 /// throttle keeps two outstanding, and the position updates sent with
 /// each button press and release can add a few more. Past this the
-/// server is not acknowledging what ryll sends (see
-/// [`MotionWedgeDetector`]), so a later ack could not be matched to the
-/// message it answers.
+/// server is falling behind or not acknowledging at all (see
+/// [`MotionWedgeDetector`]), and the oldest bunch is forgotten: its ack,
+/// if it ever comes, gives no sample.
 const MAX_ROUND_TRIPS_PENDING: usize = 8;
 
 /// Times a round trip on the inputs channel, the one place SPICE lets a
@@ -99,31 +99,55 @@ const MAX_ROUND_TRIPS_PENDING: usize = 8;
 /// so the n-th ack answers the (n x `MOTION_ACK_BUNCH`)-th pointer
 /// message ryll sent. That includes the position update sent with each
 /// button press and release, which the send throttle does not count.
+///
+/// Bunches are numbered, so the n-th ack is paired with bunch n by
+/// number rather than by queue position: forgetting a bunch the server
+/// has not answered yet cannot shift every later ack onto the wrong one.
 #[derive(Default)]
 struct MotionRoundTrip {
     /// Pointer messages sent.
     sent: u64,
-    /// When each bunch still awaiting its ack was completed, oldest first.
-    pending: VecDeque<Instant>,
+    /// Acks received that answered a completed bunch.
+    acks: u64,
+    /// Each bunch still awaiting its ack, by number (the first is 1),
+    /// with when it was completed, oldest first.
+    pending: VecDeque<(u64, Instant)>,
 }
 
 impl MotionRoundTrip {
     /// Record a pointer message sent at `now`.
     fn note_sent(&mut self, now: Instant) {
         self.sent += 1;
-        if self.sent.is_multiple_of(u64::from(MOTION_ACK_BUNCH)) {
+        let bunch_size = u64::from(MOTION_ACK_BUNCH);
+        if self.sent.is_multiple_of(bunch_size) {
             if self.pending.len() >= MAX_ROUND_TRIPS_PENDING {
-                self.pending.clear();
+                self.pending.pop_front();
             }
-            self.pending.push_back(now);
+            self.pending.push_back((self.sent / bunch_size, now));
         }
     }
 
     /// Record an ack received at `now`: the round trip in milliseconds,
-    /// or `None` for an ack with no bunch waiting on it.
+    /// or `None` for an ack that answers a bunch already forgotten, or
+    /// no completed bunch at all.
     fn note_ack(&mut self, now: Instant) -> Option<f32> {
-        let sent_at = self.pending.pop_front()?;
-        Some(now.saturating_duration_since(sent_at).as_secs_f32() * 1000.0)
+        // An ack for a bunch not yet completed is the server counting
+        // differently. Counting it would pair every later ack with the
+        // bunch after the one it answers.
+        if self.acks >= self.sent / u64::from(MOTION_ACK_BUNCH) {
+            return None;
+        }
+        self.acks += 1;
+        while self.pending.front().is_some_and(|&(n, _)| n < self.acks) {
+            self.pending.pop_front();
+        }
+        match self.pending.front() {
+            Some(&(n, sent_at)) if n == self.acks => {
+                self.pending.pop_front();
+                Some(now.saturating_duration_since(sent_at).as_secs_f32() * 1000.0)
+            }
+            _ => None,
+        }
     }
 }
 
@@ -1641,23 +1665,62 @@ mod tests {
     }
 
     /// A server that stops acknowledging cannot grow the queue without
-    /// bound, and the bunches sent before it gave up are forgotten.
+    /// bound.
     #[test]
     fn unanswered_bunches_are_bounded() {
         let mut rt = MotionRoundTrip::default();
         let t0 = Instant::now();
-        for _ in 0..(MAX_ROUND_TRIPS_PENDING as u32 * MOTION_ACK_BUNCH) {
+        for _ in 0..(3 * MAX_ROUND_TRIPS_PENDING as u32 * MOTION_ACK_BUNCH) {
             rt.note_sent(t0);
         }
-        let later = t0 + Duration::from_secs(10);
-        for _ in 0..MOTION_ACK_BUNCH {
-            rt.note_sent(later);
+        assert_eq!(rt.pending.len(), MAX_ROUND_TRIPS_PENDING);
+    }
+
+    /// A server that falls behind and then catches up answers the
+    /// forgotten bunches first. Those acks give no sample, and the
+    /// bunches still waiting are each timed from their own send, not
+    /// from a neighbour's.
+    #[test]
+    fn acks_resuming_after_overflow_pair_with_their_own_bunches() {
+        let mut rt = MotionRoundTrip::default();
+        let t0 = Instant::now();
+        let dropped = 2;
+        let bunches = MAX_ROUND_TRIPS_PENDING as u64 + dropped;
+        // Bunch b is completed at t0 + b x 100 ms.
+        for b in 1..=bunches {
+            for _ in 0..MOTION_ACK_BUNCH {
+                rt.note_sent(t0 + Duration::from_millis(b * 100));
+            }
         }
-        assert!(rt.pending.len() <= MAX_ROUND_TRIPS_PENDING);
+        let acked = t0 + Duration::from_secs(5);
+        for b in 1..=dropped {
+            assert_eq!(rt.note_ack(acked), None, "forgotten bunch {b} was timed");
+        }
+        for b in (dropped + 1)..=bunches {
+            let rtt = rt.note_ack(acked).expect("a waiting bunch is timed");
+            let expected = 5000.0 - (b * 100) as f32;
+            assert!(
+                (rtt - expected).abs() < 0.5,
+                "bunch {b}: expected {expected} ms, got {rtt}"
+            );
+        }
+        assert!(rt.pending.is_empty());
+    }
+
+    /// An ack that arrives before any bunch is complete does not shift
+    /// the pairing of the acks after it.
+    #[test]
+    fn a_premature_ack_does_not_misalign_later_ones() {
+        let mut rt = MotionRoundTrip::default();
+        let t0 = Instant::now();
+        assert_eq!(rt.note_ack(t0), None);
+        for _ in 0..MOTION_ACK_BUNCH {
+            rt.note_sent(t0);
+        }
         let rtt = rt
-            .note_ack(later + Duration::from_millis(3))
-            .expect("timed");
-        assert!((rtt - 3.0).abs() < 0.5, "a stale bunch was answered: {rtt}");
+            .note_ack(t0 + Duration::from_millis(7))
+            .expect("the bunch is timed");
+        assert!((rtt - 7.0).abs() < 0.5, "expected 7 ms, got {rtt}");
     }
 
     // make_scancode logic for reference:
