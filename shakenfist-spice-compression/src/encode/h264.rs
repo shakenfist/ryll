@@ -116,7 +116,12 @@ fn default_slices() -> u32 {
 ///
 /// Video also encodes faster: 0.50 against 0.81 ms a frame without
 /// skipping.
+///
+/// Matches outside this crate need a wildcard arm: it is
+/// `#[non_exhaustive]`, so a later openh264 usage can be added
+/// without a breaking release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum H264Content {
     /// A desktop: text, flat areas and sharp edges, which change in
     /// patches and often not at all (`ScreenContentRealTime`). What
@@ -129,7 +134,10 @@ pub enum H264Content {
 }
 
 /// How openh264 spends the target bitrate.
+///
+/// `#[non_exhaustive]` for the same reason as [`H264Content`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum H264RateControl {
     /// Budget each frame as the target bitrate divided by the frame
     /// rate, ignoring timestamps. A server that knows its frame rate
@@ -143,8 +151,11 @@ pub enum H264RateControl {
 /// How to build an [`H264Encoder`].
 ///
 /// [`H264Config::new`] fills in defaults, which a caller then changes
-/// field by field.
+/// field by field. It is `#[non_exhaustive]`, so a new encoder option
+/// is not a breaking release; outside this crate that also rules out
+/// a struct literal, including `..H264Config::new(..)`.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct H264Config {
     /// Frame size. Both must be even, at most 3840 on the longer side
     /// and 2160 on the shorter.

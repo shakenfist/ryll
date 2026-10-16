@@ -21,7 +21,10 @@ for servers (see the Encoders item below):
   frame rate can change while it runs. Its `H264Content` says
   whether the frames are a desktop or a moving picture, which
   decides how openh264 holds the bitrate: a stream of video should
-  be encoded as `Video`.
+  be encoded as `Video`. Build an `H264Config` with
+  `H264Config::new` and then set its fields. It and both its enums
+  are `#[non_exhaustive]`, so a struct literal won't compile and a
+  `match` needs a wildcard arm.
 
 The crate name covers both directions. Decompression is the
 default; compression is opt-in through `encode`.

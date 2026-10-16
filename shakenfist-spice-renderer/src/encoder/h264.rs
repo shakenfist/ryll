@@ -106,12 +106,10 @@ impl H264Encoder {
         }
         // One slice, as before the encoder moved: browsers have not
         // been tried with multi-slice frames.
-        let config = H264Config {
-            rate_control: H264RateControl::Quality,
-            skip_frames: true,
-            slices: 1,
-            ..H264Config::new(w, h, fps)
-        };
+        let mut config = H264Config::new(w, h, fps);
+        config.rate_control = H264RateControl::Quality;
+        config.skip_frames = true;
+        config.slices = 1;
         Ok(Self {
             inner: shakenfist_spice_compression::H264Encoder::new(config)?,
         })
