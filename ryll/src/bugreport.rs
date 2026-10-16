@@ -186,15 +186,9 @@ impl TrafficRingBuffer {
     /// Write all buffered pcap frames to a writer.
     #[cfg(feature = "capture")]
     pub fn write_pcap_to<W: std::io::Write>(&self, writer: W) -> anyhow::Result<usize> {
-        use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
-        use pcap_file::DataLink;
+        use pcap_file::pcap::{PcapPacket, PcapWriter};
 
-        let header = PcapHeader {
-            datalink: DataLink::ETHERNET,
-            snaplen: REPORT_PCAP_SNAPLEN,
-            ..Default::default()
-        };
-        let mut pcap = PcapWriter::with_header(writer, header)?;
+        let mut pcap = PcapWriter::with_header(writer, crate::capture::pcap_header())?;
 
         let mut count = 0;
         for entry in &self.entries {
@@ -206,13 +200,13 @@ impl TrafficRingBuffer {
                 // PcapPacket wants &[u8].
                 &entry.pcap_frame[..],
             );
-            pcap.write_packet(&packet).ok();
+            pcap.write_packet(&packet)?;
             // Additional segments for SPICE messages that exceeded the IPv4
             // frame limit. Written at the same timestamp — matches what the
             // live capture writer produces for the same payload.
             for seg in &entry.additional_segments {
                 let seg_packet = PcapPacket::new(entry.timestamp, seg.len() as u32, &seg[..]);
-                pcap.write_packet(&seg_packet).ok();
+                pcap.write_packet(&seg_packet)?;
             }
             // `count` reflects the number of SPICE messages, not segments.
             count += 1;
@@ -264,15 +258,6 @@ const REPORT_OVERHEAD_BYTES: usize = 256 * 1024;
 /// `REPORT_TARGET_BYTES`. The zip is then over the target, and the
 /// GUI says so when it saves it.
 const MIN_REPORT_PCAP_BYTES: usize = 4 * 1024 * 1024;
-
-/// The snapshot length in a report pcap's header: libpcap's
-/// maximum, as tcpdump writes. pcap-file refuses a packet longer
-/// than the header's snaplen, and its default of 65535 is shorter
-/// than a full segment of a large SPICE message (14 bytes of
-/// Ethernet ahead of a 65535-byte IPv4 packet), so the first
-/// segment of every display message over 64 KB used to be dropped.
-#[cfg(feature = "capture")]
-const REPORT_PCAP_SNAPLEN: u32 = 262_144;
 
 /// pcap's file header, and the record header before each packet.
 #[cfg(feature = "capture")]
@@ -341,26 +326,27 @@ fn write_newest_pcap(
     segments: &[(Duration, Arc<[u8]>)],
     budget_bytes: usize,
 ) -> Option<(Vec<u8>, TrafficCaptureSummary)> {
-    use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
-    use pcap_file::DataLink;
+    use pcap_file::pcap::{PcapPacket, PcapWriter};
 
     let start = newest_within_budget(segments, budget_bytes);
     let (omitted, kept) = segments.split_at(start);
 
-    let header = PcapHeader {
-        datalink: DataLink::ETHERNET,
-        snaplen: REPORT_PCAP_SNAPLEN,
-        ..Default::default()
-    };
     let mut output = Vec::new();
-    {
-        let mut pcap = PcapWriter::with_header(&mut output, header).ok()?;
+    let written: Result<(), pcap_file::PcapError> = (|| {
+        let mut pcap = PcapWriter::with_header(&mut output, crate::capture::pcap_header())?;
         for (ts, seg) in kept {
-            let packet = PcapPacket::new(*ts, seg.len() as u32, &seg[..]);
-            // A packet the writer refuses would leave a pcap that
-            // silently disagrees with the summary below.
-            pcap.write_packet(&packet).ok()?;
+            pcap.write_packet(&PcapPacket::new(*ts, seg.len() as u32, &seg[..]))?;
         }
+        Ok(())
+    })();
+    // A packet the writer refuses would leave a pcap that silently
+    // disagrees with the summary below, so the report goes without one.
+    if let Err(e) = written {
+        tracing::warn!(
+            "bugreport: traffic.pcap left out, the pcap writer failed: {}",
+            e
+        );
+        return None;
     }
 
     let summary = TrafficCaptureSummary {
@@ -4137,9 +4123,8 @@ mod tests {
         assert!(capture["packets_omitted"].as_u64().unwrap() > 0);
         assert!(capture["written_bytes"].as_u64().unwrap() > MIN_REPORT_PCAP_BYTES as u64);
 
-        let tmp = std::env::temp_dir().join("ryll-test-bugreport-full-ring");
-        let _ = std::fs::remove_dir_all(&tmp);
-        let path = report.write_zip(&tmp).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = report.write_zip(tmp.path()).unwrap();
         let size = std::fs::metadata(&path).unwrap().len();
         assert!(size <= REPORT_TARGET_BYTES as u64, "zip is {size} bytes");
         assert_eq!(oversized_for_attachment(&path), None);
@@ -4161,15 +4146,12 @@ mod tests {
         assert_eq!(packets, capture["packets_written"].as_u64().unwrap());
         // Whole messages only: two segments each.
         assert_eq!(packets % 2, 0);
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn oversized_for_attachment_reports_only_what_is_over_the_limit() {
-        let tmp = std::env::temp_dir().join("ryll-test-bugreport-oversized");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path();
 
         let small = tmp.join("small.zip");
         std::fs::write(&small, b"small").unwrap();
@@ -4185,7 +4167,6 @@ mod tests {
         );
 
         assert_eq!(oversized_for_attachment(&tmp.join("missing.zip")), None);
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

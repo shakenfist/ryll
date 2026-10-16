@@ -35,13 +35,13 @@ pub const DEFAULT_AUTO_SNAPSHOT_CAP: usize = 20;
 /// Default rolling cap on the total bytes of auto-snapshot zips kept on
 /// disk, in bytes.
 ///
-/// A count-only cap does not bound disk use: each zip embeds
-/// `traffic.pcap` merged from all six traffic rings, stored with
-/// `CompressionMethod::Stored`, so on a busy session one snapshot
-/// approaches the 50 MiB ring budget and 20 of them are ~1 GB. 512 MiB
-/// bounds the busy case at roughly ten full-size snapshots while
-/// leaving the count cap the binding constraint in the far more common
-/// quiet session, whose zips are single-digit MiB.
+/// Every report's pcap is trimmed to fit `REPORT_TARGET_BYTES` (24 MB),
+/// and an auto-snapshot has no screenshot to push it over, so 20
+/// full-size snapshots come to about 480 MB and the count cap binds in
+/// busy and quiet sessions alike. 512 MiB is a backstop for the case
+/// that budget does not cover: a snapshot that goes over it, which the
+/// 4 MiB pcap floor allows only when the other files are unexpectedly
+/// large.
 pub const DEFAULT_AUTO_SNAPSHOT_BYTE_CAP: u64 = 512 * 1024 * 1024;
 
 /// Cool-down between failure notifications so a persistent error (e.g.

@@ -276,13 +276,15 @@ per-channel pcaps, which is the way to keep everything.
 | `truncated` | `true` when older traffic was left out |
 
 It is `null` in a build without the `capture` feature, which writes
-no pcap.
+no pcap, and when the pcap writer failed, which is logged and leaves
+`traffic.pcap` out of the report.
 
-Report pcaps use a 262144-byte snaplen, as tcpdump does. With
-pcap-file's default of 65535, the writer refused the first segment
-of any SPICE message over 64 KB (a full segment is 65549 bytes with
-its Ethernet header), so report pcaps used to lose part of every
-large display message.
+Report pcaps and `--capture` pcaps use a 262144-byte snaplen, as
+tcpdump does. With pcap-file's default of 65535, the writer refused
+the first segment of any SPICE message over 64 KB (a full segment is
+65549 bytes with its Ethernet header), so both used to lose part of
+every large display message. A `--capture` pcap that still refuses a
+frame logs a warning, once per channel.
 
 ### Display region selection
 
@@ -550,8 +552,10 @@ Key design points:
   `channel_name()` returns `"all"`. This causes `BugReport::
   assemble` to embed a merged JSON object in `channel-state.json`
   containing every channel's snapshot (display, inputs, cursor,
-  main, playback, usbredir, webdav). The traffic pcap also covers
-  all channels via `TrafficBuffers::drain_all_pcap_bytes()`.
+  main, playback, usbredir, webdav). The traffic pcap merges all
+  channels via `TrafficBuffers::drain_all_pcap_within()`, keeping
+  the newest traffic that fits the report's size budget (see
+  [Report size](#report-size)).
 - `AutoSnapshotState` in `ryll/src/auto_snapshot.rs` bundles the
   Arc handles the task needs (traffic, channel snapshots, app
   snapshot, notifications, target, output dir, cap,
