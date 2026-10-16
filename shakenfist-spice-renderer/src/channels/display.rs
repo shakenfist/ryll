@@ -21,7 +21,7 @@ use shakenfist_spice_compression::{
     SPICE_VIDEO_CODEC_TYPE_H264, SPICE_VIDEO_CODEC_TYPE_MJPEG,
 };
 use shakenfist_spice_protocol::constants::{bitmap_flags, bitmap_fmt, ropd};
-use shakenfist_spice_protocol::link::SpiceStream;
+use shakenfist_spice_protocol::link::{H264Offer, SpiceStream};
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
     make_message, BinaryData, BitmapHeader, DisplayInit, DisplayMonitorsConfig, DrawBase,
@@ -158,34 +158,17 @@ const MAX_RECENT_DESTROYED_STREAMS: usize = 16;
 /// The video codecs ryll asks the server to stream, most preferred
 /// first, sent once at link-up in `PREFERRED_VIDEO_CODEC_TYPE`.
 ///
-/// MJPEG only. H.264 from spice-server's GStreamer encoder does not
-/// decode yet (shakenfist/ryll#398), so asking for it would leave video
-/// regions black or stale. Listing H.264 second would not be enough:
-/// spice-server only uses this list to reorder its own codec list, so a
-/// listed codec is never excluded. What actually keeps H.264 off the
-/// wire is leaving `DISPLAY_CODEC_H264` out of the advertised display
-/// capabilities (see `capabilities::DEFAULT_DISPLAY`); this list just
-/// stays consistent with that. The H.264 decoder is kept, so restoring
-/// `SPICE_VIDEO_CODEC_TYPE_H264` here and the capability bit is the
-/// whole change once #398 is fixed. Until then `--experimental-h264`
-/// opts a session in; see [`EXPERIMENTAL_H264_PREFERRED_VIDEO_CODECS`].
-const PREFERRED_VIDEO_CODECS: &[u8] = &[SPICE_VIDEO_CODEC_TYPE_MJPEG];
-
-/// The video codec preference sent when the user opts in to H.264 from
-/// spice-server with `--experimental-h264`: H.264 then MJPEG, as ryll
-/// sent before #398 disabled it. The session also advertises
-/// `DISPLAY_CODEC_H264` in that case (`link::display_channel_caps`),
-/// which is what actually lets the server choose H.264.
-const EXPERIMENTAL_H264_PREFERRED_VIDEO_CODECS: &[u8] =
-    &[SPICE_VIDEO_CODEC_TYPE_H264, SPICE_VIDEO_CODEC_TYPE_MJPEG];
-
-/// The video codec preference to send at link-up, given whether the
-/// `--experimental-h264` opt-in is on.
-fn preferred_video_codecs(experimental_h264: bool) -> &'static [u8] {
-    if experimental_h264 {
-        EXPERIMENTAL_H264_PREFERRED_VIDEO_CODECS
-    } else {
-        PREFERRED_VIDEO_CODECS
+/// MJPEG then H.264 by default. spice-server tries its codecs in this
+/// order, so it streams MJPEG, avoiding its GStreamer H.264, which does
+/// not decode in ryll (shakenfist/ryll#398), while a server that only
+/// encodes H.264 can still stream that. The capability bit, not this
+/// list, is what makes H.264 eligible at all (`link::display_channel_caps`).
+/// `--experimental-h264` puts H.264 first, and `--no-h264` drops it.
+fn preferred_video_codecs(h264: H264Offer) -> &'static [u8] {
+    match h264 {
+        H264Offer::Off => &[SPICE_VIDEO_CODEC_TYPE_MJPEG],
+        H264Offer::AfterMjpeg => &[SPICE_VIDEO_CODEC_TYPE_MJPEG, SPICE_VIDEO_CODEC_TYPE_H264],
+        H264Offer::Preferred => &[SPICE_VIDEO_CODEC_TYPE_H264, SPICE_VIDEO_CODEC_TYPE_MJPEG],
     }
 }
 
@@ -443,6 +426,59 @@ fn ltrb(rect: &Rect) -> (u32, u32, u32, u32) {
         rect.right as u32,
         rect.bottom as u32,
     )
+}
+
+/// Crop a decoded stream frame to its top-left `dest_w` x `dest_h`
+/// corner, or less where the frame is smaller.
+///
+/// `ImageReady` pixels are tightly packed, `width * 4` bytes a row. A
+/// frame wider than its dest (an H.264 frame rounded up to whole
+/// macroblocks, or a server's frame overhanging its dest rect) has rows
+/// longer than that, so each kept row is moved down to the cropped
+/// stride. Narrowing only the reported width would leave the rows at
+/// the frame's stride, and the frame would paint sheared. A frame no
+/// wider than its dest only loses its surplus rows.
+///
+/// A frame whose pixels are shorter than its dimensions claim is a
+/// decode failure. Neither decoder produces one.
+fn crop_frame_to_dest(
+    frame: video::DecodedFrame,
+    dest_w: u32,
+    dest_h: u32,
+) -> Result<video::DecodedFrame, VideoDecoderError> {
+    let video::DecodedFrame {
+        mut rgba,
+        width: frame_w,
+        height: frame_h,
+    } = frame;
+    let src_stride = (frame_w as usize) * 4;
+    if !matches!(src_stride.checked_mul(frame_h as usize), Some(n) if n <= rgba.len()) {
+        return Err(VideoDecoderError::Decode(format!(
+            "{}x{} frame carries only {} bytes of pixels",
+            frame_w,
+            frame_h,
+            rgba.len()
+        )));
+    }
+
+    let width = frame_w.min(dest_w);
+    let height = frame_h.min(dest_h);
+    let row_bytes = (width as usize) * 4;
+    if width < frame_w {
+        // Row y moves from y * src_stride down to y * row_bytes, which
+        // is never later, so a forward pass never overwrites a row it
+        // has yet to move.
+        for y in 1..height as usize {
+            let src = y * src_stride;
+            rgba.copy_within(src..src + row_bytes, y * row_bytes);
+        }
+    }
+    rgba.truncate(row_bytes * height as usize);
+    Ok(video::DecodedFrame {
+        rgba,
+        width,
+        height,
+    })
 }
 
 /// A draw's clip as the rectangle list its event carries: empty for an
@@ -901,11 +937,11 @@ pub struct DisplayChannel {
     /// evaluates the STREAM_REPORT trigger predicate and computes
     /// `last_frame_delay` at send time.
     mm_clock: Arc<MmClock>,
-    /// Whether the user opted in to H.264 from spice-server with
-    /// `--experimental-h264` (ryll#398). Picks the link-up video codec
+    /// How the session offers H.264 (`--no-h264`,
+    /// `--experimental-h264`). Picks the link-up video codec
     /// preference; the matching capability bit was chosen when the
     /// channel linked.
-    experimental_h264: bool,
+    h264: H264Offer,
     /// Bounded ring of the most recent MJPEG decode durations in
     /// microseconds, newest at the back. Capped at `MAX_RECENT_DECODES`
     /// to match the non-stream recent-decode ring. Used by
@@ -965,7 +1001,7 @@ impl DisplayChannel {
         glz_dictionary: SharedGlzDictionary,
         log_config: LogConfig,
         mm_clock: Arc<MmClock>,
-        experimental_h264: bool,
+        h264: H264Offer,
         image_cache_cap_bytes: usize,
         preferred_compression: u8,
     ) -> Self {
@@ -1017,7 +1053,7 @@ impl DisplayChannel {
             last_send_snapshot_publish: None,
             recently_destroyed_streams: VecDeque::new(),
             mm_clock,
-            experimental_h264,
+            h264,
             mjpeg_recent_durations: VecDeque::new(),
             mjpeg_decode_total_count: 0,
             mjpeg_decode_failed_count: 0,
@@ -1142,7 +1178,7 @@ impl DisplayChannel {
         // `auto-glz` is in docs/configuration.md.
         self.send_preferred_compression(self.preferred_compression)
             .await?;
-        self.send_preferred_video_codec_type(preferred_video_codecs(self.experimental_h264))
+        self.send_preferred_video_codec_type(preferred_video_codecs(self.h264))
             .await?;
         Ok(())
     }
@@ -1889,6 +1925,14 @@ impl DisplayChannel {
                     let decode_result = stream.video_decoder.decode(jpeg_data);
                     let decode_duration_us =
                         u32::try_from(decode_start.elapsed().as_micros()).unwrap_or(u32::MAX);
+                    // Crop to the dest before the counters below, so a
+                    // frame too short for its own dimensions counts as
+                    // the decode failure it is.
+                    let decode_result = decode_result.and_then(|frame| {
+                        frame
+                            .map(|frame| crop_frame_to_dest(frame, w, h))
+                            .transpose()
+                    });
 
                     // Aggregate decode duration tracking per codec. Gate on
                     // codec_type so each ring receives only its own samples —
@@ -1922,7 +1966,7 @@ impl DisplayChannel {
                     match decode_result {
                         Ok(Some(frame)) => {
                             debug!(
-                                "display: stream {} {} frame {}x{} → ({},{})",
+                                "display: stream {} {} frame, cropped to {}x{} → ({},{})",
                                 stream_id,
                                 stream.video_decoder.name(),
                                 frame.width,
@@ -1940,8 +1984,8 @@ impl DisplayChannel {
                                     surface_id,
                                     left,
                                     top,
-                                    width: frame.width.min(w),
-                                    height: frame.height.min(h),
+                                    width: frame.width,
+                                    height: frame.height,
                                     pixels: frame.rgba,
                                     image_id: 0,
                                     produced_at_secs: now_secs,
@@ -3328,7 +3372,7 @@ impl DisplayChannel {
         // having to read the pcap.
         snap.pref_compression_sent = self.pref_compression_sent;
         snap.pref_video_codec_type_sent = self.pref_video_codec_type_sent;
-        snap.experimental_h264 = self.experimental_h264;
+        snap.h264_offer = self.h264;
 
         self.opcodes.publish_into(&mut *snap);
     }
@@ -3466,6 +3510,7 @@ mod tests {
     use shakenfist_spice_protocol::constants::{clip_type, image_compression};
     use shakenfist_spice_protocol::messages::{
         BitmapPalette, BitmapPayload, Clip, DrawCopyBuilder, ImagePayload, SpiceImage,
+        StreamDataHeader, StreamDataSized,
     };
 
     // -------------------------------------------------------------------------
@@ -4278,7 +4323,7 @@ mod tests {
             DisplayChannel::new_shared_glz_dictionary(1024 * 1024),
             LogConfig::default(),
             Arc::new(MmClock::new()),
-            false,
+            H264Offer::default(),
             1024 * 1024,
             image_compression::AUTO_GLZ,
         );
@@ -4598,6 +4643,134 @@ mod tests {
             .expect("a short STREAM_DESTROY is ignored");
         assert!(channel.streams.contains_key(&7));
         assert_eq!(channel.streams_destroyed_total, 0);
+    }
+
+    // A frame wider than its dest used to be painted with its width
+    // narrowed but its rows left at the frame's stride, so each row
+    // started further into the frame than the last and the frame
+    // painted sheared. This drives a real frame through the channel and
+    // the surface mirror every mode paints with.
+    #[tokio::test]
+    async fn stream_frame_larger_than_its_dest_paints_its_top_left_corner() {
+        use crate::surface_mirror::SurfaceMirror;
+        use image::codecs::jpeg::JpegEncoder;
+
+        const SURFACE: u32 = 32;
+        const FRAME_W: u32 = 24;
+        const FRAME_H: u32 = 16;
+        let (left, top, dest_w, dest_h) = (4u32, 2u32, 16u32, 8u32);
+
+        // Each pixel differs from its neighbours, so a row read from
+        // the wrong offset shows.
+        let rgb: Vec<u8> = (0..FRAME_H)
+            .flat_map(|y| (0..FRAME_W).flat_map(move |x| [(x * 10) as u8, (y * 15) as u8, 128]))
+            .collect();
+        let mut jpeg = Vec::new();
+        JpegEncoder::new_with_quality(&mut jpeg, 90)
+            .encode(&rgb, FRAME_W, FRAME_H, image::ExtendedColorType::Rgb8)
+            .expect("encode the test frame");
+
+        let (mut channel, mut peers) = test_display_channel().await;
+        // JPEG is lossy, so the expected pixels are a separate decode.
+        let decoded = video::for_stream(SPICE_VIDEO_CODEC_TYPE_MJPEG, channel.jpeg_decoder.clone())
+            .expect("an MJPEG decoder")
+            .decode(&jpeg)
+            .expect("the test frame decodes")
+            .expect("MJPEG yields a frame per packet");
+        assert_eq!((decoded.width, decoded.height), (FRAME_W, FRAME_H));
+
+        channel
+            .handle_message(
+                display_server::STREAM_CREATE,
+                &stream_create_payload(7, SPICE_VIDEO_CODEC_TYPE_MJPEG),
+            )
+            .await
+            .expect("stream_create must not error");
+        let mut frame = Vec::new();
+        StreamDataSized {
+            base: StreamDataHeader {
+                id: 7,
+                multi_media_time: 0,
+            },
+            width: FRAME_W,
+            height: FRAME_H,
+            dest: Rect {
+                top: top as i32,
+                left: left as i32,
+                bottom: (top + dest_h) as i32,
+                right: (left + dest_w) as i32,
+            },
+            data: jpeg,
+        }
+        .write(&mut frame);
+        channel
+            .handle_message(display_server::STREAM_DATA_SIZED, &frame)
+            .await
+            .expect("stream_data_sized must not error");
+
+        let mut mirror = SurfaceMirror::new();
+        mirror.apply_event(&ChannelEvent::SurfaceCreated {
+            display_channel_id: 0,
+            surface_id: 0,
+            width: SURFACE,
+            height: SURFACE,
+        });
+        let mut painted = 0;
+        while let Ok(event) = peers.events.try_recv() {
+            if matches!(event, ChannelEvent::ImageReady { .. }) {
+                mirror.apply_event(&event);
+                painted += 1;
+            }
+        }
+        assert_eq!(painted, 1, "the frame is painted once");
+
+        let surface = mirror.primary_surface().expect("the surface exists");
+        let pixel = |pixels: &[u8], stride: u32, x: u32, y: u32| {
+            let i = ((y * stride + x) * 4) as usize;
+            pixels[i..i + 4].to_vec()
+        };
+        for y in 0..SURFACE {
+            for x in 0..SURFACE {
+                let in_dest =
+                    (left..left + dest_w).contains(&x) && (top..top + dest_h).contains(&y);
+                let expected = if in_dest {
+                    pixel(&decoded.rgba, FRAME_W, x - left, y - top)
+                } else {
+                    vec![0, 0, 0, 255]
+                };
+                assert_eq!(
+                    pixel(surface.pixels(), SURFACE, x, y),
+                    expected,
+                    "surface pixel ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_frame_within_its_dest_is_not_cropped() {
+        let rgba: Vec<u8> = (0..2 * 3 * 4).map(|b| b as u8).collect();
+        let frame = video::DecodedFrame {
+            rgba: rgba.clone(),
+            width: 2,
+            height: 3,
+        };
+        let cropped = crop_frame_to_dest(frame, 4, 3).expect("a whole frame crops");
+        assert_eq!((cropped.width, cropped.height), (2, 3));
+        assert_eq!(cropped.rgba, rgba);
+    }
+
+    #[test]
+    fn a_frame_short_of_its_dimensions_is_a_decode_failure() {
+        let frame = video::DecodedFrame {
+            rgba: vec![0; 2 * 2 * 4 - 1],
+            width: 2,
+            height: 2,
+        };
+        assert!(matches!(
+            crop_frame_to_dest(frame, 1, 1),
+            Err(VideoDecoderError::Decode(_))
+        ));
     }
 
     #[tokio::test]
@@ -5479,9 +5652,8 @@ mod tests {
                 .await
                 .expect("send link-up preferences");
             assert_eq!(peers.read_sent(7).await, vec![103, 0, 1, 0, 0, 0, wire]);
-            // MJPEG (1) only until shakenfist/ryll#398 is fixed; see
-            // PREFERRED_VIDEO_CODECS.
-            assert_eq!(peers.read_sent(8).await, vec![105, 0, 2, 0, 0, 0, 1, 1]);
+            // MJPEG (1) then H.264 (3); see preferred_video_codecs.
+            assert_eq!(peers.read_sent(9).await, vec![105, 0, 3, 0, 0, 0, 2, 1, 3]);
         }
     }
 
@@ -5507,21 +5679,28 @@ mod tests {
             .expect("send PREFERRED_COMPRESSION");
         assert_eq!(peers.read_sent(7).await, vec![103, 0, 1, 0, 0, 0, 2]);
 
-        // What run_loop sends at link-up: MJPEG (1) only, until
-        // shakenfist/ryll#398 is fixed. See PREFERRED_VIDEO_CODECS.
+        // What run_loop sends at link-up by default: MJPEG (1) then
+        // H.264 (3). See preferred_video_codecs.
         channel
-            .send_preferred_video_codec_type(preferred_video_codecs(false))
+            .send_preferred_video_codec_type(preferred_video_codecs(H264Offer::default()))
             .await
             .expect("send PREFERRED_VIDEO_CODEC_TYPE");
-        assert_eq!(peers.read_sent(8).await, vec![105, 0, 2, 0, 0, 0, 1, 1]);
+        assert_eq!(peers.read_sent(9).await, vec![105, 0, 3, 0, 0, 0, 2, 1, 3]);
 
         // With --experimental-h264: H.264 (3) then MJPEG (1), the
         // multi-codec list keeping its order on the wire.
         channel
-            .send_preferred_video_codec_type(preferred_video_codecs(true))
+            .send_preferred_video_codec_type(preferred_video_codecs(H264Offer::Preferred))
             .await
             .expect("send PREFERRED_VIDEO_CODEC_TYPE");
         assert_eq!(peers.read_sent(9).await, vec![105, 0, 3, 0, 0, 0, 2, 3, 1]);
+
+        // With --no-h264: MJPEG (1) only.
+        channel
+            .send_preferred_video_codec_type(preferred_video_codecs(H264Offer::Off))
+            .await
+            .expect("send PREFERRED_VIDEO_CODEC_TYPE");
+        assert_eq!(peers.read_sent(8).await, vec![105, 0, 2, 0, 0, 0, 1, 1]);
 
         // More codecs than the u8 count can say: the first 255 are sent.
         let codecs: Vec<u8> = (0..300).map(|i| (i % 7) as u8).collect();
@@ -5535,16 +5714,22 @@ mod tests {
     }
 
     #[test]
-    fn preferred_video_codecs_follow_the_experimental_h264_opt_in() {
-        // Default: MJPEG only, until shakenfist/ryll#398 is fixed.
+    fn preferred_video_codecs_follow_the_h264_offer() {
+        // Default: MJPEG first, so spice-server keeps streaming MJPEG
+        // (shakenfist/ryll#398), then H.264.
         assert_eq!(
-            preferred_video_codecs(false),
-            &[SPICE_VIDEO_CODEC_TYPE_MJPEG]
+            preferred_video_codecs(H264Offer::default()),
+            &[SPICE_VIDEO_CODEC_TYPE_MJPEG, SPICE_VIDEO_CODEC_TYPE_H264]
         );
         // --experimental-h264: H.264 first, MJPEG as the fallback.
         assert_eq!(
-            preferred_video_codecs(true),
+            preferred_video_codecs(H264Offer::Preferred),
             &[SPICE_VIDEO_CODEC_TYPE_H264, SPICE_VIDEO_CODEC_TYPE_MJPEG]
+        );
+        // --no-h264: MJPEG only.
+        assert_eq!(
+            preferred_video_codecs(H264Offer::Off),
+            &[SPICE_VIDEO_CODEC_TYPE_MJPEG]
         );
     }
 

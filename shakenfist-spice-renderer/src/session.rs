@@ -21,7 +21,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::sync::{broadcast, mpsc, oneshot, watch, Notify};
@@ -29,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use shakenfist_spice_protocol::constants::capabilities;
-use shakenfist_spice_protocol::link::display_channel_caps;
+use shakenfist_spice_protocol::link::{display_channel_caps, H264Offer};
 use shakenfist_spice_protocol::{
     ChannelType, ConnectionConfig, NotifySeverity, SpiceClient, CA_ALONE_WARNING,
 };
@@ -86,15 +86,8 @@ const CONNECTION_JOIN_GRACE: Duration = Duration::from_secs(2);
 /// pressuring the SPICE channel producers.
 pub const EVENT_BROADCAST_CAPACITY: usize = 1024;
 
-/// Minimal stats tracker used by the headless event drain. The
-/// GUI tracks much richer stats inside `RyllApp`; headless only
-/// needs aggregated counters for the periodic info log.
-#[derive(Default)]
-struct HeadlessStats {
-    frames_received: u64,
-    bytes_in: u64,
-    bytes_out: u64,
-}
+/// How often headless logs its `Stats:` line.
+const HEADLESS_STATS_PERIOD: Duration = Duration::from_secs(10);
 
 /// Minimal `StatusProvider` implementation for headless mode.
 ///
@@ -192,10 +185,10 @@ impl crate::control::StatusProvider for SessionStatus {
 /// should create a fresh one for every attempt: its senders are dropped
 /// when this session ends.
 ///
-/// `experimental_h264` is the `--experimental-h264` opt-in: each display
-/// channel then advertises `DISPLAY_CODEC_H264` and asks for H.264 ahead
-/// of MJPEG. Off by default because H.264 from spice-server does not
-/// decode yet (shakenfist/ryll#398).
+/// `h264` is how each display channel offers H.264: by default it
+/// advertises `DISPLAY_CODEC_H264` and asks for H.264 after MJPEG;
+/// `--experimental-h264` asks for it first and `--no-h264` offers it
+/// not at all. See [`H264Offer`].
 #[allow(clippy::too_many_arguments)]
 pub async fn run_connection(
     config: ConnectionConfig,
@@ -219,7 +212,7 @@ pub async fn run_connection(
     cancel: Arc<AtomicBool>,
     clipboard: Option<Arc<dyn ClipboardBackend>>,
     opus_sink: Option<Arc<dyn OpusPacketSink>>,
-    experimental_h264: bool,
+    h264: H264Offer,
     image_cache_cap_bytes: usize,
     glz_dictionary_cap_bytes: usize,
     preferred_compression: u8,
@@ -337,14 +330,14 @@ pub async fn run_connection(
         match channel_type {
             ChannelType::Display => {
                 // Linked with the caps for this session rather than the
-                // defaults: `--experimental-h264` adds CODEC_H264.
+                // defaults: `--no-h264` drops CODEC_H264.
                 let (stream, _reply) = client
                     .connect_channel_with_caps(
                         session_id,
                         channel_type,
                         channel_id,
                         &[capabilities::DEFAULT_COMMON],
-                        &[display_channel_caps(experimental_h264)],
+                        &[display_channel_caps(h264)],
                     )
                     .await?;
                 let mut channel = DisplayChannel::new(
@@ -358,7 +351,7 @@ pub async fn run_connection(
                     shared_glz_dictionary.clone(),
                     log_config,
                     mm_clock.clone(),
-                    experimental_h264,
+                    h264,
                     image_cache_cap_bytes,
                     preferred_compression,
                 );
@@ -666,7 +659,7 @@ pub async fn run_headless(
     notifications: Arc<dyn NotificationSink>,
     log_config: LogConfig,
     cancel: Arc<AtomicBool>,
-    experimental_h264: bool,
+    h264: H264Offer,
     image_cache_cap_bytes: usize,
     glz_dictionary_cap_bytes: usize,
     preferred_compression: u8,
@@ -695,6 +688,12 @@ pub async fn run_headless(
     // hold theirs.
     #[cfg_attr(not(unix), allow(unused_variables))]
     let (resize_tx, resize_rx) = mpsc::channel(32);
+    // The display channel's counters, for the control socket's `stats`
+    // verb; `snapshots` itself moves into the connection task.
+    #[cfg_attr(not(unix), allow(unused_variables))]
+    let display_snapshot = snapshots.display.clone();
+    // For the periodic `Stats:` line.
+    let stats_snapshots = snapshots.clone();
 
     // The clipboard the main channel syncs with the guest, which the
     // control socket's `clipboard_*` verbs read and write. Made only
@@ -788,7 +787,7 @@ pub async fn run_headless(
             cancel_for_conn,
             clipboard_for_conn,
             None, // headless mode: no opus sink (cpal output only)
-            experimental_h264,
+            h264,
             image_cache_cap_bytes,
             glz_dictionary_cap_bytes,
             preferred_compression,
@@ -859,6 +858,7 @@ pub async fn run_headless(
             surface_mirror: surface_mirror.clone(),
             clipboard,
             resize_tx: resize_tx.clone(),
+            display_snapshot: display_snapshot.clone(),
         };
         spawn_control_socket(
             server,
@@ -939,8 +939,12 @@ pub async fn run_headless(
     // broadcast bus rather than the original mpsc — exactly the
     // same `ChannelEvent` stream, fan-out architecture.
     let mut event_rx = stats_event_rx;
-    let mut stats = HeadlessStats::default();
-    let mut last_stats_print = Instant::now();
+    // Image draws seen on the event bus, for the `Stats:` line.
+    let mut images_received: u64 = 0;
+    let mut stats_tick = tokio::time::interval_at(
+        tokio::time::Instant::now() + HEADLESS_STATS_PERIOD,
+        HEADLESS_STATS_PERIOD,
+    );
     let mut paste_failed = false;
     // Set when the loop stops because the connection task finished.
     // Every other way out leaves it `None`, and the task is joined
@@ -990,11 +994,7 @@ pub async fn run_headless(
                     ChannelEvent::SurfaceCreated { .. } => {
                     }
                     ChannelEvent::ImageReady { .. } => {
-                        stats.frames_received += 1;
-                    }
-                    ChannelEvent::Statistics { bytes_in, bytes_out, .. } => {
-                        stats.bytes_in += bytes_in;
-                        stats.bytes_out += bytes_out;
+                        images_received += 1;
                     }
                     ChannelEvent::Disconnected(ChannelType::Main) => {
                         info!("Main channel disconnected, exiting");
@@ -1039,15 +1039,24 @@ pub async fn run_headless(
                     }
                     _ => {}
                 }
-
-                // Print stats periodically
-                if last_stats_print.elapsed() >= Duration::from_secs(10) {
-                    info!(
-                        "Stats: frames={}, bytes_in={}, bytes_out={}",
-                        stats.frames_received, stats.bytes_in, stats.bytes_out
-                    );
-                    last_stats_print = Instant::now();
-                }
+            }
+            // Logged on a timer, not when an event arrives, so an idle
+            // session still reports. Marks are the GUI's frame measure;
+            // the bytes are every channel's, as each last published them.
+            _ = stats_tick.tick() => {
+                let marks = stats_snapshots
+                    .display
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .messages_recv_by_opcode
+                    .get(&shakenfist_spice_protocol::display_server::MARK)
+                    .copied()
+                    .unwrap_or(0);
+                let (bytes_in, bytes_out) = stats_snapshots.bytes_totals();
+                info!(
+                    "Stats: marks={}, images={}, bytes_in={}, bytes_out={}",
+                    marks, images_received, bytes_in, bytes_out
+                );
             }
             join_result = &mut connection_handle => {
                 connection_join = Some(join_result);

@@ -37,6 +37,7 @@ use crate::notifications::{
 };
 use crate::settings;
 use crate::streaming_state::{self, StreamingState};
+use shakenfist_spice_protocol::link::H264Offer;
 use shakenfist_spice_protocol::{mouse_buttons, ChannelType, NotifySeverity, MOUSE_MODE_SERVER};
 use shakenfist_spice_renderer::channels::{DisplaySize, VolumeControl};
 use shakenfist_spice_renderer::metrics::RuntimeMetrics;
@@ -591,10 +592,10 @@ pub struct RyllApp {
     /// shape as the initial connect. Diagnostic-only.
     debug_single_thread_runtime: bool,
 
-    /// Persisted copy of the `--experimental-h264` opt-in (H.264
-    /// from spice-server, ryll#398) so reconnect advertises the
-    /// same display capabilities as the initial connect.
-    experimental_h264: bool,
+    /// Persisted copy of how the session offers H.264
+    /// (`--experimental-h264`, `--no-h264`) so reconnect advertises
+    /// the same display capabilities as the initial connect.
+    h264: H264Offer,
 
     /// Byte cap for the display-channel image cache, converted
     /// from `--image-cache-cap-mib` at startup. Persisted here
@@ -750,7 +751,7 @@ impl RyllApp {
         debug_single_thread_runtime: bool,
         auto_snapshot_interval: Option<u64>,
         auto_snapshot_cap: Option<usize>,
-        experimental_h264: bool,
+        h264: H264Offer,
         image_cache_cap_bytes: usize,
         glz_dictionary_cap_bytes: usize,
         preferred_compression: u8,
@@ -880,7 +881,7 @@ impl RyllApp {
                     cancel_for_conn,
                     clipboard,
                     /* opus_sink */ None,
-                    experimental_h264,
+                    h264,
                     image_cache_cap_bytes,
                     glz_dictionary_cap_bytes,
                     preferred_compression,
@@ -1015,7 +1016,7 @@ impl RyllApp {
             pending_connection_failure: None,
             app_focused,
             debug_single_thread_runtime,
-            experimental_h264,
+            h264,
             image_cache_cap_bytes,
             glz_dictionary_cap_bytes,
             preferred_compression,
@@ -1157,7 +1158,7 @@ impl RyllApp {
         self.connection_cancel = Some(connection_cancel);
         let focused_for_conn = self.app_focused.clone();
         let single_thread_for_conn = self.debug_single_thread_runtime;
-        let experimental_h264 = self.experimental_h264;
+        let h264 = self.h264;
         let image_cache_cap_bytes = self.image_cache_cap_bytes;
         let glz_dictionary_cap_bytes = self.glz_dictionary_cap_bytes;
         let preferred_compression = self.preferred_compression;
@@ -1205,7 +1206,7 @@ impl RyllApp {
                     cancel_for_conn,
                     clipboard,
                     /* opus_sink */ None,
-                    experimental_h264,
+                    h264,
                     image_cache_cap_bytes,
                     glz_dictionary_cap_bytes,
                     preferred_compression,
@@ -1721,15 +1722,6 @@ impl RyllApp {
 
                 ChannelEvent::MonitorsConfig { width, height } => {
                     debug!("app: requested monitors config {}x{}", width, height);
-                }
-
-                ChannelEvent::Statistics {
-                    bytes_in,
-                    bytes_out,
-                    ..
-                } => {
-                    self.stats.bytes_in += bytes_in;
-                    self.stats.bytes_out += bytes_out;
                 }
 
                 ChannelEvent::Latency { sample_ms } => {

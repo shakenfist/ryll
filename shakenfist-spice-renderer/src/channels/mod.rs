@@ -361,14 +361,6 @@ pub enum ChannelEvent {
         height: u32,
     },
 
-    /// Statistics update (reserved for future use)
-    #[allow(dead_code)]
-    Statistics {
-        channel: String,
-        bytes_in: u64,
-        bytes_out: u64,
-    },
-
     /// Latency measurement (sample in milliseconds)
     Latency {
         sample_ms: f32,
@@ -559,7 +551,6 @@ impl ChannelEvent {
             ChannelEvent::CursorPosition { .. } => "CursorPosition",
             ChannelEvent::CursorShape { .. } => "CursorShape",
             ChannelEvent::MonitorsConfig { .. } => "MonitorsConfig",
-            ChannelEvent::Statistics { .. } => "Statistics",
             ChannelEvent::Latency { .. } => "Latency",
             ChannelEvent::PasteCompleted { .. } => "PasteCompleted",
             ChannelEvent::PasteFailed { .. } => "PasteFailed",

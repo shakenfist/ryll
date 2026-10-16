@@ -712,20 +712,39 @@ pub fn default_channel_caps(channel_type: ChannelType) -> u32 {
     }
 }
 
-/// The display channel capability word ryll advertises, given whether
-/// the experimental H.264 opt-in (`--experimental-h264`) is on.
+/// Whether, and how keenly, ryll offers to take H.264 video streams.
 ///
-/// Off, this is [`capabilities::DEFAULT_DISPLAY`], which leaves out
-/// `DISPLAY_CODEC_H264` because H.264 from spice-server does not decode
-/// yet (shakenfist/ryll#398). On, it adds that bit back, which is what
-/// lets spice-server choose H.264 for a video stream: the capability,
-/// not the preferred-codec message, gates the server's choice. See the
-/// comment on `DEFAULT_DISPLAY`.
-pub fn display_channel_caps(experimental_h264: bool) -> u32 {
-    if experimental_h264 {
-        capabilities::DEFAULT_DISPLAY | capabilities::DISPLAY_CODEC_H264
-    } else {
-        capabilities::DEFAULT_DISPLAY
+/// It decides both the display channel's capabilities
+/// ([`display_channel_caps`]) and where H.264 sits in the codec
+/// preference the channel sends at link-up. A server can only choose
+/// H.264 when the capability is advertised; the preference decides
+/// which codec spice-server tries first.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum H264Offer {
+    /// Neither advertised nor asked for (`--no-h264`).
+    Off,
+    /// Advertised, and asked for after MJPEG. The default: spice-server
+    /// still streams MJPEG, and a server that encodes only H.264 can
+    /// stream that.
+    #[default]
+    AfterMjpeg,
+    /// Advertised, and asked for ahead of MJPEG
+    /// (`--experimental-h264`). spice-server then streams H.264, which
+    /// does not decode yet (shakenfist/ryll#398).
+    Preferred,
+}
+
+/// The display channel capability word ryll advertises for `h264`.
+///
+/// This is [`capabilities::DEFAULT_DISPLAY`], which includes
+/// `DISPLAY_CODEC_H264`, unless H.264 is [`H264Offer::Off`], which
+/// leaves that bit out. The capability, not the preference message,
+/// is what lets a server choose H.264.
+pub fn display_channel_caps(h264: H264Offer) -> u32 {
+    match h264 {
+        H264Offer::Off => capabilities::DEFAULT_DISPLAY & !capabilities::DISPLAY_CODEC_H264,
+        H264Offer::AfterMjpeg | H264Offer::Preferred => capabilities::DEFAULT_DISPLAY,
     }
 }
 
@@ -1990,25 +2009,31 @@ mod tests {
         assert_eq!(capabilities::DEFAULT_OTHER, 0b1001);
     }
 
-    /// Without the opt-in the display channel advertises exactly the
-    /// defaults, so H.264 stays off (ryll#398).
+    /// By default the display channel advertises exactly the defaults,
+    /// and they include `CODEC_H264`, so a server can stream H.264.
     #[test]
-    fn display_channel_caps_default_is_default_display() {
-        assert_eq!(display_channel_caps(false), capabilities::DEFAULT_DISPLAY);
+    fn display_channel_caps_default_offers_h264() {
+        let caps = display_channel_caps(H264Offer::default());
+        assert_eq!(caps, capabilities::DEFAULT_DISPLAY);
+        assert_ne!(caps & capabilities::DISPLAY_CODEC_H264, 0);
+    }
+
+    /// Preferring H.264 changes only the codec preference, not the caps.
+    #[test]
+    fn display_channel_caps_preferring_h264_is_the_default() {
         assert_eq!(
-            display_channel_caps(false) & capabilities::DISPLAY_CODEC_H264,
-            0
+            display_channel_caps(H264Offer::Preferred),
+            capabilities::DEFAULT_DISPLAY
         );
     }
 
-    /// The `--experimental-h264` opt-in adds `CODEC_H264` and changes
-    /// nothing else.
+    /// `--no-h264` drops `CODEC_H264` and changes nothing else.
     #[test]
-    fn display_channel_caps_experimental_h264_adds_only_codec_h264() {
-        let caps = display_channel_caps(true);
-        assert_ne!(caps & capabilities::DISPLAY_CODEC_H264, 0);
+    fn display_channel_caps_without_h264_drops_only_codec_h264() {
+        let caps = display_channel_caps(H264Offer::Off);
+        assert_eq!(caps & capabilities::DISPLAY_CODEC_H264, 0);
         assert_eq!(
-            caps & !capabilities::DISPLAY_CODEC_H264,
+            caps | capabilities::DISPLAY_CODEC_H264,
             capabilities::DEFAULT_DISPLAY
         );
     }

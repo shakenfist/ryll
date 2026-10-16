@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Pure-Rust SPICE image decompression algorithms (QUIC, GLZ, LZ, LZ4), and LZ4 and JPEG encoders for servers, from the ryll SPICE client."
+description = "Pure-Rust SPICE image decompression algorithms (QUIC, GLZ, LZ, LZ4), and LZ4, JPEG and H.264 encoders for servers, from the ryll SPICE client."
 readme = "README.md"
 
 [lints]
@@ -18,10 +18,11 @@ quic = []
 glz = ["dep:tokio"]
 lz = []
 lz4 = ["dep:lz4_flex"]
-# Image encoders, for SPICE servers. Independent of the decoder
-# features above, so `default-features = false, features = ["encode"]`
-# builds. LZ4 and JPEG are the encoders.
-encode = ["dep:lz4_flex", "dep:jpeg-encoder"]
+# Image and video encoders, for SPICE servers. Independent of the
+# decoder features above, so `default-features = false, features =
+# ["encode"]` builds. LZ4 and JPEG encode images, H.264 (openh264)
+# video streams.
+encode = ["dep:lz4_flex", "dep:jpeg-encoder", "dep:openh264-sys2"]
 jpeg = ["dep:jpeg-decoder"]
 # Cross-platform SIMD-accelerated JPEG decode via the `mozjpeg`
 # crate. The `with_simd` feature on `mozjpeg-sys` is enabled by
@@ -57,10 +58,20 @@ mozjpeg = { version = "=0.10.13", optional = true, features = ["with_simd"] }
 
 # H.264 software decode via Cisco's openh264 (built from vendored
 # source via openh264-sys2 — no system libopenh264 runtime
-# dependency). The same crate is used on the encode side in
-# shakenfist-spice-renderer/src/encoder/h264.rs. Used by
-# `H264VideoDecoder` in `src/video.rs`.
-openh264 = "0.9"
+# dependency), for `H264VideoDecoder` in `src/video.rs`, and encode,
+# for `H264Encoder` in `src/encode/h264.rs`.
+#
+# Pinned exactly, with openh264-sys2 below, because the encoder sets
+# options openh264 does not wrap through openh264-sys2's raw types,
+# and the two must be the pair openh264 was released with. Bump them
+# together, and recheck the encoder's tests: its behaviour notes
+# (the screen-content QP clamp, bitrate ceilings, lazy
+# initialisation) are about this version.
+openh264 = "=0.9.8"
+# The raw option types openh264 does not re-export (SBitrateInfo,
+# SEncParamExt and the ENCODER_OPTION_* constants), for the encoder's
+# live bitrate, frame rate and slice settings. Only with `encode`.
+openh264-sys2 = { version = "=0.9.8", optional = true, default-features = false }
 
 # macOS-only: ImageIO JPEG decoder backend. Pinned to the 0.3.x
 # `objc2-*` family so the framework crates all agree on the

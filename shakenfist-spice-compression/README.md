@@ -1,8 +1,8 @@
 # shakenfist-spice-compression
 
 Pure-Rust implementations of the SPICE image-stream
-decompression algorithms, with optional LZ4 and JPEG encoders for
-servers (see the Encoders item below):
+decompression algorithms, with optional LZ4, JPEG and H.264 encoders
+for servers (see the Encoders item below):
 
 - **QUIC** — the SPICE wavelet/arithmetic codec (not the QUIC
   transport protocol). Feature `quic` (default).
@@ -14,9 +14,11 @@ servers (see the Encoders item below):
   raw LZ4 blocks with big-endian lengths, decoded with `lz4_flex`).
   Feature `lz4` (default), pulls in `lz4_flex`.
 - **Encoders** — feature `encode` (off by default, independent of
-  the decoder features), for SPICE servers. Both encoders take a
-  borrowed `Bgrx` image: LZ4 (`encode_spice_lz4`) and baseline 4:2:0
-  JPEG (`encode_spice_jpeg`, via the pure-Rust `jpeg-encoder`).
+  the decoder features), for SPICE servers. They take a borrowed
+  `Bgrx` image: LZ4 (`encode_spice_lz4`), baseline 4:2:0 JPEG
+  (`encode_spice_jpeg`, via the pure-Rust `jpeg-encoder`), and H.264
+  video streams (`H264Encoder`, via openh264), whose bitrate and
+  frame rate can change while it runs.
 
 The crate name covers both directions. Decompression is the
 default; compression is opt-in through `encode`.

@@ -1,76 +1,22 @@
-//! Stateful H.264 encoder wrapping openh264.
+//! The H.264 encoder as the WebRTC pipeline and ryll's capture use it.
 //!
-//! Emits Annex-B-framed NAL units. Each call to [`H264Encoder::encode`]
-//! returns the NAL units for a single encoded frame, with the 4-byte
-//! start code `00 00 00 01` prepended to each NAL. SPS/PPS NALs are
-//! emitted whenever openh264 produces them (typically alongside every
-//! IDR), so the consumer always has fresh parameter sets after a
-//! forced keyframe.
-//!
-//! Timestamps are not handled here; [`EncodedFrame::timestamp_us`] is
-//! always set to 0 and is populated by the caller (the encoder
-//! task).
+//! The encoder itself lives in `shakenfist-spice-compression`, where a
+//! SPICE server can use it without this crate. This adapts it to the
+//! renderer's frames: RGBA surface pixels in, and out an
+//! [`EncodedFrame`] of NAL units, each behind a four-byte start code,
+//! with a timestamp the encoder task fills in.
 
 use anyhow::Result;
-use openh264::encoder::{BitRate, EncoderConfig, FrameRate, UsageType};
-use openh264::OpenH264API;
+use shakenfist_spice_compression::{H264Config, H264RateControl, Rgbx};
 
-/// Bits per pixel per frame used to derive the encoder's target
-/// bitrate, in thousandths (so 100 means 0.1 bits per pixel per
-/// frame).
-///
-/// openh264's own default is a flat 120 kbit/s whatever the
-/// resolution, which is a webcam-era number: a 1024x768 desktop at
-/// 30fps through 120 kbit/s is unreadable. 0.1 bits per pixel per
-/// frame gives ~2.4 Mbit/s at 1024x768@30 and ~6.2 Mbit/s at
-/// 1920x1080@30, inside the 0.2-50 Mbit/s range we have measured
-/// for real SPICE console traffic.
-///
-/// Held in thousandths, and the derivation done in integers,
-/// because a float version rounds unpredictably at the `as u32`
-/// truncation and makes the policy hard to state in a test.
-const MILLIBITS_PER_PIXEL_PER_FRAME: u64 = 100;
-
-/// Floor for the derived bitrate. Small surfaces would otherwise
-/// derive a target so low that even a static desktop cannot be
-/// coded cleanly.
-const MIN_BITRATE_BPS: u32 = 1_000_000;
-
-/// Ceiling for the derived bitrate, so a 4K surface cannot ask for
-/// more bandwidth than a viewer is likely to have.
-const MAX_BITRATE_BPS: u32 = 20_000_000;
-
-/// Derive a target bitrate from the surface size and frame rate.
-///
-/// Kept separate from [`H264Encoder::new`] so the policy can be
-/// tested without constructing an encoder.
-fn target_bitrate_bps(width: u32, height: u32, fps: u32) -> u32 {
-    let pixels_per_second = (width as u64) * (height as u64) * (fps as u64);
-    let bps = pixels_per_second * MILLIBITS_PER_PIXEL_PER_FRAME / 1000;
-    bps.clamp(MIN_BITRATE_BPS as u64, MAX_BITRATE_BPS as u64) as u32
-}
-
-/// Round a size down to the even dimensions H.264 requires.
-///
-/// 4:2:0 chroma subsampling halves both axes, so both must be even.
-/// Every producer of a size the encoder will eventually see has to
-/// apply the same rounding, and there are four of them in two crates
-/// — the browser's requested viewport, the primary-surface size read
-/// when the encoder is built, the per-frame resize check in
-/// [`crate::EncoderTask`], and `ryll`'s capture writer. Each used to
-/// spell `& !1` itself, and comparing a rounded size against an
-/// unrounded one is exactly how the resize check came to rebuild the
-/// encoder on every frame of an odd surface and then fail its length
-/// check.
-pub fn even_dimensions(width: u32, height: u32) -> (u32, u32) {
-    (width & !1, height & !1)
-}
+pub use shakenfist_spice_compression::even_dimensions;
 
 /// One encoded frame's NAL units in Annex-B framing.
 #[derive(Debug, Clone)]
 pub struct EncodedFrame {
     /// Annex-B-framed NAL units. Each NAL is prefixed with the
-    /// 4-byte start code `00 00 00 01`.
+    /// 4-byte start code `00 00 00 01`. Empty when the encoder
+    /// skipped the frame to hold its bitrate.
     pub nal_units: Vec<Vec<u8>>,
     /// Wall-clock timestamp in microseconds (origin chosen by
     /// the producer; monotonically increasing).
@@ -128,17 +74,10 @@ fn find_start_code(buf: &[u8], from: usize) -> Option<(usize, usize)> {
     None
 }
 
-/// Stateful H.264 encoder. Wraps `openh264::encoder::Encoder` and
-/// emits Annex-B-framed NAL units, one [`EncodedFrame`] per call to
-/// [`H264Encoder::encode`].
+/// Stateful H.264 encoder for RGBA frames, emitting one
+/// [`EncodedFrame`] per call.
 pub struct H264Encoder {
-    inner: openh264::encoder::Encoder,
-    width: u32,
-    height: u32,
-    /// Staging buffer for [`H264Encoder::encode_cropped`]. Allocated
-    /// on the first odd frame and reused after that; an even source
-    /// never touches it.
-    crop_buf: Vec<u8>,
+    inner: shakenfist_spice_compression::H264Encoder,
 }
 
 impl H264Encoder {
@@ -149,19 +88,10 @@ impl H264Encoder {
     /// down to the nearest even number. Returns `Err` if either
     /// rounded dimension is 0, or if `fps` is 0.
     ///
-    /// # Why this does not use `Encoder::new()`
-    ///
-    /// `Encoder::new()` takes openh264's default `EncoderConfig`,
-    /// which is wrong for a desktop in three separate ways: a flat
-    /// 120 kbit/s target bitrate, a `max_frame_rate` of 0 (so rate
-    /// control does not know the cadence it is budgeting for), and
-    /// `UsageType::CameraVideoRealTime`, which is tuned for camera
-    /// noise rather than for the sharp edges and large flat regions
-    /// of a UI. All three are set explicitly here.
-    ///
-    /// `fps` is a parameter rather than a constant because the
-    /// caller owns the frame cadence — `EncoderTask` is handed an
-    /// `fps_cap` and the rate controller needs the same number.
+    /// The target bitrate is `target_bitrate_bps` of the size and
+    /// rate, since openh264's own default is a flat 120 kbit/s. Rate
+    /// control stays in openh264's quality mode, with frame skipping
+    /// on, as this encoder has always run.
     pub fn new(width: u32, height: u32, fps: u32) -> Result<Self> {
         let (w, h) = even_dimensions(width, height);
         if w == 0 || h == 0 {
@@ -174,115 +104,41 @@ impl H264Encoder {
         if fps == 0 {
             anyhow::bail!("H264Encoder: fps must be > 0");
         }
-
-        let config = EncoderConfig::new()
-            .bitrate(BitRate::from_bps(target_bitrate_bps(w, h, fps)))
-            .max_frame_rate(FrameRate::from_hz(fps as f32))
-            .usage_type(UsageType::ScreenContentRealTime)
-            // Both default to on, and openh264 supports neither for
-            // screen content: it turns them off itself and prints a
-            // warning to stderr while doing so, once per encoder —
-            // which now means once per browser connection. Setting
-            // them changes no behaviour and stops the config
-            // claiming something the encoder is not doing.
-            .adaptive_quantization(false)
-            .background_detection(false);
-
-        let inner = openh264::encoder::Encoder::with_api_config(OpenH264API::from_source(), config)
-            .map_err(|e| anyhow::anyhow!("H264Encoder: openh264 init failed: {}", e))?;
+        // One slice, as before the encoder moved: browsers have not
+        // been tried with multi-slice frames.
+        let config = H264Config {
+            rate_control: H264RateControl::Quality,
+            skip_frames: true,
+            slices: 1,
+            ..H264Config::new(w, h, fps)
+        };
         Ok(Self {
-            inner,
-            width: w,
-            height: h,
-            crop_buf: Vec::new(),
+            inner: shakenfist_spice_compression::H264Encoder::new(config)?,
         })
     }
 
     /// Width in pixels (after rounding down to even).
     pub fn width(&self) -> u32 {
-        self.width
+        self.inner.width()
     }
 
     /// Height in pixels (after rounding down to even).
     pub fn height(&self) -> u32 {
-        self.height
+        self.inner.height()
     }
 
-    /// Encode a single RGBA frame.
+    /// Encode a single RGBA frame of exactly the encoder's size.
     ///
     /// `rgba` must be `width * height * 4` bytes (tight, no row
-    /// padding). If `force_keyframe` is true, the next frame is
-    /// requested as an IDR via [`openh264::encoder::Encoder::force_intra_frame`].
-    /// The first frame is implicitly an IDR by openh264 default.
+    /// padding). If `force_keyframe` is true, the frame is an IDR.
+    /// The first frame always is one.
     ///
     /// Returns an [`EncodedFrame`] containing every NAL produced by
     /// openh264 (SPS/PPS/IDR/non-IDR/etc.), each prefixed with the
-    /// Annex-B start code. `timestamp_us` is always 0; the caller
-    /// populates it.
+    /// Annex-B start code, or none when openh264 skipped the frame.
+    /// `timestamp_us` is always 0; the caller populates it.
     pub fn encode(&mut self, rgba: &[u8], force_keyframe: bool) -> Result<EncodedFrame> {
-        use openh264::formats::{RgbaSliceU8, YUVBuffer};
-
-        let expected_len = (self.width as usize) * (self.height as usize) * 4;
-        if rgba.len() != expected_len {
-            anyhow::bail!(
-                "H264Encoder::encode: rgba.len() = {}, expected {} ({}x{}x4)",
-                rgba.len(),
-                expected_len,
-                self.width,
-                self.height
-            );
-        }
-
-        if force_keyframe {
-            self.inner.force_intra_frame();
-        }
-
-        let rgba_slice = RgbaSliceU8::new(rgba, (self.width as usize, self.height as usize));
-        let yuv = YUVBuffer::from_rgb_source(rgba_slice);
-
-        let bitstream = self
-            .inner
-            .encode(&yuv)
-            .map_err(|e| anyhow::anyhow!("H264Encoder::encode: {}", e))?;
-
-        // openh264 0.6 already emits each NAL with an Annex-B
-        // start code prefix (3- or 4-byte). Concatenate the raw
-        // bitstream and re-parse so we can normalise to 4-byte
-        // start codes and inspect NAL types.
-        let mut raw: Vec<u8> = Vec::new();
-        for layer_idx in 0..bitstream.num_layers() {
-            if let Some(layer) = bitstream.layer(layer_idx) {
-                for nal_idx in 0..layer.nal_count() {
-                    if let Some(nal) = layer.nal_unit(nal_idx) {
-                        raw.extend_from_slice(nal);
-                    }
-                }
-            }
-        }
-
-        let mut nal_units: Vec<Vec<u8>> = Vec::new();
-        let mut is_idr = false;
-        for nal_body in split_annex_b(&raw) {
-            if nal_body.is_empty() {
-                continue;
-            }
-            let nal_type = nal_body[0] & 0x1F;
-            if nal_type == 5 {
-                is_idr = true;
-            }
-            let mut framed = Vec::with_capacity(4 + nal_body.len());
-            framed.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
-            framed.extend_from_slice(nal_body);
-            nal_units.push(framed);
-        }
-
-        Ok(EncodedFrame {
-            nal_units,
-            // Populated by EncoderTask; the encoder itself is
-            // timestamp-agnostic.
-            timestamp_us: 0,
-            keyframe: is_idr,
-        })
+        self.encode_cropped(rgba, self.width(), self.height(), force_keyframe)
     }
 
     /// Encode a frame whose source dimensions may be odd, discarding
@@ -296,16 +152,9 @@ impl H264Encoder {
     /// than an error.
     ///
     /// Odd surfaces are not exotic. The browser asks the guest for
-    /// `Math.round()` of its viewport, X will grant an odd mode, and
-    /// before this existed the encoder rounded its own size down while
-    /// [`encode`](Self::encode) demanded an exact match — so the first
-    /// frame of an odd surface failed the length check and killed the
-    /// encoder task for the life of the bridge.
-    ///
-    /// Cropping the last row is free; cropping the last column means a
-    /// row-wise copy into a staging buffer, which is why the fast path
-    /// below hands `rgba` straight through when the source is already
-    /// even.
+    /// `Math.round()` of its viewport, and X will grant an odd mode.
+    /// The crop costs nothing: the converter reads the kept pixels of
+    /// each row in place.
     pub fn encode_cropped(
         &mut self,
         rgba: &[u8],
@@ -323,49 +172,41 @@ impl H264Encoder {
                 src_height
             );
         }
+        let image =
+            Rgbx::new(rgba, src_width, src_height, src_width as usize * 4).ok_or_else(|| {
+                anyhow::anyhow!("H264Encoder: {src_width}x{src_height} is not a valid image")
+            })?;
 
-        let (w, h) = even_dimensions(src_width, src_height);
-        if (w, h) != (self.width, self.height) {
-            anyhow::bail!(
-                "H264Encoder::encode_cropped: source {}x{} rounds to {}x{}, \
-                 but this encoder is {}x{}",
-                src_width,
-                src_height,
-                w,
-                h,
-                self.width,
-                self.height
-            );
+        if force_keyframe {
+            self.inner.force_intra_frame();
         }
+        let Some(frame) = self.inner.encode_rgbx(&image)? else {
+            return Ok(EncodedFrame {
+                nal_units: Vec::new(),
+                timestamp_us: 0,
+                keyframe: false,
+            });
+        };
 
-        // Already even in both axes: nothing to crop.
-        if src_width == w && src_height == h {
-            return self.encode(rgba, force_keyframe);
-        }
-
-        // An odd height alone needs no copy — the discarded row is a
-        // suffix of the buffer, so a subslice is the whole crop. Doing
-        // it here rather than in the row loop keeps the common
-        // odd-height case allocation-free.
-        if src_width == w {
-            let keep = (w as usize) * (h as usize) * 4;
-            return self.encode(&rgba[..keep], force_keyframe);
-        }
-
-        // Odd width: copy each kept row's leading `w` pixels.
-        let src_stride = (src_width as usize) * 4;
-        let dst_stride = (w as usize) * 4;
-        self.crop_buf.resize(dst_stride * (h as usize), 0);
-        for row in 0..(h as usize) {
-            let src_off = row * src_stride;
-            let dst_off = row * dst_stride;
-            self.crop_buf[dst_off..dst_off + dst_stride]
-                .copy_from_slice(&rgba[src_off..src_off + dst_stride]);
-        }
-        let buf = std::mem::take(&mut self.crop_buf);
-        let out = self.encode(&buf, force_keyframe);
-        self.crop_buf = buf;
-        out
+        // openh264 mixes 3- and 4-byte start codes within a frame;
+        // normalise to 4-byte ones, NAL by NAL.
+        let nal_units = split_annex_b(&frame.data)
+            .into_iter()
+            .filter(|nal| !nal.is_empty())
+            .map(|nal| {
+                let mut framed = Vec::with_capacity(4 + nal.len());
+                framed.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+                framed.extend_from_slice(nal);
+                framed
+            })
+            .collect();
+        Ok(EncodedFrame {
+            nal_units,
+            // Populated by EncoderTask; the encoder itself is
+            // timestamp-agnostic.
+            timestamp_us: 0,
+            keyframe: frame.keyframe,
+        })
     }
 }
 
@@ -397,111 +238,38 @@ mod tests {
     }
 
     #[test]
-    fn bitrate_scales_with_pixels_and_clamps_at_both_ends() {
-        // A desktop-sized surface has to land far above openh264's
-        // own 120 kbit/s default; that default is the bug this
-        // policy exists to fix.
-        assert_eq!(target_bitrate_bps(1024, 768, 30), 2_359_296);
-        assert!(target_bitrate_bps(1920, 1080, 30) > target_bitrate_bps(1024, 768, 30));
-
-        // Tiny surfaces hit the floor, 4K hits the ceiling.
-        assert_eq!(target_bitrate_bps(64, 64, 30), MIN_BITRATE_BPS);
-        assert_eq!(target_bitrate_bps(3840, 2160, 30), MAX_BITRATE_BPS);
+    fn rounds_an_odd_size_down() {
+        let enc = H264Encoder::new(65, 63, 30).expect("init");
+        assert_eq!((enc.width(), enc.height()), (64, 62));
     }
 
+    /// An odd source encodes exactly as its top-left even crop does.
+    /// A crop that read across row boundaries would shear the
+    /// picture and still encode cleanly, so compare the output.
     #[test]
-    fn bitrate_scales_with_frame_rate_too() {
-        // The policy is per *pixel per frame*, so halving the cadence
-        // halves the budget. Only 30fps was pinned before, which
-        // would have let the fps term be dropped entirely without a
-        // test noticing.
-        assert_eq!(
-            target_bitrate_bps(1024, 768, 60),
-            2 * target_bitrate_bps(1024, 768, 30)
-        );
-        assert_eq!(target_bitrate_bps(1024, 768, 15), 1_179_648);
-        // Still clamped at both ends whatever the cadence.
-        assert_eq!(target_bitrate_bps(1024, 768, 1), MIN_BITRATE_BPS);
-        assert_eq!(target_bitrate_bps(1920, 1080, 240), MAX_BITRATE_BPS);
-    }
-
-    #[test]
-    fn even_dimensions_rounds_each_axis_down_independently() {
-        assert_eq!(even_dimensions(64, 64), (64, 64));
-        assert_eq!(even_dimensions(63, 45), (62, 44));
-        assert_eq!(even_dimensions(65, 64), (64, 64));
-        assert_eq!(even_dimensions(64, 65), (64, 64));
-        assert_eq!(even_dimensions(1, 1), (0, 0));
-    }
-
-    /// An odd-width source is cropped column-wise, not read across
-    /// row boundaries. A sheared read would have every row offset by
-    /// one more pixel than the last, which shows up as a diagonal
-    /// smear rather than as an error — so assert on the pixels the
-    /// crop keeps, using a frame whose rows are distinguishable.
-    #[test]
-    fn cropping_an_odd_width_keeps_each_row_aligned() {
-        // 65x64 RGBA where every pixel's red channel is its row index
-        // and green is its column index, so a misaligned copy is
-        // visible in the values rather than only in the picture.
-        // 65 wide rather than something tiny because openh264 refuses
-        // very small frames outright.
-        let (sw, sh) = (65u32, 64u32);
+    fn cropping_an_odd_source_encodes_its_even_crop() {
+        // Every pixel's red channel is its row and green its column,
+        // so a misaligned read changes the picture.
+        let (sw, sh) = (65u32, 65u32);
         let mut src = vec![0u8; (sw * sh * 4) as usize];
         for y in 0..sh {
             for x in 0..sw {
                 let i = ((y * sw + x) * 4) as usize;
-                src[i] = y as u8;
-                src[i + 1] = x as u8;
+                src[i] = (y * 3) as u8;
+                src[i + 1] = (x * 3) as u8;
                 src[i + 3] = 255;
             }
         }
-
-        let mut enc = H264Encoder::new(sw, sh, 30).expect("init");
-        assert_eq!((enc.width(), enc.height()), (64, 64));
-        enc.encode_cropped(&src, sw, sh, false).expect("encode");
-
-        // The staging buffer is what the encoder was handed. Column
-        // 64 is dropped from every row; nothing else moves. Reading
-        // straight through the source instead would shift each row one
-        // pixel further left than the last — a diagonal shear that
-        // still encodes cleanly, which is why this asserts on pixels
-        // and not just on the length.
-        assert_eq!(enc.crop_buf.len(), (64 * 64 * 4) as usize);
+        let mut crop = Vec::new();
         for y in 0..64usize {
-            for x in 0..64usize {
-                let i = (y * 64 + x) * 4;
-                assert_eq!(
-                    (enc.crop_buf[i], enc.crop_buf[i + 1]),
-                    (y as u8, x as u8),
-                    "pixel ({}, {}) came from the wrong place — the crop sheared",
-                    x,
-                    y
-                );
-            }
+            crop.extend_from_slice(&src[y * 65 * 4..y * 65 * 4 + 64 * 4]);
         }
-    }
 
-    #[test]
-    fn cropping_an_odd_height_needs_no_staging_buffer() {
-        // Dropping the last row is a suffix of the buffer, so the
-        // copy is skipped entirely.
-        let mut enc = H264Encoder::new(64, 65, 30).expect("init");
-        assert_eq!((enc.width(), enc.height()), (64, 64));
-        enc.encode_cropped(&black_frame(64, 65), 64, 65, false)
-            .expect("encode");
-        assert!(
-            enc.crop_buf.is_empty(),
-            "an odd height alone should not have allocated a staging buffer"
-        );
-    }
-
-    #[test]
-    fn an_even_source_takes_the_fast_path() {
-        let mut enc = H264Encoder::new(64, 64, 30).expect("init");
-        enc.encode_cropped(&black_frame(64, 64), 64, 64, false)
-            .expect("encode");
-        assert!(enc.crop_buf.is_empty(), "no crop was needed");
+        let mut odd = H264Encoder::new(sw, sh, 30).expect("init");
+        let mut even = H264Encoder::new(64, 64, 30).expect("init");
+        let from_odd = odd.encode_cropped(&src, sw, sh, false).expect("encode");
+        let from_crop = even.encode(&crop, false).expect("encode");
+        assert_eq!(from_odd.nal_units, from_crop.nal_units);
     }
 
     #[test]
@@ -537,9 +305,7 @@ mod tests {
     #[test]
     fn sps_still_advertises_baseline_profile() {
         // `negotiated_h264_payload_type` in shakenfist-spice-webrtc
-        // prefers an SDP `profile-level-id` beginning `42`, on the
-        // strength of openh264 resolving `uiProfileIdc` to
-        // PRO_BASELINE when nothing enables CABAC. Choosing
+        // prefers an SDP `profile-level-id` beginning `42`. Choosing
         // ScreenContentRealTime must not quietly move us off
         // baseline, or the payload type we stamp stops agreeing
         // with the bitstream we send.
