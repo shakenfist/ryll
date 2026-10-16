@@ -4818,11 +4818,9 @@ mod tests {
     /// first (an IDR), from the encoder a SPICE server would use.
     fn h264_frames(count: usize) -> Vec<Vec<u8>> {
         use shakenfist_spice_compression::{Bgrx, H264Config, H264Encoder};
-        let config = H264Config {
-            slices: 1,
-            skip_frames: false,
-            ..H264Config::new(64, 64, 30)
-        };
+        let mut config = H264Config::new(64, 64, 30);
+        config.slices = 1;
+        config.skip_frames = false;
         let mut encoder = H264Encoder::new(config).expect("an encoder");
         (0..count)
             .map(|i| {
