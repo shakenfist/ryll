@@ -149,10 +149,6 @@
       "sha": "851b7981637d7a0d7c9175b02c891cf0e73db7ce",
       "date": "2026-10-16"
     },
-    "docs/diagnostics.md": {
-      "sha": "323cac3c5d6d24b109c2c33d7767146c380ca5ef",
-      "date": "2026-10-16"
-    },
     "docs/index.md": {
       "sha": "433a4b2d9aa945247f0bde4f98cc6b948463c486",
       "date": "2026-08-17"
@@ -187,10 +183,6 @@
     },
     "docs/spice-protocol.md": {
       "sha": "0a39366adb8259439345017a3481a92ffe5de257",
-      "date": "2026-10-16"
-    },
-    "docs/troubleshooting.md": {
-      "sha": "0481137e3f349ccb1e31ef242da1e8d97a2c8585",
       "date": "2026-10-16"
     },
     "docs/web-frontend.md": {

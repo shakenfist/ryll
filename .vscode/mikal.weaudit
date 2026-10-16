@@ -700,10 +700,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/diagnostics.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/installation.md",
       "author": "mikal"
     },
@@ -729,10 +725,6 @@
     },
     {
       "path": "docs/spice-protocol.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/troubleshooting.md",
       "author": "mikal"
     },
     {
