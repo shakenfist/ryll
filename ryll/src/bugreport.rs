@@ -865,7 +865,8 @@ pub enum KeyOutcome {
     Forwarded,
     /// A release of a key not recorded as held, sent anyway.
     UnheldRelease,
-    /// A press of a key already held: an auto-repeat, not sent.
+    /// A press of a key already held: an auto-repeat, sent as another
+    /// press of the same key.
     Repeat,
     /// One of ryll's own shortcut keys, never sent.
     HostShortcut,
