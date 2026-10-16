@@ -23,8 +23,9 @@
 //     SCANCODE_TABLE comment below.
 //   * keydown / keyup listeners on `document`, dispatched
 //     through the data channel as `{type:"key",scancode,down}`.
-//     Browser auto-repeat is dropped and held keys are released
-//     on focus loss -- see the listeners for why both matter.
+//     Browser auto-repeat is sent on as further key downs, and
+//     held keys are released on focus loss -- see the listeners
+//     for why both matter.
 //   * mousemove / mousedown / mouseup on the `<video>`
 //     element with letterbox-corrected normalised
 //     coordinates, dispatched as `{type:"pointer-move"}`
@@ -341,16 +342,13 @@
         if (!KEY_PASSTHROUGH.has(e.code)) {
             e.preventDefault();
         }
-        // Drop the browser's auto-repeat. Holding a key fires
-        // keydown over and over with e.repeat set, but only one
-        // keyup at the end. SPICE expects one down and one up, and
-        // the guest's own X server generates the repeat from the
-        // held key — so forwarding these would stack the browser's
-        // repeat on top of the guest's and make the keyboard
-        // unusable.
-        if (e.repeat) {
-            return;
-        }
+        // Send the browser's auto-repeat on. Holding a key fires
+        // keydown over and over with e.repeat set, then one keyup.
+        // Each repeat goes out as another key down, as spice-gtk
+        // sends GTK's repeats and as a PS/2 keyboard repeats a held
+        // key's make code. A QEMU guest would repeat the key
+        // without them, but a server that injects keys through
+        // XTest, such as andris, repeats nothing itself (#561).
         heldKeys.add(sc);
         sendCtrl({ type: 'key', scancode: sc, down: true });
     });

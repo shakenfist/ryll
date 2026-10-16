@@ -443,7 +443,8 @@ impl HeldKeys {
         };
         if self.held.contains_key(&key) {
             // Auto-repeat: egui-winit reports every repeat of the chord
-            // as another clipboard event.
+            // as another clipboard event. Sent on, like any other key's.
+            out.push(InputEvent::KeyDown(down_code));
             return KeyOutcome::Repeat;
         }
         self.suppressed.remove(&key);
@@ -466,9 +467,13 @@ impl HeldKeys {
 /// Translate one frame's egui events into the key events to forward to
 /// the guest.
 ///
-/// A press of a key that is already held is an auto-repeat and is not
-/// forwarded. Releases are always forwarded, even for a key not
-/// recorded as held. Losing window focus releases every held key,
+/// A press of a key that is already held is an auto-repeat, and is sent
+/// as another press of the same key, as spice-gtk does and as a PS/2
+/// keyboard does while a key is held. The guest can't be left to repeat
+/// the key itself: a QEMU guest's kernel or X server does, but a server
+/// that injects keys through XTest, such as andris, gets no repeats
+/// unless the client sends them (#561). Releases are always forwarded,
+/// even for a key not recorded as held. Losing window focus releases every held key,
 /// because the matching key-ups will be delivered to another window.
 /// Keys in [`HostShortcut`] are ryll's own and are never forwarded.
 ///
@@ -600,7 +605,15 @@ fn translate_key_event(
     };
     if *pressed {
         if held.held.contains_key(&lookup_key) {
-            // Auto-repeat of a key the guest already holds.
+            if modifiers.mac_cmd {
+                // Cmd went down after the key did: a repeat now is a
+                // host chord, withheld like a fresh press would be. The
+                // guest still holds the key, and its release is sent.
+                return key_outcome(KeyOutcome::Withheld);
+            }
+            // Auto-repeat of a key the guest already holds: another
+            // press, with no release in between.
+            out.push(InputEvent::KeyDown(down_code));
             return key_outcome(KeyOutcome::Repeat);
         }
         if modifiers.mac_cmd {
@@ -882,7 +895,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_repeat_of_held_key_is_not_forwarded() {
+    fn auto_repeat_of_held_key_is_forwarded_as_presses() {
         let mut held = HeldKeys::default();
         let events = translate_key_events(
             &[
@@ -893,7 +906,50 @@ mod tests {
             ],
             &mut held,
         );
-        assert_eq!(wire(events), vec![(true, 0x1E), (false, 0x9E)]);
+        assert_eq!(
+            wire(events),
+            vec![(true, 0x1E), (true, 0x1E), (true, 0x1E), (false, 0x9E)]
+        );
+    }
+
+    #[test]
+    fn auto_repeat_is_judged_by_held_keys_not_egui_flag() {
+        // egui can flag a fresh press as a repeat (its logical key was
+        // never removed from keys_down); only ryll's own record of what
+        // is held decides, and one release still ends the stroke.
+        let mut held = HeldKeys::default();
+        let events = translate_key_events(
+            &[
+                key(egui::Key::A, egui::Key::A, true, true),
+                key(egui::Key::A, egui::Key::A, true, false),
+                key(egui::Key::A, egui::Key::A, false, false),
+            ],
+            &mut held,
+        );
+        assert_eq!(
+            wire(events),
+            vec![(true, 0x1E), (true, 0x1E), (false, 0x9E)]
+        );
+        assert!(held.snapshot().held.is_empty());
+    }
+
+    #[test]
+    fn auto_repeat_of_extended_key_repeats_its_extended_press() {
+        // An E0-prefixed key repeats with its prefix, and one release
+        // ends it.
+        let mut held = HeldKeys::default();
+        let events = translate_key_events(
+            &[
+                key(egui::Key::ArrowUp, egui::Key::ArrowUp, true, false),
+                key(egui::Key::ArrowUp, egui::Key::ArrowUp, true, true),
+                key(egui::Key::ArrowUp, egui::Key::ArrowUp, false, false),
+            ],
+            &mut held,
+        );
+        let sent = wire(events);
+        assert_eq!(sent.len(), 3);
+        assert_eq!(sent[0], sent[1]);
+        assert!(sent[0].0 && !sent[2].0);
     }
 
     #[test]
@@ -1080,8 +1136,9 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_clipboard_chord_auto_repeat_is_not_forwarded() {
-        // Each auto-repeat of a held Ctrl+C is another Event::Copy.
+    fn ctrl_clipboard_chord_auto_repeat_is_forwarded() {
+        // Each auto-repeat of a held Ctrl+C is another Event::Copy, and
+        // repeats C in the guest as a held key would.
         let mut held = HeldKeys::default();
         let events = translate_key_events(
             &[
@@ -1093,7 +1150,10 @@ mod tests {
             ],
             &mut held,
         );
-        assert_eq!(wire(events), vec![(true, 0x2E), (false, 0xAE)]);
+        assert_eq!(
+            wire(events),
+            vec![(true, 0x2E), (true, 0x2E), (true, 0x2E), (false, 0xAE)]
+        );
     }
 
     #[test]
@@ -1318,8 +1378,9 @@ mod tests {
     #[test]
     fn key_held_before_cmd_is_still_released() {
         // A is held and forwarded, then Cmd goes down. A's
-        // auto-repeat and release now carry Cmd, but the guest holds A
-        // and must be told when it comes up.
+        // auto-repeat and release now carry Cmd. The repeat is a host
+        // chord and is withheld, but the guest holds A and must be told
+        // when it comes up.
         let mut held = HeldKeys::default();
         let events = translate_key_events(
             &[
@@ -1377,7 +1438,7 @@ mod tests {
             logged(&held),
             vec![
                 (KeyLogEvent::Key, KeyOutcome::Forwarded, vec![0x35]),
-                (KeyLogEvent::Key, KeyOutcome::Repeat, vec![]),
+                (KeyLogEvent::Key, KeyOutcome::Repeat, vec![0x35]),
                 (KeyLogEvent::Key, KeyOutcome::Forwarded, vec![0xB5]),
                 (KeyLogEvent::Key, KeyOutcome::HostShortcut, vec![]),
                 (KeyLogEvent::Key, KeyOutcome::Unmapped, vec![]),

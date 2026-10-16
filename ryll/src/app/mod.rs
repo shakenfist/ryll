@@ -339,9 +339,9 @@ pub struct RyllApp {
     last_mouse_pos: Option<(u32, u32)>,
     last_modifiers: Option<egui::Modifiers>,
 
-    // Keys forwarded to the inputs channel as pressed. Used to filter
-    // auto-repeats and to send releases when input forwarding is
-    // suppressed or the window loses focus.
+    // Keys forwarded to the inputs channel as pressed. Used to tell
+    // auto-repeats from fresh presses and to send releases when input
+    // forwarding is suppressed or the window loses focus.
     held_keys: HeldKeys,
 
     // A screenshot was asked for (F8 or the menu) and its save dialog
