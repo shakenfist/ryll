@@ -125,17 +125,85 @@
       "sha": "154626ef4e81f6aa3e7c271ef613fe017ad658f9",
       "date": "2026-09-23"
     },
+    "docs/channel-diagnostics-audit.md": {
+      "sha": "14f800181a7e177c9c39bab8a044e5dcf252c970",
+      "date": "2026-10-16"
+    },
+    "docs/ci.md": {
+      "sha": "b8c64c51e53cdc2c8b259a94d09ea68e0fb78959",
+      "date": "2026-10-16"
+    },
+    "docs/configuration.md": {
+      "sha": "0d5077f262997629ce763111b34ef08b42570729",
+      "date": "2026-10-16"
+    },
+    "docs/design-decisions.md": {
+      "sha": "e25d6318ba301470ed7d7ba84fb94fd2bd3f43fd",
+      "date": "2026-10-16"
+    },
     "docs/development-macos.md": {
       "sha": "9fef25179d5ec56bb52e4a5b5edeecadcff74097",
       "date": "2026-09-17"
+    },
+    "docs/development.md": {
+      "sha": "b113febd0a3dde08b8d05337c0e6c38fa719c8ff",
+      "date": "2026-10-16"
+    },
+    "docs/device-redirection.md": {
+      "sha": "851b7981637d7a0d7c9175b02c891cf0e73db7ce",
+      "date": "2026-10-16"
+    },
+    "docs/diagnostics.md": {
+      "sha": "323cac3c5d6d24b109c2c33d7767146c380ca5ef",
+      "date": "2026-10-16"
+    },
+    "docs/features.md": {
+      "sha": "19942e9719d7acf3c0223474f5939a414a4fd62d",
+      "date": "2026-10-16"
     },
     "docs/index.md": {
       "sha": "433a4b2d9aa945247f0bde4f98cc6b948463c486",
       "date": "2026-08-17"
     },
+    "docs/installation.md": {
+      "sha": "2bd3ab3c982f397a703ee6111df2afc5d8ca2b26",
+      "date": "2026-10-16"
+    },
+    "docs/libvirt-spice-recommendations.md": {
+      "sha": "8ca2b52c719afa9c327504c4734d6a2cc755e267",
+      "date": "2026-10-16"
+    },
     "docs/macos-metrics-verification.md": {
       "sha": "518de92ccf3999ad33e5104a4a519d0d1fb24b51",
       "date": "2026-08-18"
+    },
+    "docs/portability.md": {
+      "sha": "dc06c44e9d9a0e7fe4888d35adb50908ab37fc7d",
+      "date": "2026-10-16"
+    },
+    "docs/releasing.md": {
+      "sha": "06a8f52b6b6d3dc8d688e905c4f19140431247c1",
+      "date": "2026-10-16"
+    },
+    "docs/rendering-pipeline.md": {
+      "sha": "13236637e784e8469aaf876e5584e1b7ac0aaf53",
+      "date": "2026-10-16"
+    },
+    "docs/session-lifecycle.md": {
+      "sha": "23ff3796f6fa89602535c7708fdfface65e69594",
+      "date": "2026-10-16"
+    },
+    "docs/spice-protocol.md": {
+      "sha": "0a39366adb8259439345017a3481a92ffe5de257",
+      "date": "2026-10-16"
+    },
+    "docs/troubleshooting.md": {
+      "sha": "0481137e3f349ccb1e31ef242da1e8d97a2c8585",
+      "date": "2026-10-16"
+    },
+    "docs/web-frontend.md": {
+      "sha": "25445d1d9682af06818915b0ec4b115bbdb9cd70",
+      "date": "2026-10-16"
     },
     "examples/control-socket-demo.py": {
       "sha": "1e39ea70aaa51526508b15997706449a378ce09a",

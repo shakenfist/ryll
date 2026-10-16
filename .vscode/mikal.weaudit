@@ -678,6 +678,74 @@
     {
       "path": "STYLEGUIDE.md",
       "author": "mikal"
+    },
+    {
+      "path": "docs/channel-diagnostics-audit.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/ci.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/configuration.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/design-decisions.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/development.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/device-redirection.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/diagnostics.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/features.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/installation.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/libvirt-spice-recommendations.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/portability.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/releasing.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/rendering-pipeline.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/session-lifecycle.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/spice-protocol.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/troubleshooting.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/web-frontend.md",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
