@@ -113,11 +113,11 @@ lz4_flex = "0.14"
 # path when building locally and the published crate when resolving
 # from crates.io. Versions are kept in lockstep with ryll via
 # cargo-release; see tools/cut-release.sh.
-shakenfist-spice-compression = { path = "../shakenfist-spice-compression", version = "0.1.7" }
-shakenfist-spice-protocol = { path = "../shakenfist-spice-protocol", version = "0.1.7" }
-shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.1.7", default-features = false }
-shakenfist-spice-usbredir = { path = "../shakenfist-spice-usbredir", version = "0.1.7" }
-shakenfist-spice-webrtc = { path = "../shakenfist-spice-webrtc", version = "0.1.7" }
+shakenfist-spice-compression = { path = "../shakenfist-spice-compression", version = "0.2.0" }
+shakenfist-spice-protocol = { path = "../shakenfist-spice-protocol", version = "0.2.0" }
+shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.2.0", default-features = false }
+shakenfist-spice-usbredir = { path = "../shakenfist-spice-usbredir", version = "0.2.0" }
+shakenfist-spice-webrtc = { path = "../shakenfist-spice-webrtc", version = "0.2.0" }
 
 # Zlib decompression for SPICE ZLIB_GLZ_RGB (type 107)
 flate2 = "1"
@@ -212,7 +212,7 @@ rcgen = "0.14"
 # a hand-rolled RTCPeerConnection here, so ryll no longer depends on
 # the `webrtc` crate directly at all -- one fewer manifest for the
 # 0.20 port to touch.
-shakenfist-spice-webrtc = { path = "../shakenfist-spice-webrtc", version = "0.1.7", features = [
+shakenfist-spice-webrtc = { path = "../shakenfist-spice-webrtc", version = "0.2.0", features = [
     "test-support",
 ] }
 # rustls is pinned to ring because both aws-lc-rs and ring are
