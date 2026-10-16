@@ -55,6 +55,7 @@ mod reconnect;
 mod resize;
 mod session_init;
 mod stats;
+mod ui_state;
 
 use agent_state::{mac_paste_chord, paste_hint, AgentState};
 use notification_snapshots::NotificationSnapshotStore;
@@ -73,6 +74,7 @@ use session_init::{
 use stats::{
     push_with_cap, recent_lag_stats, BandwidthTracker, LatencyTracker, Statistics, FPS_WINDOW_SIZE,
 };
+use ui_state::{EguiInputClaims, UiStateTracker};
 
 /// Channel buffer sizes
 const EVENT_CHANNEL_SIZE: usize = 1024;
@@ -97,6 +99,27 @@ const BUG_REPORT_METRICS_WINDOW: Duration = Duration::from_secs(2);
 /// enough that a dead one does not strand the re-entrancy guard for
 /// the rest of the session.
 const BUG_REPORT_METRICS_DEADLINE: Duration = Duration::from_secs(8);
+
+/// How long the bug report dialog waits for the window screenshot
+/// asked for when the report started, before it is drawn anyway. The
+/// dialog is not drawn until the screenshot arrives, so it is not in
+/// it; eframe normally delivers it the next frame.
+const WINDOW_SHOT_WAIT: Duration = Duration::from_millis(500);
+
+/// Marks the viewport screenshot ryll asks for when a bug report
+/// starts, so its `Event::Screenshot` can be told apart.
+struct WindowShotRequest;
+
+/// A screenshot of ryll's whole window, panels and menus included, asked
+/// of eframe in the frame a bug report starts (#562). The image arrives
+/// as an `Event::Screenshot` in a later frame and is PNG-encoded on a
+/// worker thread into `png_slot`, as `TriggerSnapshot` encodes the guest
+/// surface.
+struct WindowShot {
+    requested_at: Instant,
+    arrived: bool,
+    png_slot: Arc<std::sync::Mutex<Option<anyhow::Result<Vec<u8>>>>>,
+}
 
 /// How long past the end of its sample window a bug report still
 /// being sampled when the window closes is waited for, before it is
@@ -250,6 +273,9 @@ struct PendingBugReport {
     /// dimensions. `None` for non-Display reports and when no
     /// surface exists yet.
     surface: Option<(Vec<u8>, u32, u32)>,
+    /// PNG of the whole window from the frame the report started in.
+    /// Only `BugReportType::Ui` reports keep it.
+    window_png: Option<Vec<u8>>,
     /// Slot the sampler thread fills exactly once. `None` while
     /// it is still inside its sample window.
     metrics_slot: Arc<std::sync::Mutex<Option<RuntimeMetrics>>>,
@@ -343,6 +369,10 @@ pub struct RyllApp {
     // auto-repeats from fresh presses and to send releases when input
     // forwarding is suppressed or the window loses focus.
     held_keys: HeldKeys,
+
+    // Which of ryll's own panels, menus and dialogs are open, and when
+    // they opened, for bug reports.
+    ui_state: UiStateTracker,
 
     // A screenshot was asked for (F8 or the menu) and its save dialog
     // has not been opened yet. The dialog is opened after the frame's
@@ -471,6 +501,10 @@ pub struct RyllApp {
     // timestamps and (if ready) the PNG bytes at submit time.
     // `discard_trigger_snapshot` drops it on cancel.
     pending_trigger: Option<TriggerSnapshot>,
+
+    // The window screenshot asked for when the pending trigger began.
+    // `discard_trigger_snapshot` drops it with the trigger.
+    window_shot: Option<WindowShot>,
 
     // A GUI-submitted bug report whose runtime-metrics sample is
     // still running on a worker thread; `poll_pending_bug_report`
@@ -929,6 +963,7 @@ impl RyllApp {
             last_mouse_pos: None,
             last_modifiers: None,
             held_keys: HeldKeys::new(traffic.session_start()),
+            ui_state: UiStateTracker::new(traffic.session_start()),
             screenshot_requested: false,
             forwarded_buttons: 0,
             wheel: WheelAccumulator::default(),
@@ -964,6 +999,7 @@ impl RyllApp {
             bug_report_type: BugReportType::Display,
             bug_description: String::new(),
             pending_trigger: None,
+            window_shot: None,
             pending_bug_report: None,
             region_select_active: false,
             region_drag_start: None,
@@ -1100,6 +1136,7 @@ impl RyllApp {
         self.last_mouse_pos = None;
         self.last_modifiers = None;
         self.held_keys = HeldKeys::new(traffic.session_start());
+        self.ui_state = UiStateTracker::new(traffic.session_start());
         self.forwarded_buttons = 0;
         self.wheel.reset();
         self.pending_resize = None;
@@ -2112,6 +2149,10 @@ impl RyllApp {
         if snap.keyboard.as_ref().map(|k| k.events_seen) != Some(keys_seen) {
             snap.keyboard = Some(self.held_keys.snapshot());
         }
+        let ui_seen = self.ui_state.updates_seen();
+        if snap.ui.as_ref().map(|u| u.updates_seen) != Some(ui_seen) {
+            snap.ui = Some(self.ui_state.snapshot());
+        }
 
         // Render-side latency aggregates.
         let (img_min, img_max, img_mean) = recent_lag_stats(&self.recent_image_ready_lag_us);
@@ -2142,6 +2183,9 @@ impl RyllApp {
         if self.pending_trigger.is_some() {
             return;
         }
+        // The interface as the last frame drew it, before the dialog.
+        self.ui_state.mark_report_trigger();
+        self.request_window_shot();
         let triggered_at = chrono_now();
         let triggered_uptime_secs = self.traffic.elapsed().as_secs_f64();
 
@@ -2205,6 +2249,106 @@ impl RyllApp {
     /// pending.
     fn discard_trigger_snapshot(&mut self) {
         let _ = self.pending_trigger.take();
+        self.window_shot = None;
+    }
+
+    /// Ask eframe for a screenshot of the frame being drawn. The bug
+    /// report dialog is held back until it arrives (see
+    /// `window_shot_holds_dialog`), so the frame shows what the user was
+    /// reporting rather than the dialog.
+    fn request_window_shot(&mut self) {
+        self.egui_ctx
+            .send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
+                WindowShotRequest,
+            )));
+        self.window_shot = Some(WindowShot {
+            requested_at: Instant::now(),
+            arrived: false,
+            png_slot: Arc::new(std::sync::Mutex::new(None)),
+        });
+        self.egui_ctx.request_repaint();
+    }
+
+    /// Take the window screenshot from this frame's events, if it has
+    /// arrived, and PNG-encode it on a worker thread.
+    fn receive_window_shot(&mut self, ctx: &egui::Context) {
+        let Some(shot) = self.window_shot.as_mut().filter(|s| !s.arrived) else {
+            return;
+        };
+        let image = ctx.input(|i| {
+            i.raw.events.iter().find_map(|event| match event {
+                egui::Event::Screenshot {
+                    user_data, image, ..
+                } if user_data
+                    .data
+                    .as_ref()
+                    .is_some_and(|d| d.is::<WindowShotRequest>()) =>
+                {
+                    Some(Arc::clone(image))
+                }
+                _ => None,
+            })
+        });
+        let Some(image) = image else {
+            return;
+        };
+        shot.arrived = true;
+        let slot = Arc::clone(&shot.png_slot);
+        let spawned = std::thread::Builder::new()
+            .name("ryll-bugreport-window-png".to_string())
+            .spawn(move || {
+                let [width, height] = image.size;
+                let result = encode_png(image.as_raw(), width as u32, height as u32);
+                if let Ok(mut guard) = slot.lock() {
+                    *guard = Some(result);
+                }
+            });
+        if let Err(e) = spawned {
+            debug!("app: failed to spawn window PNG encoder thread: {}", e);
+        }
+    }
+
+    /// Whether the bug report dialog should wait another frame for the
+    /// window screenshot. Not past `WINDOW_SHOT_WAIT`: a renderer that
+    /// never delivers one must not keep the dialog from opening.
+    fn window_shot_holds_dialog(&self) -> bool {
+        self.window_shot
+            .as_ref()
+            .is_some_and(|s| !s.arrived && s.requested_at.elapsed() < WINDOW_SHOT_WAIT)
+    }
+
+    /// The window screenshot's PNG, if it arrived and has been encoded.
+    /// `try_lock`, as for the guest screenshot, so a still-running
+    /// encoder can't block the UI thread.
+    fn take_window_shot_png(&mut self) -> Option<Vec<u8>> {
+        let shot = self.window_shot.take()?;
+        let mut guard = shot.png_slot.try_lock().ok()?;
+        guard.take().and_then(|r| r.ok())
+    }
+
+    /// Record which of ryll's panels, menus and dialogs this frame drew,
+    /// and egui's claim on input, for bug reports. Called at the end of
+    /// `ui`, so it sees what the frame ended with.
+    fn observe_ui_state(&mut self, ctx: &egui::Context) {
+        let elements = [
+            ("notifications_panel", self.show_notifications_panel),
+            (
+                "menu_or_popup",
+                ctx.any_popup_open() || egui::Popup::is_any_open(ctx),
+            ),
+            ("traffic_viewer", self.show_traffic_viewer),
+            ("usb_panel", self.show_usb_panel),
+            ("folders_panel", self.show_webdav_panel),
+            ("protocol_gaps", self.gaps_popup_open),
+            ("bug_report_dialog", self.show_bug_dialog),
+            ("region_select", self.region_select_active),
+            ("paste_error_dialog", self.paste_error_message.is_some()),
+            (
+                "connection_modal",
+                matches!(self.reconnect_state, ReconnectState::Modal(_)),
+            ),
+        ];
+        self.ui_state.observe(&elements, EguiInputClaims::read(ctx));
     }
 
     /// Called from `finish_bug_report`. Returns the captured
@@ -2267,7 +2411,7 @@ impl RyllApp {
             .as_ref()
             .map(|(pixels, width, height)| (pixels.as_slice(), *width, *height));
 
-        let report = BugReport::assemble(
+        let mut report = BugReport::assemble(
             pending.report_type,
             pending.description,
             pending.region,
@@ -2281,6 +2425,9 @@ impl RyllApp {
             pending.trigger,
             pending.precomputed_png,
         )?;
+        if let Some(png) = pending.window_png {
+            report.set_window_screenshot(png);
+        }
 
         let output_dir = self.manual_bug_report_dir();
         report.write_zip(&output_dir)
@@ -2513,6 +2660,9 @@ impl RyllApp {
         }
 
         let (trigger, precomputed_png) = self.take_trigger_for_submit();
+        let window_png = self
+            .take_window_shot_png()
+            .filter(|_| report_type == BugReportType::Ui);
 
         // Copying the largest surface is a deep copy of the whole
         // framebuffer -- 33 MB of RGBA at 3840x2160 -- on the UI thread,
@@ -2590,6 +2740,7 @@ impl RyllApp {
             trigger,
             precomputed_png,
             surface,
+            window_png,
             metrics_slot,
             started_at: Instant::now(),
         });
@@ -3147,6 +3298,7 @@ impl eframe::App for RyllApp {
         if !self.show_bug_dialog {
             keep_keyboard_for_guest(ctx);
         }
+        self.receive_window_shot(ctx);
 
         // Resize viewport to match the remote surface (plus stats
         // bar) whenever a new primary surface differs from the
@@ -4399,7 +4551,11 @@ impl eframe::App for RyllApp {
 
         // Bug report dialog (two-pass: render then act)
         let mut dialog_action = None;
-        if self.show_bug_dialog {
+        let dialog_held = self.show_bug_dialog && self.window_shot_holds_dialog();
+        if dialog_held {
+            ctx.request_repaint();
+        }
+        if self.show_bug_dialog && !dialog_held {
             egui::Window::new("Bug Report")
                 .collapsible(false)
                 .resizable(false)
@@ -4448,6 +4604,11 @@ impl eframe::App for RyllApp {
                         &mut self.bug_report_type,
                         BugReportType::Audio,
                         "Audio (playback channel + output device)",
+                    );
+                    ui.radio_value(
+                        &mut self.bug_report_type,
+                        BugReportType::Ui,
+                        "ryll itself (its panels, menus and dialogs + window screenshot)",
                     );
 
                     ui.add_space(4.0);
@@ -4801,6 +4962,8 @@ impl eframe::App for RyllApp {
         if self.cursor_image.is_some() && !self.region_select_active && pointer_on_surface {
             ctx.output_mut(|o| o.cursor_icon = egui::CursorIcon::None);
         }
+
+        self.observe_ui_state(ctx);
     }
 }
 

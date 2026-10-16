@@ -158,12 +158,15 @@ ryll-bugreport-YYYY-MM-DDTHH-MM-SSZ.zip
 │                         #   session_uptime_secs (submit),
 │                         #   triggered_uptime_secs (dialog-open)
 ├── session.json          # AppSnapshot (FPS, bandwidth, surfaces,
-│                         #   held keys and recent key events)
+│                         #   held keys and recent key events,
+│                         #   ryll's open panels, menus and dialogs)
 ├── channel-state.json    # snapshot of the affected channel
 ├── traffic.pcap          # ring buffer pcap (capture feature only)
 ├── screenshot.png        # trigger-time full surface (Display only)
 ├── screenshot-region.png # submit-time crop at the selected region
 │                         #   (Display only, when a region was drawn)
+├── window-screenshot.png # ryll's whole window as the report's first
+│                         #   frame drew it (Ui only)
 └── runtime-metrics.json  # process and per-thread CPU%, RSS, VmSize
                           #   sampled over a 2-second window at
                           #   report-creation time (Linux only;
@@ -172,10 +175,13 @@ ryll-bugreport-YYYY-MM-DDTHH-MM-SSZ.zip
 ```
 
 Report types are `Display`, `Input`, `Cursor`, `Connection`, `Usb`,
-`Audio`, and `Pedantic`, each mapping to one SPICE channel or the
+`Audio`, `Ui`, and `Pedantic`, each mapping to one SPICE channel or the
 --pedantic observer path. `Connection` covers the main channel only;
 an audio problem needs `Audio`, whose `channel-state.json` is the
-playback snapshot.  `BugReport::new()` samples runtime
+playback snapshot. `Ui` is for a problem in ryll's own interface (a
+panel or menu that opened unasked, say); it carries the inputs
+channel's traffic and state, since the interface usually misbehaves
+after a key or click.  `BugReport::new()` samples runtime
 metrics over a 2-second window (blocking the caller), then gathers
 and serialises all data synchronously.  `BugReport::write_zip()`
 writes the zip to the capture directory's `bug-reports/`
@@ -211,6 +217,38 @@ captured — the dialog captures unconditionally on open (so an
 artefact doesn't fade while the user decides what to submit), but
 only includes the PNG when the user actually submits as Display.
 
+### ryll's own interface
+
+The guest-surface PNG cannot show what ryll draws over it, so every
+GUI report's `session.json` has a `ui` section, kept by
+`UiStateTracker` in `ryll/src/app/ui_state.rs`. At the end of each
+frame it is told which panels, menus and dialogs are open
+(`notifications_panel`, `menu_or_popup`, `traffic_viewer`,
+`usb_panel`, `folders_panel`, `protocol_gaps`, `bug_report_dialog`,
+`region_select`, `paste_error_dialog`, `connection_modal`) and what
+egui claims of the input. It records:
+
+- `now`: what is open, each with the time it opened, plus
+  `egui_wants_keyboard`, `egui_wants_pointer` and `focused_widget`.
+  ryll drops egui's keyboard focus every frame unless the bug report
+  dialog is open (#535), so `egui_wants_keyboard` should otherwise be
+  false.
+- `at_report_trigger`: the same, as of the frame before the report's
+  dialog appeared, so it shows what the report is about rather than
+  the dialog.
+- `recent_changes`: the last 64 openings and closings.
+
+Times are seconds since session start, the clock of the key log in
+`keyboard`, the inputs channel's `recent_events` and the pcap, so a
+panel that opened unasked can be lined up with the key before it.
+
+When a report starts, ryll also asks eframe for a screenshot of the
+whole window (`ViewportCommand::Screenshot`). The dialog is not drawn
+until the screenshot arrives, normally the next frame and at most
+500 ms later, so the screenshot shows the window as the user saw it.
+It is PNG-encoded on a worker thread and written as
+`window-screenshot.png` in `Ui` reports only.
+
 ## Bug Report Dialog
 
 Pressing **F12** or using **Menu → Report** opens a
@@ -219,7 +257,7 @@ dialog contains:
 
 1. A privacy warning about sensitive data in reports.
 2. Radio buttons to select the report type (Display, Input,
-   Cursor, Connection, USB, Audio).
+   Cursor, Connection, USB, Audio, and ryll itself).
 3. An optional description text field.
 4. Capture and Cancel buttons.
 
