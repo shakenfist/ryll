@@ -125,10 +125,6 @@
       "sha": "ffeba1d4155450125fa098094f1167ed0cdbc9d2",
       "date": "2026-09-17"
     },
-    "renovate.json": {
-      "sha": "b672b81713562d7e927b144bd295181dad744a32",
-      "date": "2026-10-05"
-    },
     "ryll/build.rs": {
       "sha": "b0803d125978073b943df8c6a6207879c41f5157",
       "date": "2026-07-26"
@@ -205,10 +201,6 @@
       "sha": "a2a4138fe277b72f992cb3c1dafd3bc5b6b4db8e",
       "date": "2026-10-05"
     },
-    "shakenfist-spice-compression/src/video.rs": {
-      "sha": "24da8865993cd6d32a4e891ce27aa041f5732b08",
-      "date": "2026-10-05"
-    },
     "shakenfist-spice-protocol/Cargo.toml": {
       "sha": "ef204bdaf9034303aefbb5757a375ba6e86ba247",
       "date": "2026-09-27"
@@ -253,10 +245,6 @@
       "sha": "63b200ecab9a52acf13c4a04af959f6264845292",
       "date": "2026-09-29"
     },
-    "shakenfist-spice-renderer/Cargo.toml": {
-      "sha": "6fade8ce3bb6eb255c5acd1304cc1d0d1822db56",
-      "date": "2026-10-05"
-    },
     "shakenfist-spice-renderer/README.md": {
       "sha": "f26f1d8b76c389c4b6711d7ae1b482fa234326f6",
       "date": "2026-08-02"
@@ -295,14 +283,6 @@
     },
     "shakenfist-spice-renderer/src/encoder/frame_source.rs": {
       "sha": "793e763c867f67031b21226d94b9784cd848584e",
-      "date": "2026-09-19"
-    },
-    "shakenfist-spice-renderer/src/encoder/h264.rs": {
-      "sha": "56d0e92b4dfdd13ef02840bdd6ef5e59ee8f7996",
-      "date": "2026-09-19"
-    },
-    "shakenfist-spice-renderer/src/encoder/mod.rs": {
-      "sha": "6441925b54f82bd7964235031aaf0b45b727a0e6",
       "date": "2026-09-19"
     },
     "shakenfist-spice-renderer/src/image_cache.rs": {

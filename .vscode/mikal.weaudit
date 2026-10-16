@@ -304,14 +304,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/encoder/h264.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/encoder/mod.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/src/audio_sink.rs",
       "author": "mikal"
     },
@@ -544,19 +536,11 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-compression/src/video.rs",
-      "author": "mikal"
-    },
-    {
       "path": "tools/mermaid-lint.sh",
       "author": "mikal"
     },
     {
       "path": ".github/workflows/mermaid-lint.yml",
-      "author": "mikal"
-    },
-    {
-      "path": "renovate.json",
       "author": "mikal"
     },
     {
@@ -589,10 +573,6 @@
     },
     {
       "path": "shakenfist-spice-renderer/src/session_state.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/Cargo.toml",
       "author": "mikal"
     },
     {
