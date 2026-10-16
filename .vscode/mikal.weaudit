@@ -480,10 +480,6 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/auto_snapshot.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-protocol/Cargo.toml",
       "author": "mikal"
     },

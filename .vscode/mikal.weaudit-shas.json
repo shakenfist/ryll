@@ -201,10 +201,6 @@
       "sha": "b0803d125978073b943df8c6a6207879c41f5157",
       "date": "2026-07-26"
     },
-    "ryll/src/auto_snapshot.rs": {
-      "sha": "643d96c07572e19475d9f07c55aeba6613af9c1c",
-      "date": "2026-09-27"
-    },
     "ryll/src/notifications.rs": {
       "sha": "cfd7c5df773b57965f15ed83526d46f5d217b747",
       "date": "2026-09-18"
