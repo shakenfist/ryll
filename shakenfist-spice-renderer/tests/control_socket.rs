@@ -293,7 +293,7 @@ async fn hello_returns_protocol_version_and_supported_sets() {
     let (mut r, mut w) = connect_client(&path).await;
 
     let result = hello(&mut r, &mut w).await;
-    assert_eq!(result["protocol_version"], "1.4");
+    assert_eq!(result["protocol_version"], "1.5");
     assert_eq!(result["server_name"], "ryll");
 
     let methods: Vec<String> =
@@ -330,12 +330,17 @@ async fn hello_returns_protocol_version_and_supported_sets() {
         "clipboard_changed (added in v1.3) missing from supported_events: {:?}",
         events,
     );
-    // 7 base events for any build; the `digest-decode` feature
+    assert!(
+        events.contains(&"input_rtt".into()),
+        "input_rtt (added in v1.5) missing from supported_events: {:?}",
+        events,
+    );
+    // 8 base events for any build; the `digest-decode` feature
     // appends one more.  Check the lower bound so the assertion
     // does not flap across feature configs.
     assert!(
-        events.len() >= 7,
-        "expected at least 7 events; got {}: {:?}",
+        events.len() >= 8,
+        "expected at least 8 events; got {}: {:?}",
         events.len(),
         events,
     );
@@ -796,7 +801,7 @@ async fn latency_event_delivered_when_subscribed() {
 
     inputs
         .event_tx
-        .send(ChannelEvent::Latency { sample_ms: 4.2 })
+        .send(ChannelEvent::PingInterval { interval_ms: 4.2 })
         .expect("broadcast send");
 
     let ev = recv_line(&mut r).await;
@@ -810,6 +815,68 @@ async fn latency_event_delivered_when_subscribed() {
     );
     let wallclock_us = ev["data"]["wallclock_us"].as_u64().expect("wallclock_us");
     assert!(wallclock_us > 0, "wallclock_us must be positive");
+
+    handle.stop().await;
+}
+
+/// 10b. An input_rtt event is delivered under its own name, and only
+/// to a client that subscribed to it, not to a `latency` subscriber.
+#[tokio::test]
+async fn input_rtt_event_delivered_only_when_subscribed() {
+    let status = MockStatusProvider::new(default_status());
+    let (path, handle, inputs) = spawn_server(status, empty_mirror()).await;
+    let (mut r, mut w) = connect_client(&path).await;
+    hello(&mut r, &mut w).await;
+
+    send_request(
+        &mut w,
+        2,
+        "subscribe",
+        serde_json::json!({ "events": ["latency", "input_rtt"] }),
+    )
+    .await;
+    let _sub_resp = recv_line(&mut r).await;
+
+    inputs
+        .event_tx
+        .send(ChannelEvent::InputRoundTrip { rtt_ms: 7.5 })
+        .expect("broadcast send");
+
+    let ev = recv_line(&mut r).await;
+    assert_eq!(ev["event"], "input_rtt");
+    let rtt_ms = ev["data"]["rtt_ms"].as_f64().expect("rtt_ms");
+    assert!(
+        (rtt_ms - 7.5_f64).abs() < 0.01,
+        "expected rtt_ms ≈ 7.5, got {}",
+        rtt_ms
+    );
+    assert!(ev["data"]["wallclock_us"].as_u64().expect("wallclock_us") > 0);
+    assert!(
+        ev["data"].get("sample_ms").is_none(),
+        "input_rtt carries rtt_ms, not sample_ms"
+    );
+
+    send_request(
+        &mut w,
+        3,
+        "unsubscribe",
+        serde_json::json!({ "events": ["input_rtt"] }),
+    )
+    .await;
+    let _unsub_resp = recv_line(&mut r).await;
+    inputs
+        .event_tx
+        .send(ChannelEvent::InputRoundTrip { rtt_ms: 9.0 })
+        .expect("broadcast send");
+    inputs
+        .event_tx
+        .send(ChannelEvent::PingInterval { interval_ms: 3.0 })
+        .expect("broadcast send");
+    let ev = recv_line(&mut r).await;
+    assert_eq!(
+        ev["event"], "latency",
+        "the unsubscribed input_rtt must not arrive"
+    );
 
     handle.stop().await;
 }
@@ -903,7 +970,7 @@ async fn dropped_event_after_queue_overflow() {
     for _ in 0..1500_u32 {
         let _ = inputs
             .event_tx
-            .send(ChannelEvent::Latency { sample_ms: 1.0 });
+            .send(ChannelEvent::PingInterval { interval_ms: 1.0 });
     }
 
     // Give the server tasks (translator + writer) time to process the
@@ -915,7 +982,7 @@ async fn dropped_event_after_queue_overflow() {
     for _ in 0..10_u32 {
         let _ = inputs
             .event_tx
-            .send(ChannelEvent::Latency { sample_ms: 2.0 });
+            .send(ChannelEvent::PingInterval { interval_ms: 2.0 });
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
@@ -1422,7 +1489,7 @@ async fn agent_transition_survives_a_lagged_event_bus() {
     for _ in 0..2048 {
         let _ = inputs
             .event_tx
-            .send(ChannelEvent::Latency { sample_ms: 1.0 });
+            .send(ChannelEvent::PingInterval { interval_ms: 1.0 });
     }
 
     let ev = recv_line(&mut r).await;

@@ -20,7 +20,7 @@ use shakenfist_spice_protocol::{
     main_client, playback_server, warn_once, ChannelType, NotifySeverity,
 };
 
-use super::{ChannelEvent, EventSink, MAX_MESSAGE_BODY};
+use super::{ChannelEvent, DisconnectReason, EventSink, MAX_MESSAGE_BODY};
 
 const AUDIO_DATA_MODE_RAW: u16 = 1;
 const AUDIO_DATA_MODE_OPUS: u16 = 3;
@@ -973,7 +973,10 @@ impl PlaybackChannel {
                 Some(Ok(0)) => {
                     info!("playback: channel disconnected");
                     self.events
-                        .emit(ChannelEvent::Disconnected(ChannelType::Playback))
+                        .emit(ChannelEvent::Disconnected(
+                            ChannelType::Playback,
+                            DisconnectReason::ServerClosed,
+                        ))
                         .await;
                     break;
                 }

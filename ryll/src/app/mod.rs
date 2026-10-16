@@ -10,7 +10,7 @@
 // formerly tracked in `docs/plans/PLAN-egui-0.34-followups.md`.
 
 use eframe::egui;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -183,6 +183,15 @@ struct TriggerSnapshot {
     /// or an `Err` on encode failure. `None` while the worker is
     /// still running.
     png_slot: Arc<std::sync::Mutex<Option<anyhow::Result<Vec<u8>>>>>,
+}
+
+/// A disconnect report asked for while draining channel events, written
+/// once the drain is done. See `App::request_disconnect_report`.
+struct PendingDisconnectReport {
+    channel: String,
+    message: String,
+    /// As in `DisconnectCause::disconnect_kind`.
+    kind: String,
 }
 
 /// How a Display report's region selection ended. Every ending
@@ -431,8 +440,11 @@ pub struct RyllApp {
     // Bandwidth tracking for the status bar sparkline
     bandwidth: BandwidthTracker,
 
-    // Latency tracking for the status bar sparkline
-    latency: LatencyTracker,
+    // Server PING interval, for the status bar sparkline
+    ping_interval: LatencyTracker,
+
+    // Inputs-channel round trip, for the status bar
+    input_rtt: LatencyTracker,
 
     // Capture session (None when --capture is not specified)
     capture: Option<Arc<CaptureSession>>,
@@ -445,6 +457,13 @@ pub struct RyllApp {
     // channel can't dump one zip per disconnect storm. 60 s
     // window; see maybe_write_disconnect_snapshot().
     last_disconnect_report_at: Option<Instant>,
+    /// How and when each channel of this session ended, by channel
+    /// name, for the next disconnect report. Cleared on reconnect.
+    channel_ends: BTreeMap<String, crate::bugreport::ChannelEnd>,
+    /// A disconnect report asked for while draining events. It is
+    /// written once the drain is done, so that it sees every channel
+    /// that ended in the same frame, not just the first.
+    pending_disconnect_report: Option<PendingDisconnectReport>,
 
     // USB command sender and state
     usb_tx: Option<mpsc::Sender<UsbCommand>>,
@@ -973,10 +992,13 @@ impl RyllApp {
             pending_resolution_notify: None,
             last_notified_resolution: None,
             bandwidth: BandwidthTracker::new(byte_counter),
-            latency: LatencyTracker::new(),
+            ping_interval: LatencyTracker::new(),
+            input_rtt: LatencyTracker::new(),
             capture,
             bug_report_dir,
             last_disconnect_report_at: None,
+            channel_ends: BTreeMap::new(),
+            pending_disconnect_report: None,
             usb_tx: Some(usb_tx),
             webdav_tx: Some(webdav_tx),
             usb_channel_ready: false,
@@ -1106,6 +1128,8 @@ impl RyllApp {
         let channel_snapshots = ChannelSnapshots::new();
 
         self.event_rx = event_rx;
+        self.channel_ends.clear();
+        self.pending_disconnect_report = None;
         self.session_state = session_state.subscribe();
         self.agent_state = AgentState::Unknown;
         self.paste_hint_shown = false;
@@ -1470,7 +1494,7 @@ impl RyllApp {
             // secondary channel would not open), so this is a
             // disconnect and the ticket policy applies, or this was an
             // auto-retry, whose budget the state machine keeps.
-            self.maybe_write_disconnect_snapshot("connect", &message);
+            self.maybe_write_disconnect_snapshot("connect", &message, "ConnectFailed");
             self.handle_critical_disconnect(message);
             return;
         }
@@ -1481,7 +1505,7 @@ impl RyllApp {
         // traffic, so only write one when the user asked for bug
         // reports or a capture.
         if self.bug_report_dir.is_some() || self.capture.is_some() {
-            self.maybe_write_disconnect_snapshot("connect", &message);
+            self.maybe_write_disconnect_snapshot("connect", &message, "ConnectFailed");
         }
 
         // Routing this through `handle_critical_disconnect` would retry
@@ -1761,9 +1785,14 @@ impl RyllApp {
                     debug!("app: requested monitors config {}x{}", width, height);
                 }
 
-                ChannelEvent::Latency { sample_ms } => {
-                    self.stats.last_latency_ms = Some(sample_ms as f64);
-                    self.latency.record(sample_ms);
+                ChannelEvent::PingInterval { interval_ms } => {
+                    self.stats.last_ping_interval_ms = Some(interval_ms as f64);
+                    self.ping_interval.record(interval_ms);
+                }
+
+                ChannelEvent::InputRoundTrip { rtt_ms } => {
+                    self.stats.last_input_rtt_ms = Some(rtt_ms as f64);
+                    self.input_rtt.record(rtt_ms);
                 }
 
                 ChannelEvent::Error { channel, message } => {
@@ -1776,9 +1805,10 @@ impl RyllApp {
                         NotifySeverity::Error,
                         format!("{} channel error: {}", channel.name(), message),
                     );
-                    // Snapshot before driving the state machine so
-                    // the zip captures the run-up to the failure.
-                    self.maybe_write_disconnect_snapshot(channel.name(), &message);
+                    // The report is written after this frame's events, from
+                    // the traffic leading up to the failure.
+                    self.note_channel_end(channel, "Error");
+                    self.request_disconnect_report(channel.name(), &message, "Error");
                     let reason = format!("{} channel error: {}", channel.name(), message);
                     self.handle_critical_disconnect(reason);
                 }
@@ -1857,8 +1887,13 @@ impl RyllApp {
                     }
                 }
 
-                ChannelEvent::Disconnected(channel) => {
-                    info!("app: channel {} disconnected", channel.name());
+                ChannelEvent::Disconnected(channel, reason) => {
+                    info!(
+                        "app: channel {} disconnected ({})",
+                        channel.name(),
+                        reason.name()
+                    );
+                    self.note_channel_end(channel, reason.name());
 
                     // Snapshot for every channel disconnect, including
                     // non-critical ones. Under ticket-based deployments
@@ -1866,9 +1901,10 @@ impl RyllApp {
                     // lost — the user silently loses audio / USB / etc.
                     // Even if the session keeps running, we want
                     // diagnostic data on why the channel went down.
-                    self.maybe_write_disconnect_snapshot(
+                    self.request_disconnect_report(
                         channel.name(),
                         &format!("channel {} disconnected", channel.name()),
+                        reason.name(),
                     );
 
                     // Channel-specific cleanup
@@ -1897,10 +1933,9 @@ impl RyllApp {
                                 "Connection lost ({} channel disconnected)",
                                 channel.name()
                             );
-                            // Snapshot was already written above
-                            // by the unconditional call near the
-                            // top of this arm; the helper now only
-                            // drives the state machine.
+                            // The report was requested above, so
+                            // the helper only drives the state
+                            // machine.
                             self.handle_critical_disconnect(reason);
                         }
                         _ => {
@@ -1921,6 +1956,10 @@ impl RyllApp {
 
                 _ => {}
             }
+        }
+
+        if let Some(report) = self.pending_disconnect_report.take() {
+            self.maybe_write_disconnect_snapshot(&report.channel, &report.message, &report.kind);
         }
 
         // After the drain rather than before it, so an agent change the
@@ -2122,7 +2161,8 @@ impl RyllApp {
 
         snap.bandwidth_history = self.bandwidth.history.iter().copied().collect();
         snap.bandwidth_current = self.bandwidth.history.back().copied().unwrap_or(0.0);
-        snap.last_latency_ms = self.stats.last_latency_ms;
+        snap.last_ping_interval_ms = self.stats.last_ping_interval_ms;
+        snap.last_input_rtt_ms = self.stats.last_input_rtt_ms;
         snap.frames_received = self.stats.frames_received;
         snap.surfaces = self
             .surfaces
@@ -2449,6 +2489,32 @@ impl RyllApp {
         }
     }
 
+    /// Record that `channel` ended, and how, for the session's next
+    /// disconnect report. The first end of a channel is kept: main's
+    /// `DISCONNECTING` is followed by the close it announced.
+    fn note_channel_end(&mut self, channel: ChannelType, kind: &str) {
+        let at_secs = self.traffic.elapsed().as_secs_f64();
+        self.channel_ends
+            .entry(channel.name().to_string())
+            .or_insert_with(|| crate::bugreport::ChannelEnd {
+                kind: kind.to_string(),
+                at_secs,
+            });
+    }
+
+    /// Ask for a disconnect report once this frame's events are
+    /// handled. The first request of a frame names the report; later
+    /// ones in the same frame show up in its per-channel states.
+    fn request_disconnect_report(&mut self, channel: &str, message: &str, kind: &str) {
+        if self.pending_disconnect_report.is_none() {
+            self.pending_disconnect_report = Some(PendingDisconnectReport {
+                channel: channel.to_string(),
+                message: message.to_string(),
+                kind: kind.to_string(),
+            });
+        }
+    }
+
     /// Auto-write a disconnect-snapshot bug report, best-effort.
     /// Subject to a 60 s cooldown to bound disk usage during a
     /// disconnect storm. Failures are logged but never block
@@ -2456,7 +2522,7 @@ impl RyllApp {
     /// unavailable here (a 1 s sample on the GUI thread would
     /// freeze the UI); pcap and snapshots are the load-bearing
     /// data for diagnosing the disconnect.
-    fn maybe_write_disconnect_snapshot(&mut self, channel: &str, message: &str) {
+    fn maybe_write_disconnect_snapshot(&mut self, channel: &str, message: &str, kind: &str) {
         if let Some(at) = self.last_disconnect_report_at {
             if at.elapsed() < Duration::from_secs(60) {
                 debug!(
@@ -2479,10 +2545,12 @@ impl RyllApp {
             channel: channel.to_string(),
             error_message: message.to_string(),
             error_kind: None,
+            disconnect_kind: kind.to_string(),
             keepalive_timeout_fired,
             session_uptime_secs: self.traffic.elapsed().as_secs_f64(),
             per_channel: crate::bugreport::DisconnectCause::collect_per_channel(
                 &self.channel_snapshots,
+                &self.channel_ends,
             ),
         };
 
@@ -3502,11 +3570,25 @@ impl eframe::App for RyllApp {
             .frame(stats_frame)
             .show_collapsible(ui, &mut show_stats, |ui| {
                 ui.horizontal(|ui| {
-                    if !self.latency.history.is_empty() {
-                        ui.label(format!("PING interval: {}", self.latency.label()));
+                    if !self.input_rtt.history.is_empty() {
+                        ui.label(format!("RTT: {}", self.input_rtt.label()))
+                            .on_hover_text(
+                                "Round trip on the inputs channel, from a pointer move \
+                                 to the server's acknowledgement. Measured only while \
+                                 the pointer moves.",
+                            );
+                        ui.separator();
                     }
-                    if self.latency.history.len() >= 2 {
-                        let max_val = self.latency.history.iter().cloned().fold(1.0f32, f32::max);
+                    if !self.ping_interval.history.is_empty() {
+                        ui.label(format!("PING interval: {}", self.ping_interval.label()));
+                    }
+                    if self.ping_interval.history.len() >= 2 {
+                        let max_val = self
+                            .ping_interval
+                            .history
+                            .iter()
+                            .cloned()
+                            .fold(1.0f32, f32::max);
                         let sparkline_w = 80.0;
                         let sparkline_h = 12.0;
                         let (rect, _) = ui.allocate_exact_size(
@@ -3514,9 +3596,9 @@ impl eframe::App for RyllApp {
                             egui::Sense::hover(),
                         );
                         let painter = ui.painter_at(rect);
-                        let n = self.latency.history.len();
+                        let n = self.ping_interval.history.len();
                         let bar_w = sparkline_w / n as f32;
-                        for (i, &val) in self.latency.history.iter().enumerate() {
+                        for (i, &val) in self.ping_interval.history.iter().enumerate() {
                             let h = (val / max_val) * sparkline_h;
                             let x = rect.min.x + i as f32 * bar_w;
                             let bar = egui::Rect::from_min_max(
@@ -3526,7 +3608,7 @@ impl eframe::App for RyllApp {
                             painter.rect_filled(bar, 0.0, egui::Color32::from_rgb(180, 140, 80));
                         }
                     }
-                    if !self.latency.history.is_empty() {
+                    if !self.ping_interval.history.is_empty() {
                         ui.separator();
                     }
 

@@ -406,6 +406,10 @@ pub struct InputsSnapshot {
     pub last_ping_recv_ts_secs: Option<f64>,
     /// See `DisplaySnapshot::writer_dropped_count`.
     pub writer_dropped_count: u64,
+    /// The last round trip measured from a pointer message to the
+    /// server's `MOUSE_MOTION_ACK` for it, in milliseconds. `None`
+    /// until the pointer has moved enough to complete a bunch.
+    pub last_round_trip_ms: Option<f32>,
     /// Per-opcode receive counts since session start.
     /// Maps server-opcode → number of messages received with
     /// that opcode. Gives a complete picture of what message

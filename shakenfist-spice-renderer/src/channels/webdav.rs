@@ -27,7 +27,7 @@ use shakenfist_spice_protocol::messages::{
 };
 use shakenfist_spice_protocol::{spicevmc_client, spicevmc_server, ChannelType, NotifySeverity};
 
-use super::{ChannelEvent, EventSink, WebdavCommand, MAX_MESSAGE_BODY};
+use super::{ChannelEvent, DisconnectReason, EventSink, WebdavCommand, MAX_MESSAGE_BODY};
 
 /// Response data from a per-client reader task back to the main loop.
 struct MuxResponse {
@@ -240,7 +240,7 @@ impl WebdavChannel {
                     if n == 0 {
                         info!("webdav: channel disconnected");
                         self.shutdown_all_clients();
-                        self.events.emit(ChannelEvent::Disconnected(ChannelType::Webdav)).await;
+                        self.events.emit(ChannelEvent::Disconnected(ChannelType::Webdav, DisconnectReason::ServerClosed)).await;
                         break;
                     }
 

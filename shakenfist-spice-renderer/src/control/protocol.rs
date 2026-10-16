@@ -1,4 +1,4 @@
-//! Wire types for the Ryll control-socket protocol (version 1.4).
+//! Wire types for the Ryll control-socket protocol (version 1.5).
 //!
 //! All types derive `serde::Serialize` / `serde::Deserialize` so they
 //! can be round-tripped through NDJSON without any manual parsing.
@@ -28,6 +28,11 @@
 //! v1.3 → v1.4 added the `stats` verb, so a test can read the display
 //! channel's byte, message, MARK and video-stream counters without a
 //! bug report.  Additive, so a minor bump.
+//!
+//! v1.4 → v1.5 added the `input_rtt` event, a round trip measured on
+//! the inputs channel, because `latency` is the interval between the
+//! server's PINGs and says nothing about the path.  Additive, so a
+//! minor bump.
 
 use serde::{Deserialize, Serialize};
 use shakenfist_spice_protocol::display_server;
@@ -36,7 +41,7 @@ pub use crate::channels::RequestId;
 use crate::snapshots::{DisplaySnapshot, StreamSnapshot};
 
 /// Protocol version this server speaks.
-pub const PROTOCOL_VERSION: &str = "1.4";
+pub const PROTOCOL_VERSION: &str = "1.5";
 
 /// All v1 verb names the server recognises. Advertised in the `hello`
 /// response so clients can adapt at runtime rather than hard-coding
@@ -57,7 +62,8 @@ pub const SUPPORTED_METHODS: &[&str] = &[
 
 /// All event names the server can emit. Advertised in the `hello`
 /// response alongside `SUPPORTED_METHODS`.  `surface_drawn` was
-/// added in v1.1 and `clipboard_changed` in v1.3; `digest_updated`
+/// added in v1.1, `clipboard_changed` in v1.3 and `input_rtt` in v1.5;
+/// `digest_updated`
 /// lives behind the
 /// `digest-decode` Cargo feature and is appended at runtime by
 /// [`supported_events`].
@@ -69,6 +75,7 @@ const BASE_SUPPORTED_EVENTS: &[&str] = &[
     "dropped",
     "surface_drawn",
     "clipboard_changed",
+    "input_rtt",
 ];
 
 /// Names of every event this server can emit, including any

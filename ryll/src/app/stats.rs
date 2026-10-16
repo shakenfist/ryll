@@ -26,7 +26,10 @@ pub(super) struct Statistics {
     pub(super) frames_received: u64,
     /// Inter-PING interval most recently observed on the main
     /// channel, in milliseconds.
-    pub(super) last_latency_ms: Option<f64>,
+    pub(super) last_ping_interval_ms: Option<f64>,
+    /// Most recent inputs-channel round trip, from a pointer message
+    /// to the server's `MOUSE_MOTION_ACK` for it, in milliseconds.
+    pub(super) last_input_rtt_ms: Option<f64>,
     /// Timestamps of recent DisplayMark events for sliding-window FPS.
     pub(super) frame_times: Vec<Instant>,
 }
@@ -79,12 +82,11 @@ impl BandwidthTracker {
     }
 }
 
-/// Rolling latency tracker — samples arrive when
-/// `ChannelEvent::Latency` fires, driven by server PINGs
-/// on the main channel.  Values are stored in milliseconds
-/// (client-observed inter-PING interval) for sparkline
-/// scaling.  Lower variance is better; spikes indicate a
-/// network stall or server send-loop delay.
+/// Rolling history of millisecond samples for the status bar: one
+/// for `ChannelEvent::PingInterval`, the client-observed interval
+/// between server PINGs on the main channel, where spikes indicate a
+/// network stall or server send-loop delay; and one for
+/// `ChannelEvent::InputRoundTrip`, the inputs channel's round trip.
 pub(super) struct LatencyTracker {
     /// History of latency samples in ms (most recent last).
     /// VecDeque so eviction at capacity is O(1) (`pop_front`).

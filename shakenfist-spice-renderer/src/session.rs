@@ -242,7 +242,7 @@ pub async fn run_connection(
     // list arrive out-of-band via oneshot channels. The earlier
     // intermediate `mpsc::channel(64)` was the root cause of K1:
     // it was drained only until session+channels were known, then
-    // abandoned while main kept sending Latency events into it.
+    // abandoned while main kept sending PingInterval events into it.
     // After ~65 pings (~7m45s of idle time) the buffer filled and
     // main blocked forever on send().await.
     let (session_init_tx, session_init_rx) = oneshot::channel();
@@ -996,7 +996,7 @@ pub async fn run_headless(
                     ChannelEvent::ImageReady { .. } => {
                         images_received += 1;
                     }
-                    ChannelEvent::Disconnected(ChannelType::Main) => {
+                    ChannelEvent::Disconnected(ChannelType::Main, _) => {
                         info!("Main channel disconnected, exiting");
                         break;
                     }

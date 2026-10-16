@@ -20,7 +20,7 @@ use shakenfist_spice_protocol::messages::{
 use shakenfist_spice_protocol::reader::BoundedReader;
 use shakenfist_spice_protocol::{cursor_client, cursor_server, ChannelType, NotifySeverity};
 
-use super::{ChannelEvent, CursorImage, EventSink, MAX_MESSAGE_BODY};
+use super::{ChannelEvent, CursorImage, DisconnectReason, EventSink, MAX_MESSAGE_BODY};
 
 pub struct CursorChannel {
     stream: SpiceStream,
@@ -129,7 +129,10 @@ impl CursorChannel {
             if n == 0 {
                 info!("cursor: channel disconnected");
                 self.events
-                    .emit(ChannelEvent::Disconnected(ChannelType::Cursor))
+                    .emit(ChannelEvent::Disconnected(
+                        ChannelType::Cursor,
+                        DisconnectReason::ServerClosed,
+                    ))
                     .await;
                 break;
             }

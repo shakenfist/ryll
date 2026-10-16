@@ -36,7 +36,7 @@ use shakenfist_spice_usbredir::parser::UsbredirParser;
 
 use crate::snapshots::RedirectedDevice;
 
-use super::{ChannelEvent, EventSink, UsbCommand, MAX_MESSAGE_BODY};
+use super::{ChannelEvent, DisconnectReason, EventSink, UsbCommand, MAX_MESSAGE_BODY};
 
 pub struct UsbredirChannel {
     stream: SpiceStream,
@@ -204,7 +204,7 @@ impl UsbredirChannel {
                     if n == 0 {
                         info!("usbredir: channel disconnected");
                         self.stop_all_interrupt_polls();
-                        self.events.emit(ChannelEvent::Disconnected(ChannelType::Usbredir)).await;
+                        self.events.emit(ChannelEvent::Disconnected(ChannelType::Usbredir, DisconnectReason::ServerClosed)).await;
                         break;
                     }
 

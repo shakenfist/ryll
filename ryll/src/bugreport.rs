@@ -823,8 +823,13 @@ pub struct AppSnapshot {
     pub bandwidth_current: f32,
     /// Most recent inter-PING interval observed on the main
     /// channel, in milliseconds.  `None` until the second PING
-    /// arrives.
-    pub last_latency_ms: Option<f64>,
+    /// arrives.  This is the server's ping cadence plus any stall,
+    /// not a round trip: see `last_input_rtt_ms` for that.
+    pub last_ping_interval_ms: Option<f64>,
+    /// Most recent inputs-channel round trip, from a pointer message
+    /// to the server's `MOUSE_MOTION_ACK` for it, in milliseconds.
+    /// `None` until the pointer has moved.
+    pub last_input_rtt_ms: Option<f64>,
     pub frames_received: u64,
     pub surfaces: Vec<SurfaceInfo>,
     pub cursor_pos: (u16, u16),
@@ -896,7 +901,8 @@ impl Default for AppSnapshot {
             fps: 0.0,
             bandwidth_history: Vec::new(),
             bandwidth_current: 0.0,
-            last_latency_ms: None,
+            last_ping_interval_ms: None,
+            last_input_rtt_ms: None,
             frames_received: 0,
             surfaces: Vec::new(),
             cursor_pos: (0, 0),
@@ -1396,6 +1402,40 @@ pub struct PerChannelDiagnostics {
     pub ping_recv_count: u32,
     pub pong_send_count: u32,
     pub last_ping_recv_ts_secs: Option<f64>,
+    /// Whether the channel had ended when the report was written.
+    pub state: ChannelState,
+    /// How it ended, as in [`DisconnectCause::disconnect_kind`], when
+    /// `state` is `ended`.
+    pub ended_by: Option<String>,
+    /// Session uptime when it ended, when `state` is `ended`.
+    pub ended_at_secs: Option<f64>,
+}
+
+/// A channel's state when a disconnect report was written, as far as
+/// the app had heard. The report is written once the UI frame's queued
+/// events are handled, so a channel whose end arrived in a later frame
+/// is still `Open` here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelState {
+    /// No end reported yet. The channel was up, as far as ryll knew.
+    #[default]
+    Open,
+    /// The channel reported that it ended.
+    Ended,
+    /// No end reported, and nothing ever received: most likely a
+    /// channel the server never offered, such as USB or WebDAV.
+    NoTraffic,
+}
+
+/// How and when one channel ended, kept by the app for the session so
+/// a disconnect report can say which channels were still up.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChannelEnd {
+    /// As in [`DisconnectCause::disconnect_kind`].
+    pub kind: String,
+    /// Session uptime when it ended.
+    pub at_secs: f64,
 }
 
 /// Structured cause record for an auto-disconnect bug report.
@@ -1416,6 +1456,16 @@ pub struct DisconnectCause {
     /// `std::io::ErrorKind` debug string when known. None for
     /// EOF / clean close / our own keepalive timeout.
     pub error_kind: Option<String>,
+    /// How the connection ended:
+    /// - `ServerClosed`: a read returned no bytes, so the server
+    ///   closed the socket cleanly;
+    /// - `ServerAnnounced`: the server sent the main channel's
+    ///   `DISCONNECTING`;
+    /// - `KeepaliveTimeout`: the main channel heard nothing for its
+    ///   keepalive timeout, and ryll gave up;
+    /// - `Error`: the channel failed, as `error_message` says;
+    /// - `ConnectFailed`: a connection attempt failed.
+    pub disconnect_kind: String,
     /// True if the main-channel client-side keepalive timeout
     /// (`main_channel.rs`, 30 s) fired. Distinguishes "we
     /// timed ourselves out" from a real EOF/RST.
@@ -1435,6 +1485,7 @@ impl DisconnectCause {
     /// `DisconnectCause::per_channel`.
     pub fn collect_per_channel(
         snapshots: &ChannelSnapshots,
+        ends: &BTreeMap<String, ChannelEnd>,
     ) -> BTreeMap<String, PerChannelDiagnostics> {
         let mut out = BTreeMap::new();
         if let Ok(s) = snapshots.main.lock() {
@@ -1448,6 +1499,7 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
+                    ..Default::default()
                 },
             );
         }
@@ -1462,6 +1514,7 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
+                    ..Default::default()
                 },
             );
         }
@@ -1476,6 +1529,7 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
+                    ..Default::default()
                 },
             );
         }
@@ -1490,6 +1544,7 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
+                    ..Default::default()
                 },
             );
         }
@@ -1504,6 +1559,7 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
+                    ..Default::default()
                 },
             );
         }
@@ -1518,6 +1574,7 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
+                    ..Default::default()
                 },
             );
         }
@@ -1532,10 +1589,31 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
+                    ..Default::default()
                 },
             );
         }
+        for (name, diag) in out.iter_mut() {
+            diag.set_state(ends.get(name));
+        }
         out
+    }
+}
+
+impl PerChannelDiagnostics {
+    /// Fill in `state` from the channel's end, if it has one.
+    fn set_state(&mut self, end: Option<&ChannelEnd>) {
+        match end {
+            Some(end) => {
+                self.state = ChannelState::Ended;
+                self.ended_by = Some(end.kind.clone());
+                self.ended_at_secs = Some(end.at_secs);
+            }
+            None if self.bytes_in == 0 && self.last_recv_ts_secs.is_none() => {
+                self.state = ChannelState::NoTraffic;
+            }
+            None => self.state = ChannelState::Open,
+        }
     }
 }
 
@@ -4628,7 +4706,7 @@ mod tests {
             s.bytes_in = 99;
         }
 
-        let per_channel = DisconnectCause::collect_per_channel(&snapshots);
+        let per_channel = DisconnectCause::collect_per_channel(&snapshots, &BTreeMap::new());
         let main = per_channel.get("main").expect("main entry missing");
         assert_eq!(main.bytes_in, 1234);
         assert_eq!(main.bytes_out, 5678);
@@ -4649,6 +4727,43 @@ mod tests {
         }
     }
 
+    /// A channel that reported its end says how and when; one that
+    /// carried traffic and reported nothing is open; one that never
+    /// received anything is told apart from both.
+    #[test]
+    fn test_collect_per_channel_marks_each_channels_state() {
+        let snapshots = ChannelSnapshots::new();
+        {
+            let mut s = snapshots.inputs.lock().unwrap();
+            s.bytes_in = 9686;
+            s.last_recv_ts_secs = Some(356.8);
+        }
+        {
+            let mut s = snapshots.display.lock().unwrap();
+            s.bytes_in = 61_065_200;
+            s.last_recv_ts_secs = Some(358.2);
+        }
+        let mut ends = BTreeMap::new();
+        ends.insert(
+            "inputs".to_string(),
+            ChannelEnd {
+                kind: "ServerClosed".to_string(),
+                at_secs: 358.3,
+            },
+        );
+
+        let per_channel = DisconnectCause::collect_per_channel(&snapshots, &ends);
+
+        let inputs = &per_channel["inputs"];
+        assert_eq!(inputs.state, ChannelState::Ended);
+        assert_eq!(inputs.ended_by.as_deref(), Some("ServerClosed"));
+        assert_eq!(inputs.ended_at_secs, Some(358.3));
+        let display = &per_channel["display"];
+        assert_eq!(display.state, ChannelState::Open);
+        assert_eq!(display.ended_by, None);
+        assert_eq!(per_channel["usbredir"].state, ChannelState::NoTraffic);
+    }
+
     #[test]
     fn test_write_disconnect_produces_zip_with_cause_json() {
         let traffic = TrafficBuffers::new();
@@ -4665,9 +4780,10 @@ mod tests {
             channel: "main".to_string(),
             error_message: "test disconnect".to_string(),
             error_kind: None,
+            disconnect_kind: "KeepaliveTimeout".to_string(),
             keepalive_timeout_fired: true,
             session_uptime_secs: 10.0,
-            per_channel: DisconnectCause::collect_per_channel(&snapshots),
+            per_channel: DisconnectCause::collect_per_channel(&snapshots, &BTreeMap::new()),
         };
 
         let tmp = std::env::temp_dir().join("ryll-test-bugreport-disconnect");
@@ -4713,6 +4829,9 @@ mod tests {
         assert_eq!(parsed["channel"], "main");
         assert_eq!(parsed["error_message"], "test disconnect");
         assert_eq!(parsed["keepalive_timeout_fired"], true);
+        assert_eq!(parsed["disconnect_kind"], "KeepaliveTimeout");
+        assert_eq!(parsed["per_channel"]["main"]["state"], "open");
+        assert_eq!(parsed["per_channel"]["webdav"]["state"], "no_traffic");
         assert_eq!(parsed["session_uptime_secs"], 10.0);
         assert_eq!(parsed["per_channel"]["main"]["bytes_in"], 4096);
         assert!(parsed["per_channel"]
@@ -4738,9 +4857,10 @@ mod tests {
             channel: "weird/name with:colons".to_string(),
             error_message: "x".to_string(),
             error_kind: Some("ConnectionReset".to_string()),
+            disconnect_kind: "Error".to_string(),
             keepalive_timeout_fired: false,
             session_uptime_secs: 0.0,
-            per_channel: DisconnectCause::collect_per_channel(&snapshots),
+            per_channel: DisconnectCause::collect_per_channel(&snapshots, &BTreeMap::new()),
         };
 
         let tmp = std::env::temp_dir().join("ryll-test-bugreport-disconnect-sanitise");

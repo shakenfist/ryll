@@ -41,7 +41,7 @@ use shakenfist_spice_protocol::{
 };
 
 use super::agent_queue::AgentSendQueue;
-use super::{ChannelEvent, EventSink, MAX_MESSAGE_BODY};
+use super::{ChannelEvent, DisconnectReason, EventSink, MAX_MESSAGE_BODY};
 
 /// True when the server supports CLIENT (absolute) mouse mode but
 /// is currently in a different mode. Used to decide whether to
@@ -653,7 +653,7 @@ impl MainChannel {
                     let n = n?;
                     if n == 0 {
                         info!("main: channel disconnected");
-                        self.emit_session_ended().await;
+                        self.emit_session_ended(DisconnectReason::ServerClosed).await;
                         break;
                     }
 
@@ -716,7 +716,7 @@ impl MainChannel {
                     if let Ok(mut snap) = self.snapshot.lock() {
                         snap.keepalive_timeout_fired = true;
                     }
-                    self.emit_session_ended().await;
+                    self.emit_session_ended(DisconnectReason::KeepaliveTimeout).await;
                     break;
                 }
                 _ = stuck_agent_check.tick() => {
@@ -1022,8 +1022,10 @@ impl MainChannel {
 
                 // Last, so a truncated PING is torn down without leaving a
                 // sample behind and a stalled renderer cannot delay the PONG.
-                if let Some(sample_ms) = interval_ms {
-                    self.events.emit(ChannelEvent::Latency { sample_ms }).await;
+                if let Some(interval_ms) = interval_ms {
+                    self.events
+                        .emit(ChannelEvent::PingInterval { interval_ms })
+                        .await;
                 }
             }
 
@@ -1100,7 +1102,10 @@ impl MainChannel {
                 // handles the client's `DISCONNECTING`), and spice-gtk
                 // just logs it.
                 self.events
-                    .emit(ChannelEvent::Disconnected(ChannelType::Main))
+                    .emit(ChannelEvent::Disconnected(
+                        ChannelType::Main,
+                        DisconnectReason::ServerAnnounced,
+                    ))
                     .await;
             }
 
@@ -1306,9 +1311,9 @@ impl MainChannel {
     /// event however it is sent. A finite deadline would therefore add no
     /// safety in those cases, and would lose the event in the one that
     /// matters: a long stall that recovers.
-    async fn emit_session_ended(&self) {
+    async fn emit_session_ended(&self, reason: DisconnectReason) {
         self.events
-            .emit_terminal(ChannelEvent::Disconnected(ChannelType::Main))
+            .emit_terminal(ChannelEvent::Disconnected(ChannelType::Main, reason))
             .await;
     }
 
