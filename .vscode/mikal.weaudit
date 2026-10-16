@@ -692,10 +692,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/design-decisions.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/development.md",
       "author": "mikal"
     },
@@ -705,10 +701,6 @@
     },
     {
       "path": "docs/diagnostics.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/features.md",
       "author": "mikal"
     },
     {
