@@ -2471,6 +2471,7 @@ impl RyllApp {
                     NotificationSource::BugReport,
                     format!("Bug report saved to {}", path.display()),
                 );
+                self.warn_if_too_big_to_attach(&path);
             }
             Err(e) => {
                 error!("app: failed to write notification bug report: {}", e);
@@ -2643,12 +2644,30 @@ impl RyllApp {
         self.write_pending_bug_report(pending, metrics);
     }
 
+    /// Reports keep their traffic within a budget that fits a GitHub
+    /// attachment, but an unusually large screenshot can still push
+    /// one over. Say so, rather than leave the user to find out when
+    /// the upload fails.
+    fn warn_if_too_big_to_attach(&mut self, path: &std::path::Path) {
+        if let Some(size) = crate::bugreport::oversized_for_attachment(path) {
+            let msg = format!(
+                "Bug report is {:.1} MB, over GitHub's {} MB attachment limit; \
+                 share it another way, or attach only the files inside it",
+                size as f64 / 1e6,
+                crate::bugreport::GITHUB_ATTACHMENT_LIMIT_BYTES / 1_000_000
+            );
+            warn!("app: {}", msg);
+            self.push_notification(NotifySeverity::Warn, NotificationSource::BugReport, msg);
+        }
+    }
+
     fn write_pending_bug_report(&mut self, pending: PendingBugReport, metrics: RuntimeMetrics) {
         match self.generate_bug_report(pending, metrics) {
             Ok(path) => {
                 let msg = format!("Bug report saved to {}", path.display());
                 info!("app: {}", msg);
                 self.push_notification(NotifySeverity::Info, NotificationSource::BugReport, msg);
+                self.warn_if_too_big_to_attach(&path);
             }
             Err(e) => {
                 let msg = format!("Bug report failed: {}", e);
