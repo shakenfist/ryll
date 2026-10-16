@@ -1820,6 +1820,7 @@ async fn stats_starts_at_zero() {
     assert_eq!(
         resp["result"],
         serde_json::json!({ "display": {
+            "channel_id": 0,
             "bytes_in": 0,
             "messages_received": 0,
             "marks_received": 0,
@@ -1849,6 +1850,7 @@ async fn stats_reports_a_stream_while_open_and_after_it_is_destroyed() {
 
     {
         let mut snap = inputs.display_snapshot.lock().unwrap();
+        snap.channel_id = 2;
         snap.bytes_in = 123_456;
         snap.message_count = 300;
         // DISPLAY_MARK is opcode 102.
@@ -1878,6 +1880,7 @@ async fn stats_reports_a_stream_while_open_and_after_it_is_destroyed() {
     assert_eq!(
         resp["result"],
         serde_json::json!({ "display": {
+            "channel_id": 2,
             "bytes_in": 123_456,
             "messages_received": 300,
             "marks_received": 30,

@@ -144,6 +144,10 @@ pub struct DecodeResult {
 /// Snapshot of the display channel's mutable state.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct DisplaySnapshot {
+    /// The display channel that last published this snapshot. Every
+    /// display channel shares the one snapshot, so with several (one
+    /// per monitor, on some guests) this says whose counters it holds.
+    pub channel_id: u8,
     pub image_cache_entries: usize,
     /// The most recently used image-cache keys, MRU first, truncated
     /// to `MAX_SNAPSHOT_IMAGE_CACHE_IDS` (see the display channel).
@@ -158,8 +162,8 @@ pub struct DisplaySnapshot {
     pub recent_decodes: VecDeque<DecodeResult>,
     pub ack_generation: u32,
     pub ack_window: u32,
-    pub message_count: u32,
-    pub last_ack: u32,
+    pub message_count: u64,
+    pub last_ack: u64,
     pub bytes_in: u64,
     pub bytes_out: u64,
     /// Session-relative seconds when the most recent server

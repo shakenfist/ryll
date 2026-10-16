@@ -770,7 +770,10 @@ The counters are those the display channel last published, which it
 does after each batch of messages it reads, so they trail the wire by
 at most one batch. They count from the session's connection. With more
 than one display channel (some guests open one per monitor) they are
-the counters of whichever channel published last.
+the counters of whichever channel published last, which `channel_id`
+names. A client taking differences between polls should check that
+`channel_id` did not change, or the counters can appear to go
+backwards.
 
 Params: `{}` (none required)
 
@@ -778,6 +781,7 @@ Result on success: an object with one field, `display`, holding:
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `channel_id` | u8 | The display channel these counters are from. |
 | `bytes_in` | u64 | Bytes received on the display channel. |
 | `messages_received` | u64 | Messages received on the display channel. |
 | `marks_received` | u64 | `DISPLAY_MARK` messages received. The GUI's frame rate is the rate of these, so the difference between two polls divided by the time between them is the same measure. |
@@ -817,7 +821,7 @@ Worked example, polled while an H.264 stream plays:
 
 ```
 → {"id": 13, "method": "stats", "params": {}}
-← {"id": 13, "ok": true, "result": {"display": {"bytes_in": 48211953, "messages_received": 5120, "marks_received": 1474, "streams_active": 1, "streams_created_total": 1, "streams_destroyed_total": 0, "stream_data_orphan_count": 0, "stream_reports_sent_total": 92, "decodes": {"h264": {"decodes_total": 460, "decode_failures_total": 0}}, "streams": [{"stream_id": 0, "surface_id": 0, "codec": "h264", "codec_type": 3, "width": 1280, "height": 720, "frames_received": 460, "frames_decoded_ok": 460, "frames_decode_failed": 0, "created_at_secs": 31.42, "destroyed_at_secs": null}], "streams_recently_destroyed": []}}}
+← {"id": 13, "ok": true, "result": {"display": {"channel_id": 0, "bytes_in": 48211953, "messages_received": 5120, "marks_received": 1474, "streams_active": 1, "streams_created_total": 1, "streams_destroyed_total": 0, "stream_data_orphan_count": 0, "stream_reports_sent_total": 92, "decodes": {"h264": {"decodes_total": 460, "decode_failures_total": 0}}, "streams": [{"stream_id": 0, "surface_id": 0, "codec": "h264", "codec_type": 3, "width": 1280, "height": 720, "frames_received": 460, "frames_decoded_ok": 460, "frames_decode_failed": 0, "created_at_secs": 31.42, "destroyed_at_secs": null}], "streams_recently_destroyed": []}}}
 ```
 
 ---

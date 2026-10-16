@@ -64,6 +64,9 @@ struct StreamState {
     last_frame_ts_secs: Option<f64>,
     last_decode_ok_ts_secs: Option<f64>,
     last_decode_duration_us: u32,
+    /// Set once this stream has been warned about as an H.264 stream
+    /// that decodes nothing; see [`warn_if_h264_never_decodes`].
+    warned_never_decodes: bool,
     // Report state — populated by STREAM_ACTIVATE_REPORT; reset
     // to defaults at STREAM_CREATE. See spice.proto's
     // SpiceMsgDisplayStreamActivateReport and
@@ -481,6 +484,37 @@ fn crop_frame_to_dest(
     })
 }
 
+/// Frames an H.264 stream may receive without a decoded picture
+/// before [`warn_if_h264_never_decodes`] says so.
+const H264_NO_PICTURE_WARN_FRAMES: u64 = 10;
+
+/// Warn, once per stream, when an H.264 stream's first
+/// [`H264_NO_PICTURE_WARN_FRAMES`] frames have produced no picture.
+///
+/// ryll offers H.264 by default, after MJPEG, and spice-server's
+/// display channel honours that order. A guest's spice-streaming-agent
+/// does not: it may choose H.264, and spice-server's GStreamer H.264
+/// does not decode in ryll (ryll#398, ryll#547), which leaves the
+/// streamed region black or stale with nothing to say why. A frame
+/// that fails and a packet that completes no picture count alike,
+/// because which of the two openh264 reports for such a stream varies.
+fn warn_if_h264_never_decodes(stream_id: u32, stream: &mut StreamState) {
+    if stream.codec_type != SPICE_VIDEO_CODEC_TYPE_H264
+        || stream.warned_never_decodes
+        || stream.frames_decoded_ok > 0
+        || stream.frames_received < H264_NO_PICTURE_WARN_FRAMES
+    {
+        return;
+    }
+    stream.warned_never_decodes = true;
+    warn!(
+        "display: H.264 stream {} has decoded no picture from its first {} frames \
+         ({} failed); this server's H.264 may not decode in ryll (ryll#398, ryll#547). \
+         Restart ryll with --no-h264 to ask for MJPEG instead",
+        stream_id, stream.frames_received, stream.frames_decode_failed
+    );
+}
+
 /// A draw's clip as the rectangle list its event carries: empty for an
 /// unclipped draw, otherwise the clip's union with `dest` as disjoint
 /// rectangles inside it (see [`clip_area`]). `None` means the draw
@@ -880,8 +914,10 @@ pub struct DisplayChannel {
     recent_decodes: VecDeque<DecodeResult>,
     ack_generation: u32,
     ack_window: u32,
-    message_count: u32,
-    last_ack: u32,
+    /// Messages read since the channel linked. u64 so that a long soak
+    /// cannot wrap it, as `stats` reports rates from its differences.
+    message_count: u64,
+    last_ack: u64,
     bytes_in: u64,
     bytes_out: u64,
     /// Local cache of disconnect-cause diagnostic fields,
@@ -1334,7 +1370,9 @@ impl DisplayChannel {
             self.handle_message(msg_type, message.payload()).await?;
 
             // Send ACK if needed
-            if self.ack_window > 0 && self.message_count - self.last_ack >= self.ack_window {
+            if self.ack_window > 0
+                && self.message_count - self.last_ack >= u64::from(self.ack_window)
+            {
                 self.send_ack().await?;
             }
         }
@@ -1790,6 +1828,7 @@ impl DisplayChannel {
                             last_frame_ts_secs: None,
                             last_decode_ok_ts_secs: None,
                             last_decode_duration_us: 0,
+                            warned_never_decodes: false,
                             report_is_active: false,
                             report_unique_id: 0,
                             report_max_window_size: 0,
@@ -2030,6 +2069,7 @@ impl DisplayChannel {
                                 stream.frames_decode_failed.saturating_add(1);
                         }
                     }
+                    warn_if_h264_never_decodes(stream_id, stream);
                 } else {
                     self.stream_data_orphan_count = self.stream_data_orphan_count.saturating_add(1);
                     debug!(
@@ -3266,6 +3306,7 @@ impl DisplayChannel {
     /// Sync local state to the shared snapshot.
     fn update_snapshot(&self) {
         let mut snap = self.snapshot.lock().expect("lock poisoned");
+        snap.channel_id = self.channel_id;
         snap.ack_generation = self.ack_generation;
         snap.ack_window = self.ack_window;
         snap.message_count = self.message_count;
@@ -3509,7 +3550,7 @@ mod tests {
     use crate::channels::test_support::{loopback, NullTraffic, TestChannelPeers};
     use shakenfist_spice_protocol::constants::{clip_type, image_compression};
     use shakenfist_spice_protocol::messages::{
-        BitmapPalette, BitmapPayload, Clip, DrawCopyBuilder, ImagePayload, SpiceImage,
+        BitmapPalette, BitmapPayload, Clip, DrawCopyBuilder, ImagePayload, SpiceImage, StreamData,
         StreamDataHeader, StreamDataSized,
     };
 
@@ -4771,6 +4812,155 @@ mod tests {
             crop_frame_to_dest(frame, 1, 1),
             Err(VideoDecoderError::Decode(_))
         ));
+    }
+
+    /// `count` 64x64 H.264 frames, each decodable on its own after the
+    /// first (an IDR), from the encoder a SPICE server would use.
+    fn h264_frames(count: usize) -> Vec<Vec<u8>> {
+        use shakenfist_spice_compression::{Bgrx, H264Config, H264Encoder};
+        let config = H264Config {
+            slices: 1,
+            skip_frames: false,
+            ..H264Config::new(64, 64, 30)
+        };
+        let mut encoder = H264Encoder::new(config).expect("an encoder");
+        (0..count)
+            .map(|i| {
+                let pixels: Vec<u8> = (0..64 * 64 * 4).map(|b| (b * 7 + i * 13) as u8).collect();
+                let image = Bgrx::new(&pixels, 64, 64, 64 * 4).expect("a valid image");
+                encoder
+                    .encode(&image)
+                    .expect("encode")
+                    .expect("frame skipping is off")
+                    .data
+            })
+            .collect()
+    }
+
+    /// A `STREAM_DATA` body carrying `data` for stream `id`.
+    fn stream_data_payload(id: u32, data: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        StreamData {
+            base: StreamDataHeader {
+                id,
+                multi_media_time: 0,
+            },
+            data: data.to_vec(),
+        }
+        .write(&mut v);
+        v
+    }
+
+    /// Send each of `frames` to stream `id`.
+    async fn send_stream_frames(channel: &mut DisplayChannel, id: u32, frames: &[Vec<u8>]) {
+        for frame in frames {
+            channel
+                .handle_message(display_server::STREAM_DATA, &stream_data_payload(id, frame))
+                .await
+                .expect("stream_data must not error");
+        }
+    }
+
+    // A streaming agent may pick H.264 although ryll asks for MJPEG
+    // first, and spice-server's H.264 does not decode in ryll (#398).
+    // Nothing shows on screen to say why, so ryll warns, once per
+    // stream, naming --no-h264.
+    #[tokio::test]
+    async fn an_h264_stream_that_never_decodes_is_warned_about_once() {
+        let (mut channel, _peers) = test_display_channel().await;
+        channel
+            .handle_message(
+                display_server::STREAM_CREATE,
+                &stream_create_payload(7, SPICE_VIDEO_CODEC_TYPE_H264),
+            )
+            .await
+            .expect("stream_create must not error");
+        let junk = vec![vec![0x00, 0x00, 0x00, 0x01, 0x65, 0xAA, 0x55, 0xAA]; 9];
+        send_stream_frames(&mut channel, 7, &junk).await;
+        assert!(
+            !channel.streams[&7].warned_never_decodes,
+            "warned before the threshold"
+        );
+        send_stream_frames(&mut channel, 7, &junk[..1]).await;
+        let stream = &channel.streams[&7];
+        assert_eq!(stream.frames_decoded_ok, 0);
+        assert_eq!(stream.frames_received, H264_NO_PICTURE_WARN_FRAMES);
+        assert!(stream.warned_never_decodes, "not warned at the threshold");
+    }
+
+    #[tokio::test]
+    async fn streams_that_decode_or_are_mjpeg_are_not_warned_about() {
+        let (mut channel, _peers) = test_display_channel().await;
+        for (id, codec) in [
+            (7, SPICE_VIDEO_CODEC_TYPE_H264),
+            (8, SPICE_VIDEO_CODEC_TYPE_MJPEG),
+        ] {
+            channel
+                .handle_message(
+                    display_server::STREAM_CREATE,
+                    &stream_create_payload(id, codec),
+                )
+                .await
+                .expect("stream_create must not error");
+        }
+        send_stream_frames(&mut channel, 7, &h264_frames(12)).await;
+        send_stream_frames(&mut channel, 8, &vec![vec![0xFF, 0xD8, 0x00]; 12]).await;
+        assert!(channel.streams[&7].frames_decoded_ok > 0);
+        assert!(!channel.streams[&7].warned_never_decodes);
+        assert_eq!(channel.streams[&8].frames_decoded_ok, 0);
+        assert!(!channel.streams[&8].warned_never_decodes);
+    }
+
+    // The control socket's `stats` reads what the channel publishes. Fill
+    // the snapshot through the channel itself, not by hand, so that a
+    // change to the opcode key or the publish path shows here.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stats_reports_what_the_channel_publishes() {
+        use crate::control::protocol::{CodecDecodeStats, DisplayStats};
+
+        let (mut channel, _peers) = test_display_channel().await;
+        channel
+            .handle_message(display_server::MARK, &[])
+            .await
+            .expect("mark must not error");
+        channel
+            .handle_message(
+                display_server::STREAM_CREATE,
+                &stream_create_payload(7, SPICE_VIDEO_CODEC_TYPE_H264),
+            )
+            .await
+            .expect("stream_create must not error");
+        send_stream_frames(&mut channel, 7, &h264_frames(3)).await;
+        channel.update_snapshot();
+
+        let stats = DisplayStats::from(&*channel.snapshot.lock().expect("snapshot"));
+        assert_eq!(stats.channel_id, 0);
+        assert_eq!(stats.marks_received, 1);
+        assert_eq!(stats.streams_active, 1);
+        assert_eq!(stats.streams_created_total, 1);
+        assert_eq!(
+            stats.decodes.get("h264"),
+            Some(&CodecDecodeStats {
+                decodes_total: 3,
+                decode_failures_total: 0,
+            })
+        );
+        let stream = &stats.streams[0];
+        assert_eq!(
+            (stream.stream_id, stream.codec.as_str(), stream.codec_type),
+            (7, "h264", SPICE_VIDEO_CODEC_TYPE_H264)
+        );
+        assert_eq!((stream.width, stream.height), (64, 64));
+        assert_eq!(
+            (
+                stream.frames_received,
+                stream.frames_decoded_ok,
+                stream.frames_decode_failed
+            ),
+            (3, 3, 0)
+        );
+        assert_eq!(stream.destroyed_at_secs, None);
     }
 
     #[tokio::test]

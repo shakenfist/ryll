@@ -272,9 +272,24 @@ pub struct H264Encoder {
     /// The highest bitrate the encoder's spatial layer allows.
     max_bitrate_bps: u32,
     frame_rate: f32,
-    /// openh264 initialises at the first encode, and takes options
-    /// only after it, so until then settings are only recorded.
-    initialised: bool,
+    state: State,
+    /// Fail the slice switch, to test the failure path.
+    #[cfg(test)]
+    fail_slice_switch: bool,
+}
+
+/// Where an [`H264Encoder`] is in its life.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum State {
+    /// No frame encoded yet. openh264 initialises at the first encode,
+    /// and takes options only after it, so until then settings are
+    /// only recorded.
+    Uninitialised,
+    Running,
+    /// Initialisation failed part way. openh264 may then be running
+    /// in a state nothing here tracks, so the encoder refuses every
+    /// later call rather than retry on top of it.
+    Failed,
 }
 
 // The encoder task moves it between threads; openh264's `Encoder` is
@@ -320,7 +335,9 @@ impl H264Encoder {
             bitrate_bps: config.bitrate_bps,
             max_bitrate_bps: config.bitrate_bps,
             frame_rate: config.max_frame_rate,
-            initialised: false,
+            state: State::Uninitialised,
+            #[cfg(test)]
+            fail_slice_switch: false,
             config,
         })
     }
@@ -350,11 +367,16 @@ impl H264Encoder {
     }
 
     /// Change the target bitrate. Output follows within a few frames.
+    /// If openh264 refuses, the target stays as it was.
     pub fn set_bitrate(&mut self, bps: u32) -> Result<()> {
         check_bitrate(bps)?;
-        self.bitrate_bps = bps;
-        if self.initialised {
-            self.apply_bitrate()?;
+        self.check_usable()?;
+        let previous = std::mem::replace(&mut self.bitrate_bps, bps);
+        if self.state == State::Running {
+            if let Err(e) = self.apply_bitrate() {
+                self.bitrate_bps = previous;
+                return Err(e);
+            }
         }
         Ok(())
     }
@@ -362,21 +384,33 @@ impl H264Encoder {
     /// Change the frame rate the bitrate is budgeted over. In
     /// [`H264RateControl::Bitrate`] mode each frame gets the bitrate
     /// divided by this, so a server keeps it at the rate it actually
-    /// sends. It applies from the next frame.
+    /// sends. It applies from the next frame. If openh264 refuses, the
+    /// frame rate stays as it was.
     pub fn set_frame_rate(&mut self, fps: f32) -> Result<()> {
         check_frame_rate(fps)?;
-        self.frame_rate = fps;
-        if self.initialised {
-            self.apply_frame_rate()?;
+        self.check_usable()?;
+        let previous = std::mem::replace(&mut self.frame_rate, fps);
+        if self.state == State::Running {
+            if let Err(e) = self.apply_frame_rate() {
+                self.frame_rate = previous;
+                return Err(e);
+            }
         }
         Ok(())
     }
 
     /// Make the next frame an IDR. The first frame always is one.
     pub fn force_intra_frame(&mut self) {
-        if self.initialised {
+        if self.state == State::Running {
             self.encoder.force_intra_frame();
         }
+    }
+
+    fn check_usable(&self) -> Result<()> {
+        if self.state == State::Failed {
+            bail!("this H.264 encoder failed to initialise; build a new one");
+        }
+        Ok(())
     }
 
     /// Encode a BGRX frame. Returns `None` when openh264 skipped it to
@@ -400,15 +434,30 @@ impl H264Encoder {
         image: &Bgrx,
         rgb_offsets: (usize, usize, usize),
     ) -> Result<Option<H264Frame>> {
+        self.check_usable()?;
         self.convert(image, rgb_offsets)?;
-        if !self.initialised && self.config.slices > 1 {
+        if self.state == State::Running {
+            return self.encode_yuv();
+        }
+        let result = self.initialise_and_encode();
+        self.state = if result.is_ok() {
+            State::Running
+        } else {
+            State::Failed
+        };
+        result
+    }
+
+    /// Encode the first frame, initialising openh264 on the way, and
+    /// apply any bitrate and frame rate set before it.
+    fn initialise_and_encode(&mut self) -> Result<Option<H264Frame>> {
+        if self.config.slices > 1 {
             self.initialise_with_slices()?;
+            self.apply_settings()?;
+            return self.encode_yuv();
         }
         let frame = self.encode_yuv()?;
-        if !self.initialised {
-            self.initialised = true;
-            self.apply_settings()?;
-        }
+        self.apply_settings()?;
         Ok(frame)
     }
 
@@ -472,6 +521,10 @@ impl H264Encoder {
         self.encoder
             .encode(&self.yuv)
             .map_err(|e| anyhow!("openh264 encode failed: {e}"))?;
+        #[cfg(test)]
+        if self.fail_slice_switch {
+            bail!("openh264 refused to set SVC_ENCODE_PARAM_EXT (injected for a test)");
+        }
         let mut params = SEncParamExt::default();
         // SAFETY: ENCODER_OPTION_SVC_ENCODE_PARAM_EXT reads and writes
         // an SEncParamExt, and the encode above initialised the
@@ -503,8 +556,7 @@ impl H264Encoder {
         // skips it when the slice count did not change, as for a
         // frame too small to split.
         self.encoder.force_intra_frame();
-        self.initialised = true;
-        self.apply_settings()
+        Ok(())
     }
 
     /// Encode `self.yuv`, returning `None` for a skipped frame.
@@ -528,7 +580,7 @@ impl H264Encoder {
     }
 
     /// Apply any bitrate and frame rate set before openh264 was
-    /// initialised.
+    /// initialised. openh264 must be initialised.
     fn apply_settings(&mut self) -> Result<()> {
         if self.bitrate_bps != self.config.bitrate_bps {
             self.apply_bitrate()?;
@@ -646,6 +698,14 @@ mod tests {
     fn bgrx(data: &[u8], w: u32, h: u32) -> Bgrx<'_> {
         Bgrx::new(data, w, h, (w * 4) as usize).expect("valid image")
     }
+
+    // The rate tests below (`bitrate_changes_follow_in_both_directions`,
+    // `a_bitrate_set_before_the_first_frame_applies` and
+    // `frame_rate_changes_the_per_frame_budget`) assert ratios of mean
+    // frame sizes. Their thresholds and bitrates were tuned against
+    // openh264's rate controller at the `=0.9.8` pin in Cargo.toml:
+    // whoever bumps that pin should expect to retune them, rather than
+    // read a failure as a broken encoder.
 
     /// Config for the rate tests: one slice, in Bitrate mode, with
     /// frame skipping, which is what holds openh264 to its budget (it
@@ -931,6 +991,36 @@ mod tests {
             "3 Mbit/s frames ({raised} B) are not much larger than the 1 Mbit/s ones \
              ({before} B) the encoder was created at"
         );
+    }
+
+    /// If initialisation fails part way, the encoder refuses every later
+    /// call, rather than retry the slice switch on an openh264 that is
+    /// already running, or record settings it will never apply.
+    #[test]
+    fn a_failed_initialisation_poisons_the_encoder() {
+        let config = H264Config {
+            slices: 4,
+            ..H264Config::new(320, 240, 30)
+        };
+        let mut enc = H264Encoder::new(config).expect("init");
+        enc.fail_slice_switch = true;
+        let data = vec![0u8; 320 * 240 * 4];
+        let err = enc
+            .encode(&bgrx(&data, 320, 240))
+            .expect_err("the injected slice failure");
+        assert!(err.to_string().contains("injected"), "{err}");
+
+        // Even with the fault gone, the encoder stays refused.
+        enc.fail_slice_switch = false;
+        for err in [
+            enc.encode(&bgrx(&data, 320, 240)).map(|_| ()),
+            enc.set_bitrate(500_000),
+            enc.set_frame_rate(10.0),
+        ] {
+            let err = err.expect_err("a poisoned encoder refuses");
+            assert!(err.to_string().contains("failed to initialise"), "{err}");
+        }
+        assert_eq!(enc.bitrate_bps(), enc.config().bitrate_bps);
     }
 
     /// A bitrate set before the first frame applies from the start.
