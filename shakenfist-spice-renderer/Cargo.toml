@@ -64,9 +64,9 @@ lz4_flex = "0.14"
 # from crates.io. Versions are kept in lockstep via
 # cargo-release; see tools/cut-release.sh. `encode` is for the H.264
 # encoder the web frontend's pipeline and ryll's capture drive.
-shakenfist-spice-compression = { path = "../shakenfist-spice-compression", version = "0.2.0", features = ["encode"] }
-shakenfist-spice-protocol = { path = "../shakenfist-spice-protocol", version = "0.2.0" }
-shakenfist-spice-usbredir = { path = "../shakenfist-spice-usbredir", version = "0.2.0" }
+shakenfist-spice-compression = { path = "../shakenfist-spice-compression", version = "0.3.0", features = ["encode"] }
+shakenfist-spice-protocol = { path = "../shakenfist-spice-protocol", version = "0.3.0" }
+shakenfist-spice-usbredir = { path = "../shakenfist-spice-usbredir", version = "0.3.0" }
 
 # Serialisation
 serde = { version = "1", features = ["derive"] }
