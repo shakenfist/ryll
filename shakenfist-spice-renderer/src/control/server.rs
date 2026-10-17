@@ -46,14 +46,14 @@ use tracing::{debug, error, info, warn};
 
 use super::protocol::{
     major_version_matches, ClipboardChanged, ClipboardSetParams, ClipboardText, ErrorCode, Event,
-    HelloParams, HelloResult, Request, RequestId, ResizeParams, Response, RpcError, StatsResult,
-    StatusResult, SubscribeParams, SubscribeResult, UnsubscribeResult, PROTOCOL_VERSION,
-    SUPPORTED_METHODS,
+    HelloParams, HelloResult, PlaybackStats, Request, RequestId, ResizeParams, Response, RpcError,
+    StatsResult, StatusResult, SubscribeParams, SubscribeResult, UnsubscribeResult,
+    PROTOCOL_VERSION, SUPPORTED_METHODS,
 };
 use crate::channels::{align_monitor_dimension, ChannelEvent, DisplaySize, InputEvent};
 use crate::clipboard::MemoryClipboard;
 use crate::display::MAX_SURFACE_DIMENSION;
-use crate::snapshots::DisplaySnapshot;
+use crate::snapshots::{DisplaySnapshot, PlaybackSnapshot};
 use crate::surface_mirror::SurfaceMirror;
 use shakenfist_spice_protocol::messages::agent_stream::MAX_AGENT_MESSAGE_SIZE;
 
@@ -94,6 +94,10 @@ pub struct SessionHandles {
     pub resize_tx: mpsc::Sender<DisplaySize>,
     /// The display channel's published counters, for `stats`.
     pub display_snapshot: Arc<std::sync::Mutex<DisplaySnapshot>>,
+    /// The playback channel's published counters, for `stats`. Its
+    /// `playback` object is left out until a playback channel has
+    /// published here, which never happens without the `audio` feature.
+    pub playback_snapshot: Arc<std::sync::Mutex<PlaybackSnapshot>>,
 }
 
 // ── Server ────────────────────────────────────────────────────────
@@ -1050,7 +1054,10 @@ async fn dispatch_request(
         ),
         "clipboard_get" => (handle_clipboard_get(id, &handles.clipboard), false),
         "resize" => (handle_resize(id, request.params, &handles.resize_tx), false),
-        "stats" => (handle_stats(id, &handles.display_snapshot), false),
+        "stats" => (
+            handle_stats(id, &handles.display_snapshot, &handles.playback_snapshot),
+            false,
+        ),
         // Completely unknown:
         _ => (
             Response::err(
@@ -1126,10 +1133,15 @@ fn handle_status(id: RequestId, status_provider: &dyn StatusProvider) -> Respons
     )
 }
 
-/// `stats` (v1.4): the display channel's counters, as it last
-/// published them. The channel publishes after each batch of messages
-/// it reads, so they trail the wire by at most one batch.
-fn handle_stats(id: RequestId, display_snapshot: &std::sync::Mutex<DisplaySnapshot>) -> Response {
+/// `stats` (v1.4): the display channel's counters, and from v1.6 the
+/// playback channel's, as each last published them. The channels
+/// publish after each batch of messages they read, so they trail the
+/// wire by at most one batch.
+fn handle_stats(
+    id: RequestId,
+    display_snapshot: &std::sync::Mutex<DisplaySnapshot>,
+    playback_snapshot: &std::sync::Mutex<PlaybackSnapshot>,
+) -> Response {
     let Ok(snapshot) = display_snapshot.lock() else {
         return Response::err(
             id,
@@ -1137,10 +1149,18 @@ fn handle_stats(id: RequestId, display_snapshot: &std::sync::Mutex<DisplaySnapsh
             "the display snapshot lock is poisoned",
         );
     };
-    let result = StatsResult {
-        display: (&*snapshot).into(),
-    };
+    let display = (&*snapshot).into();
     drop(snapshot);
+    let Ok(snapshot) = playback_snapshot.lock() else {
+        return Response::err(
+            id,
+            ErrorCode::InternalError,
+            "the playback snapshot lock is poisoned",
+        );
+    };
+    let playback = PlaybackStats::from_snapshot(&snapshot);
+    drop(snapshot);
+    let result = StatsResult { display, playback };
     Response::ok(
         id,
         serde_json::to_value(result).unwrap_or(serde_json::Value::Object(Default::default())),

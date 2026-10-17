@@ -22,8 +22,8 @@
 //!   would.
 //! - A resize `mpsc` whose receiver the test inspects to verify what
 //!   `resize` queued for the main channel.
-//! - A `DisplaySnapshot` that tests fill as the display channel would
-//!   publish it, for `stats`.
+//! - A `DisplaySnapshot` and a `PlaybackSnapshot` that tests fill as the
+//!   display and playback channels would publish them, for `stats`.
 //!
 //! Each test binds the server to a temporary Unix-socket path (via
 //! `tempfile::TempDir`), connects a client, drives one or more request/
@@ -55,6 +55,7 @@ use shakenfist_spice_renderer::channels::{ChannelEvent, InputEvent};
 use shakenfist_spice_renderer::control::protocol::{RequestId, StatusResult, SurfaceInfo};
 use shakenfist_spice_renderer::control::server::{Server, SessionHandles, StatusProvider};
 use shakenfist_spice_renderer::make_scancode;
+use shakenfist_spice_renderer::snapshots::{PlaybackCodec, PlaybackSessionInfo, PlaybackSnapshot};
 use shakenfist_spice_renderer::surface_mirror::SurfaceMirror;
 use shakenfist_spice_renderer::{
     ClipboardBackend, DisplaySize, DisplaySnapshot, MemoryClipboard, StreamSnapshot,
@@ -138,6 +139,9 @@ struct TestInputs {
     /// The display channel's counters `stats` reads. Tests write it as
     /// the display channel publishes it.
     pub display_snapshot: Arc<std::sync::Mutex<DisplaySnapshot>>,
+    /// The playback channel's counters `stats` reads. Tests write it as
+    /// the playback channel publishes it.
+    pub playback_snapshot: Arc<std::sync::Mutex<PlaybackSnapshot>>,
 }
 
 // ── Helpers ───────────────────────────────────────────────────────
@@ -172,6 +176,7 @@ async fn spawn_server_with_line_limit(
     let (resize_tx, resize_rx) = mpsc::channel::<DisplaySize>(32);
     let clipboard = Arc::new(MemoryClipboard::new());
     let display_snapshot = Arc::new(std::sync::Mutex::new(DisplaySnapshot::default()));
+    let playback_snapshot = Arc::new(std::sync::Mutex::new(PlaybackSnapshot::default()));
 
     let shutdown = CancellationToken::new();
     // Bound before the task is spawned, so the caller can connect at
@@ -190,6 +195,7 @@ async fn spawn_server_with_line_limit(
             clipboard: clipboard.clone(),
             resize_tx,
             display_snapshot: display_snapshot.clone(),
+            playback_snapshot: playback_snapshot.clone(),
         },
         shutdown.clone(),
     ));
@@ -206,6 +212,7 @@ async fn spawn_server_with_line_limit(
             clipboard,
             resize_rx,
             display_snapshot,
+            playback_snapshot,
         },
     )
 }
@@ -293,7 +300,7 @@ async fn hello_returns_protocol_version_and_supported_sets() {
     let (mut r, mut w) = connect_client(&path).await;
 
     let result = hello(&mut r, &mut w).await;
-    assert_eq!(result["protocol_version"], "1.5");
+    assert_eq!(result["protocol_version"], "1.6");
     assert_eq!(result["server_name"], "ryll");
 
     let methods: Vec<String> =
@@ -1873,7 +1880,8 @@ fn stream_snapshot(stream_id: u32, codec_type: u8, decoded_ok: u64, failed: u64)
     }
 }
 
-/// Before the display channel publishes anything, `stats` is all zero.
+/// Before the display channel publishes anything, `stats` is all zero,
+/// and with no playback channel there is no `playback` object.
 #[tokio::test]
 async fn stats_starts_at_zero() {
     let status = MockStatusProvider::new(default_status());
@@ -2010,6 +2018,130 @@ async fn stats_names_every_spice_video_codec() {
         codecs,
         ["unknown", "mjpeg", "vp8", "h264", "vp9", "h265", "unknown"]
     );
+
+    handle.stop().await;
+}
+
+/// v1.6: once a playback channel has published, `stats` carries its
+/// counters, with the current stream's shape while one is playing and
+/// `null` for it after `STOP`.
+#[tokio::test]
+async fn stats_reports_playback_once_the_channel_links() {
+    let status = MockStatusProvider::new(default_status());
+    let (path, handle, inputs) = spawn_server(status, empty_mirror()).await;
+    let (mut r, mut w) = connect_client(&path).await;
+    hello(&mut r, &mut w).await;
+
+    // Linked, nothing played yet: zeros and nulls, not absence.
+    inputs.playback_snapshot.lock().unwrap().channel_linked = true;
+    send_request(&mut w, 2, "stats", serde_json::json!({})).await;
+    let resp = recv_line(&mut r).await;
+    assert_eq!(resp["ok"], true);
+    assert_eq!(
+        resp["result"]["playback"],
+        serde_json::json!({
+            "starts": 0,
+            "stops": 0,
+            "packets_received": 0,
+            "packets_decoded": 0,
+            "decode_failures": 0,
+            "bytes_received": 0,
+            "codec": null,
+            "sample_rate": null,
+            "channels": null,
+        })
+    );
+
+    {
+        let mut snap = inputs.playback_snapshot.lock().unwrap();
+        snap.start_count = 2;
+        snap.stop_count = 1;
+        snap.data_packets_received = 500;
+        snap.data_packets_decoded = 497;
+        snap.data_packets_decode_failed = 2;
+        snap.data_bytes_received = 66_000;
+        snap.current_session = Some(PlaybackSessionInfo {
+            started_at_secs: 4.0,
+            mm_time_at_start: 1234,
+            sample_rate_hz: 48_000,
+            channels: 2,
+            codec: PlaybackCodec::Opus,
+        });
+    }
+    send_request(&mut w, 3, "stats", serde_json::json!({})).await;
+    let resp = recv_line(&mut r).await;
+    assert_eq!(
+        resp["result"]["playback"],
+        serde_json::json!({
+            "starts": 2,
+            "stops": 1,
+            "packets_received": 500,
+            "packets_decoded": 497,
+            "decode_failures": 2,
+            "bytes_received": 66_000,
+            "codec": "opus",
+            "sample_rate": 48_000,
+            "channels": 2,
+        })
+    );
+
+    // STOP clears the stream; the counters stay.
+    {
+        let mut snap = inputs.playback_snapshot.lock().unwrap();
+        snap.stop_count = 2;
+        snap.current_session = None;
+    }
+    send_request(&mut w, 4, "stats", serde_json::json!({})).await;
+    let resp = recv_line(&mut r).await;
+    let playback = &resp["result"]["playback"];
+    assert_eq!(playback["stops"], 2);
+    assert_eq!(playback["packets_decoded"], 497);
+    assert_eq!(playback["codec"], serde_json::Value::Null);
+    assert_eq!(playback["sample_rate"], serde_json::Value::Null);
+    assert_eq!(playback["channels"], serde_json::Value::Null);
+
+    handle.stop().await;
+}
+
+/// v1.6: an unpublished playback snapshot leaves `playback` out of
+/// `stats` even when its counters are not zero, and the codec names
+/// cover raw PCM and modes ryll cannot play.
+#[tokio::test]
+async fn stats_omits_unlinked_playback_and_names_codecs() {
+    let status = MockStatusProvider::new(default_status());
+    let (path, handle, inputs) = spawn_server(status, empty_mirror()).await;
+    let (mut r, mut w) = connect_client(&path).await;
+    hello(&mut r, &mut w).await;
+
+    inputs.playback_snapshot.lock().unwrap().start_count = 1;
+    send_request(&mut w, 2, "stats", serde_json::json!({})).await;
+    let resp = recv_line(&mut r).await;
+    assert_eq!(resp["ok"], true);
+    let result = resp["result"].as_object().expect("result object");
+    assert!(result.contains_key("display"));
+    assert!(!result.contains_key("playback"), "got {:?}", result);
+
+    for (id, codec, name) in [
+        (3, PlaybackCodec::Raw, "raw"),
+        (4, PlaybackCodec::Opus, "opus"),
+        (5, PlaybackCodec::Other(2), "mode_2"),
+    ] {
+        {
+            let mut snap = inputs.playback_snapshot.lock().unwrap();
+            snap.channel_linked = true;
+            snap.current_session = Some(PlaybackSessionInfo {
+                started_at_secs: 0.0,
+                mm_time_at_start: 0,
+                sample_rate_hz: 44_100,
+                channels: 1,
+                codec,
+            });
+        }
+        send_request(&mut w, id, "stats", serde_json::json!({})).await;
+        let resp = recv_line(&mut r).await;
+        assert_eq!(resp["result"]["playback"]["codec"], name);
+        assert_eq!(resp["result"]["playback"]["sample_rate"], 44_100);
+    }
 
     handle.stop().await;
 }

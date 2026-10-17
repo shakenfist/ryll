@@ -14,16 +14,15 @@ use crate::{
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
-    make_message, MessageHeader, Notify as NotifyMessage, Ping, ReceiveBuffer, SetAck, WireType,
+    make_message, MessageHeader, Notify as NotifyMessage, Ping, PlaybackLatency, PlaybackMode,
+    PlaybackMute, PlaybackPacketRef, PlaybackStart, PlaybackVolume, ReceiveBuffer, SetAck,
+    WireType,
 };
 use shakenfist_spice_protocol::{
-    main_client, playback_server, warn_once, ChannelType, NotifySeverity,
+    audio_data_mode, main_client, playback_server, warn_once, ChannelType, NotifySeverity,
 };
 
 use super::{ChannelEvent, DisconnectReason, EventSink, MAX_MESSAGE_BODY};
-
-const AUDIO_DATA_MODE_RAW: u16 = 1;
-const AUDIO_DATA_MODE_OPUS: u16 = 3;
 
 /// Maximum ring buffer capacity in samples. At 48kHz stereo this is
 /// ~2 seconds. Prevents unbounded memory growth if audio data
@@ -1103,18 +1102,12 @@ impl PlaybackChannel {
                     self.events.emit(ChannelEvent::Notification(entry)).await;
                 }
                 playback_server::START => {
-                    if payload.len() >= 14 {
-                        self.channels =
-                            u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                        let format = u16::from_le_bytes([payload[4], payload[5]]);
-                        self.sample_rate =
-                            u32::from_le_bytes([payload[6], payload[7], payload[8], payload[9]]);
-                        let time = u32::from_le_bytes([
-                            payload[10],
-                            payload[11],
-                            payload[12],
-                            payload[13],
-                        ]);
+                    // A malformed body is ignored, as it always has been.
+                    if let Ok(start) = PlaybackStart::decode(payload) {
+                        self.channels = start.channels;
+                        let format = start.format;
+                        self.sample_rate = start.frequency;
+                        let time = start.time;
                         info!(
                             "playback: START: {}Hz, {} channels, format={}, time={}",
                             self.sample_rate, self.channels, format, time
@@ -1145,10 +1138,9 @@ impl PlaybackChannel {
                     }
                 }
                 playback_server::MODE => {
-                    // SpiceMsgPlaybackMode: time(u32) + mode(u16).
-                    // Skip the 4-byte multimedia timestamp.
-                    if payload.len() >= 6 {
-                        self.audio_mode = u16::from_le_bytes([payload[4], payload[5]]);
+                    // The multimedia time is not used.
+                    if let Ok(mode) = PlaybackMode::decode(payload) {
+                        self.audio_mode = mode.mode;
                         info!("playback: MODE: {}", self.audio_mode);
                         // If a session is active, refresh its codec
                         // to match the new MODE — the server can
@@ -1159,15 +1151,15 @@ impl PlaybackChannel {
                     }
                 }
                 playback_server::DATA => {
-                    // SpiceMsgPlaybackPacket: time(u32) + data.
-                    // Skip the 4-byte multimedia timestamp.
+                    // The multimedia time is not used: samples play in
+                    // arrival order. A packet with no data is skipped.
                     self.data_packets_received = self.data_packets_received.saturating_add(1);
-                    if payload.len() > 4 {
-                        let audio_data = &payload[4..];
+                    let packet = PlaybackPacketRef::decode(payload).ok();
+                    if let Some(audio_data) = packet.map(|p| p.data).filter(|d| !d.is_empty()) {
                         self.data_bytes_received = self
                             .data_bytes_received
                             .saturating_add(audio_data.len() as u64);
-                        if self.audio_mode == AUDIO_DATA_MODE_RAW {
+                        if self.audio_mode == audio_data_mode::RAW {
                             // Pre-decode tap: forward to the optional
                             // sink before the decode-to-cpal path.
                             // Web mode uses this; GUI / headless pass
@@ -1183,7 +1175,7 @@ impl PlaybackChannel {
                             self.push_samples_raw(audio_data);
                             let dur_us = start.elapsed().as_micros().min(u32::MAX as u128) as u32;
                             self.record_decode_success(dur_us, audio_data.len() as u64);
-                        } else if self.audio_mode == AUDIO_DATA_MODE_OPUS {
+                        } else if self.audio_mode == audio_data_mode::OPUS {
                             // Pre-decode tap: forward the raw Opus
                             // packet to the optional sink before the
                             // libopus decode + cpal path runs.
@@ -1232,40 +1224,22 @@ impl PlaybackChannel {
                     self.opus_decoder = None;
                 }
                 playback_server::VOLUME => {
-                    // SPICE_MSG_PLAYBACK_VOLUME wraps a SpiceMsgAudioVolume
-                    // payload. Per spice-common/spice.proto:
-                    //   message AudioVolume {
-                    //       uint8 nchannels;
-                    //       uint16 volume[nchannels] @end;
-                    //   }
-                    // SPICE wire format is little-endian, so each u16
-                    // volume is decoded as u16::from_le_bytes.
-                    if !payload.is_empty() {
-                        let nch = payload[0] as usize;
-                        let needed = 1 + nch * 2;
-                        if payload.len() >= needed {
-                            let mut vols = Vec::with_capacity(nch);
-                            for i in 0..nch {
-                                let off = 1 + i * 2;
-                                vols.push(u16::from_le_bytes([payload[off], payload[off + 1]]));
-                            }
-                            self.last_volume_per_channel = vols;
-                            debug!("playback: VOLUME: {:?}", self.last_volume_per_channel);
-                        }
+                    // Recorded for bug reports; ryll does not apply the
+                    // server's volume. A malformed body is ignored.
+                    if let Ok(volume) = PlaybackVolume::decode(payload) {
+                        self.last_volume_per_channel = volume.volumes;
+                        debug!("playback: VOLUME: {:?}", self.last_volume_per_channel);
                     }
                 }
                 playback_server::MUTE => {
-                    // SPICE_MSG_PLAYBACK_MUTE: u8 mute.
-                    if !payload.is_empty() {
-                        self.last_mute = Some(payload[0] != 0);
+                    if let Ok(mute) = PlaybackMute::decode(payload) {
+                        self.last_mute = Some(mute.mute);
                         debug!("playback: MUTE: {:?}", self.last_mute);
                     }
                 }
                 playback_server::LATENCY => {
-                    // SPICE_MSG_PLAYBACK_LATENCY: u32 latency_ms.
-                    if payload.len() >= 4 {
-                        let lat =
-                            u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    if let Ok(latency) = PlaybackLatency::decode(payload) {
+                        let lat = latency.latency_ms;
                         self.last_latency_ms = Some(lat);
                         debug!("playback: LATENCY: {} ms", lat);
                     }
@@ -1451,6 +1425,7 @@ impl PlaybackChannel {
     /// snapshot read.
     fn update_snapshot(&self) {
         if let Ok(mut snap) = self.snapshot.lock() {
+            snap.channel_linked = true;
             // Transport common.
             snap.bytes_in = self.bytes_in;
             snap.bytes_out = self.bytes_out;
@@ -1523,8 +1498,8 @@ impl PlaybackChannel {
 /// haven't seen.
 fn codec_from_mode(mode: u16) -> crate::snapshots::PlaybackCodec {
     match mode {
-        AUDIO_DATA_MODE_RAW => crate::snapshots::PlaybackCodec::Raw,
-        AUDIO_DATA_MODE_OPUS => crate::snapshots::PlaybackCodec::Opus,
+        audio_data_mode::RAW => crate::snapshots::PlaybackCodec::Raw,
+        audio_data_mode::OPUS => crate::snapshots::PlaybackCodec::Opus,
         other => crate::snapshots::PlaybackCodec::Other(other),
     }
 }

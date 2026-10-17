@@ -1,4 +1,4 @@
-//! Wire types for the Ryll control-socket protocol (version 1.5).
+//! Wire types for the Ryll control-socket protocol (version 1.6).
 //!
 //! All types derive `serde::Serialize` / `serde::Deserialize` so they
 //! can be round-tripped through NDJSON without any manual parsing.
@@ -33,15 +33,20 @@
 //! the inputs channel, because `latency` is the interval between the
 //! server's PINGs and says nothing about the path.  Additive, so a
 //! minor bump.
+//!
+//! v1.5 → v1.6 added a `playback` object to the `stats` result, so a
+//! test can see that audio arrives and decodes.  It is left out when no
+//! playback channel has linked, which includes every build without the
+//! `audio` feature.  Additive, so a minor bump.
 
 use serde::{Deserialize, Serialize};
 use shakenfist_spice_protocol::display_server;
 
 pub use crate::channels::RequestId;
-use crate::snapshots::{DisplaySnapshot, StreamSnapshot};
+use crate::snapshots::{DisplaySnapshot, PlaybackCodec, PlaybackSnapshot, StreamSnapshot};
 
 /// Protocol version this server speaks.
-pub const PROTOCOL_VERSION: &str = "1.5";
+pub const PROTOCOL_VERSION: &str = "1.6";
 
 /// All v1 verb names the server recognises. Advertised in the `hello`
 /// response so clients can adapt at runtime rather than hard-coding
@@ -334,6 +339,70 @@ pub struct ResizeParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatsResult {
     pub display: DisplayStats,
+    /// The playback channel's counters (v1.6). Absent, not zeroed, when
+    /// no playback channel has linked: the server offered none, or ryll
+    /// was built without the `audio` feature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playback: Option<PlaybackStats>,
+}
+
+/// The playback channel's counters in a `stats` result (v1.6),
+/// cumulative since the channel linked.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaybackStats {
+    /// `PLAYBACK_START` messages received.
+    pub starts: u64,
+    /// `PLAYBACK_STOP` messages received.
+    pub stops: u64,
+    /// `PLAYBACK_DATA` messages received, decodable or not.
+    pub packets_received: u64,
+    /// `DATA` packets decoded, or passed through as raw PCM.
+    pub packets_decoded: u64,
+    /// `DATA` packets the decoder failed on.
+    pub decode_failures: u64,
+    /// Bytes of audio data received, before decoding.
+    pub bytes_received: u64,
+    /// The current stream's codec (see [`playback_codec_name`]), or
+    /// `null` when no stream has started or the last one stopped.
+    pub codec: Option<String>,
+    /// The current stream's sample rate from `START`, in Hz, or `null`
+    /// as for `codec`.
+    pub sample_rate: Option<u32>,
+    /// The current stream's channel count from `START`, or `null` as
+    /// for `codec`.
+    pub channels: Option<u8>,
+}
+
+/// The name a `stats` result gives a playback codec: `"raw"`, `"opus"`,
+/// or `"mode_N"` for any other SPICE `audio_data_mode` number N.
+pub fn playback_codec_name(codec: &PlaybackCodec) -> String {
+    match codec {
+        PlaybackCodec::Raw => "raw".to_string(),
+        PlaybackCodec::Opus => "opus".to_string(),
+        PlaybackCodec::Other(mode) => format!("mode_{mode}"),
+    }
+}
+
+impl PlaybackStats {
+    /// The counters from a playback snapshot, or `None` when no
+    /// playback channel has published it.
+    pub fn from_snapshot(snap: &PlaybackSnapshot) -> Option<Self> {
+        if !snap.channel_linked {
+            return None;
+        }
+        let session = snap.current_session.as_ref();
+        Some(PlaybackStats {
+            starts: snap.start_count,
+            stops: snap.stop_count,
+            packets_received: snap.data_packets_received,
+            packets_decoded: snap.data_packets_decoded,
+            decode_failures: snap.data_packets_decode_failed,
+            bytes_received: snap.data_bytes_received,
+            codec: session.map(|s| playback_codec_name(&s.codec)),
+            sample_rate: session.map(|s| s.sample_rate_hz),
+            channels: session.map(|s| s.channels),
+        })
+    }
 }
 
 /// The display channel's counters in a `stats` result, cumulative
