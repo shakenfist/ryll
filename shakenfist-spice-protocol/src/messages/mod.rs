@@ -12,6 +12,7 @@ mod cursor;
 mod display;
 mod inputs;
 mod main;
+mod playback;
 pub mod vd_agent;
 
 pub use common::*;
@@ -19,6 +20,7 @@ pub use cursor::*;
 pub use display::*;
 pub use inputs::*;
 pub use main::*;
+pub use playback::*;
 
 // Size constants follow one convention. `SIZE` is the length of a body
 // whose wire size is fixed. `MIN_SIZE` is the floor of a variable-length

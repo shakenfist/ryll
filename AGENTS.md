@@ -123,7 +123,7 @@ that table is an incomplete change.
 1. Message definitions in the
    `shakenfist-spice-protocol/src/messages/` module, one submodule per
    channel (`common`, `main`, `display`, `cursor`, `inputs`,
-   `vd_agent`). A new type implements `WireType` (or
+   `playback`, `vd_agent`). A new type implements `WireType` (or
    `ClipboardWireType` where the layout depends on negotiated
    capabilities), with a `BoundedReader` reader and an infallible
    writer. It ships with an `assert_round_trip` test and a test

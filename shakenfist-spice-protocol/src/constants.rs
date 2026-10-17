@@ -218,6 +218,21 @@ pub mod capabilities {
         (DISPLAY_PREF_VIDEO_CODEC_TYPE, "pref_video_codec_type"),
     ];
 
+    // Playback channel capabilities (SPICE_PLAYBACK_CAP_*,
+    // protocol.h:117-122). Ryll does not advertise these by name: its
+    // playback word is DEFAULT_OTHER, whose bits 0 and 3 are CELT_0_5_1
+    // and OPUS here. A server role advertises them to say what it sends.
+    /// The deprecated CELT 0.5.1 codec (SPICE_PLAYBACK_CAP_CELT_0_5_1).
+    pub const PLAYBACK_CELT_0_5_1: u32 = 1 << 0;
+    /// `PLAYBACK_VOLUME` and `PLAYBACK_MUTE` are understood
+    /// (SPICE_PLAYBACK_CAP_VOLUME). spice-server sends them only to a
+    /// client with this cap.
+    pub const PLAYBACK_VOLUME: u32 = 1 << 1;
+    /// `PLAYBACK_LATENCY` is understood (SPICE_PLAYBACK_CAP_LATENCY).
+    pub const PLAYBACK_LATENCY: u32 = 1 << 2;
+    /// Opus data mode (SPICE_PLAYBACK_CAP_OPUS).
+    pub const PLAYBACK_OPUS: u32 = 1 << 3;
+
     // SpiceVMC channel capabilities (SPICE_SPICEVMC_CAP_*)
     pub const SPICEVMC_LZ4: u32 = 1 << 0;
 
@@ -430,6 +445,25 @@ pub mod playback_server {
     pub const SET_ACK: u16 = 3;
     pub const PING: u16 = 4;
     pub const NOTIFY: u16 = 7;
+}
+
+/// Playback data mode, a `u16` in `PLAYBACK_MODE`
+/// (SPICE_AUDIO_DATA_MODE_* in enums.h:377-384).
+pub mod audio_data_mode {
+    pub const INVALID: u16 = 0;
+    /// Interleaved signed 16-bit little-endian PCM.
+    pub const RAW: u16 = 1;
+    /// CELT 0.5.1, deprecated in spice-protocol.
+    pub const CELT_0_5_1: u16 = 2;
+    pub const OPUS: u16 = 3;
+}
+
+/// Playback sample format, a `u16` in `PLAYBACK_START`
+/// (SPICE_AUDIO_FMT_* in enums.h:386-391).
+pub mod audio_fmt {
+    pub const INVALID: u16 = 0;
+    /// Signed 16-bit samples.
+    pub const S16: u16 = 1;
 }
 
 /// SpiceVMC channel message types (server -> client)
@@ -824,6 +858,22 @@ mod tests {
         assert_eq!(mouse_button_id::LEFT, 1);
         assert_eq!(mouse_button_id::RIGHT, 3);
         assert_eq!(mouse_button_id::DOWN, 5);
+    }
+
+    #[test]
+    fn playback_values_match_spice_protocol() {
+        // protocol.h:117-122, bits numbered from CELT_0_5_1 = 0.
+        assert_eq!(capabilities::PLAYBACK_CELT_0_5_1, 1 << 0);
+        assert_eq!(capabilities::PLAYBACK_VOLUME, 1 << 1);
+        assert_eq!(capabilities::PLAYBACK_LATENCY, 1 << 2);
+        assert_eq!(capabilities::PLAYBACK_OPUS, 1 << 3);
+        // enums.h:377-391, numbered from INVALID = 0.
+        assert_eq!(audio_data_mode::INVALID, 0);
+        assert_eq!(audio_data_mode::RAW, 1);
+        assert_eq!(audio_data_mode::CELT_0_5_1, 2);
+        assert_eq!(audio_data_mode::OPUS, 3);
+        assert_eq!(audio_fmt::INVALID, 0);
+        assert_eq!(audio_fmt::S16, 1);
     }
 
     #[test]

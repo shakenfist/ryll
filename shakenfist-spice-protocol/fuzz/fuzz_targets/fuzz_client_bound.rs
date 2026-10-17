@@ -9,7 +9,8 @@ use shakenfist_spice_protocol::messages::{
     AgentDisconnected, AgentTokens, BinaryData, BitmapHeader, BitmapPayload, ChannelsList, Clip,
     CursorInit, CursorInvalOne, CursorMove, CursorSet, DisplayHead, DisplayMonitorsConfig,
     DrawBase, DrawCopy, ImageDescriptor, InputsInit, KeyModifiers, MainInit, MainMouseMode,
-    MultiMediaTime, Notify, Ping, Rect, SetAck, SpiceCopy, SpiceImage, SpicePoint, SpiceQMask,
+    MultiMediaTime, Notify, Ping, PlaybackLatency, PlaybackMode, PlaybackMute, PlaybackPacket,
+    PlaybackStart, PlaybackVolume, Rect, SetAck, SpiceCopy, SpiceImage, SpicePoint, SpiceQMask,
     StreamActivateReport, StreamClip, StreamCreate, StreamData, StreamDataSized, StreamDestroy,
     SurfaceCreate, SurfaceDestroy, WireType,
 };
@@ -38,7 +39,7 @@ fn check_clipboard<T: ClipboardWireType + PartialEq + std::fmt::Debug>(body: &[u
     }
 }
 
-const READERS: u8 = 45;
+const READERS: u8 = 51;
 
 fuzz_target!(|data: &[u8]| {
     let Some((&selector, body)) = data.split_first() else {
@@ -90,6 +91,12 @@ fuzz_target!(|data: &[u8]| {
         42 => check::<StreamClip>(body),
         43 => check::<StreamDestroy>(body),
         44 => check::<StreamActivateReport>(body),
+        45 => check::<PlaybackStart>(body),
+        46 => check::<PlaybackMode>(body),
+        47 => check::<PlaybackPacket>(body),
+        48 => check::<PlaybackVolume>(body),
+        49 => check::<PlaybackMute>(body),
+        50 => check::<PlaybackLatency>(body),
         _ => unreachable!("selector is reduced modulo READERS"),
     }
 });
