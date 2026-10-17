@@ -157,10 +157,6 @@
       "sha": "dc06c44e9d9a0e7fe4888d35adb50908ab37fc7d",
       "date": "2026-10-16"
     },
-    "docs/releasing.md": {
-      "sha": "06a8f52b6b6d3dc8d688e905c4f19140431247c1",
-      "date": "2026-10-16"
-    },
     "docs/rendering-pipeline.md": {
       "sha": "13236637e784e8469aaf876e5584e1b7ac0aaf53",
       "date": "2026-10-16"
@@ -568,10 +564,6 @@
     "tools/start-desktop-qemu.sh": {
       "sha": "6d18104306851bcd1b1165fa47fa694da06af9f2",
       "date": "2026-09-23"
-    },
-    "tools/tag-release.sh": {
-      "sha": "d3545b318c6ab95acb661f2d9086ec2ee25c4983",
-      "date": "2026-10-16"
     },
     "tools/test-fuzz-targets.sh": {
       "sha": "f78dea5e65a3012838a13930a5f781bfb4b8cf68",

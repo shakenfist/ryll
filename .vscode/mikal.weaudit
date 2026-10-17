@@ -632,15 +632,7 @@
       "author": "mikal"
     },
     {
-      "path": "tools/tag-release.sh",
-      "author": "mikal"
-    },
-    {
       "path": "tools/web-soak.sh",
-      "author": "mikal"
-    },
-    {
-      "path": "tools",
       "author": "mikal"
     },
     {
@@ -685,10 +677,6 @@
     },
     {
       "path": "docs/portability.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/releasing.md",
       "author": "mikal"
     },
     {
