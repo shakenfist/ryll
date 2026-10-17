@@ -714,6 +714,74 @@
     {
       "path": "docs/web-frontend.md",
       "author": "mikal"
+    },
+    {
+      "path": "docs/web-mode-internals.md",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/pyproject.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/agent_state.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/notification_snapshots.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/reconnect.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/resize.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/session_init.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/control.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/inputs.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/server.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/signalling.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/clipboard_arboard.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/config.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/display_gui.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/main.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/settings.rs",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
