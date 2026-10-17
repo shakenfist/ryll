@@ -716,14 +716,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/control-socket-protocol.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/multi-mode-parity.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/web-mode-internals.md",
       "author": "mikal"
     },
@@ -737,10 +729,6 @@
     },
     {
       "path": "ryll/src/app/agent_state.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/app/mod.rs",
       "author": "mikal"
     },
     {
@@ -760,14 +748,6 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/app/stats.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/app",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/web/control.rs",
       "author": "mikal"
     },
@@ -784,14 +764,6 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/bugreport.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/capture.rs",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/clipboard_arboard.rs",
       "author": "mikal"
     },
@@ -801,10 +773,6 @@
     },
     {
       "path": "ryll/src/display_gui.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/input_egui.rs",
       "author": "mikal"
     },
     {

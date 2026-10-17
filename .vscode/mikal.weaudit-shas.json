@@ -621,14 +621,6 @@
       "sha": "f320aa85e217ad9610042bd7c2ef62a03250cc22",
       "date": "2026-10-16"
     },
-    "docs/control-socket-protocol.md": {
-      "sha": "296f86bd5a9f66bb789d1a1dbfa544d1ff64398e",
-      "date": "2026-10-17"
-    },
-    "docs/multi-mode-parity.md": {
-      "sha": "d0bfd672705478b9b825b50113f309d0fefe527f",
-      "date": "2026-10-17"
-    },
     "docs/web-mode-internals.md": {
       "sha": "fa062fb0e86fb7e3746b4a545461f7090fa80462",
       "date": "2026-10-17"
@@ -643,10 +635,6 @@
     },
     "ryll/src/app/agent_state.rs": {
       "sha": "fc4c47f87b07819e755aa39168ec5882e1ff93d6",
-      "date": "2026-10-17"
-    },
-    "ryll/src/app/mod.rs": {
-      "sha": "805fbb0c333a141a3647512ff78cd5a317a367bc",
       "date": "2026-10-17"
     },
     "ryll/src/app/notification_snapshots.rs": {
@@ -665,18 +653,6 @@
       "sha": "2bcdae8100211a0be291fc150461d53cc7f402d7",
       "date": "2026-10-17"
     },
-    "ryll/src/app/stats.rs": {
-      "sha": "c2fd14fdae011ece3cdbbd265c4835ff8a7bf9dc",
-      "date": "2026-10-17"
-    },
-    "ryll/src/bugreport.rs": {
-      "sha": "3abbff26c77e144caf0414fd2ce99f15f305bd8f",
-      "date": "2026-10-17"
-    },
-    "ryll/src/capture.rs": {
-      "sha": "6b1607538cc563caf2016a4ebdb2954474fb04d0",
-      "date": "2026-10-17"
-    },
     "ryll/src/clipboard_arboard.rs": {
       "sha": "058ef513df12824921acda54af01c9b1893f4197",
       "date": "2026-10-17"
@@ -687,10 +663,6 @@
     },
     "ryll/src/display_gui.rs": {
       "sha": "e363fd1127f0d1201f7272ca4c3da13e2ec9a499",
-      "date": "2026-10-17"
-    },
-    "ryll/src/input_egui.rs": {
-      "sha": "9716077d26814fd0d7ba03ae2f99e37e2b367e03",
       "date": "2026-10-17"
     },
     "ryll/src/main.rs": {
