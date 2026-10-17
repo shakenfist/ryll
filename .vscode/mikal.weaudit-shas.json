@@ -625,10 +625,6 @@
       "sha": "fa062fb0e86fb7e3746b4a545461f7090fa80462",
       "date": "2026-10-17"
     },
-    "ryll/Cargo.toml": {
-      "sha": "9df2113a8d7954023c7ce0da3e6a262aa6f5156b",
-      "date": "2026-10-17"
-    },
     "ryll/pyproject.toml": {
       "sha": "0756b44f85a528b982c09d93a507ce33cea2545b",
       "date": "2026-10-17"

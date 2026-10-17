@@ -724,10 +724,6 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/Cargo.toml",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/app/agent_state.rs",
       "author": "mikal"
     },
