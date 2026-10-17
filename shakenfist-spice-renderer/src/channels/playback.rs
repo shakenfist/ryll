@@ -928,6 +928,9 @@ impl PlaybackChannel {
     /// before the task ends — see `MainChannel::run` for the
     /// rationale (including the `Box::pin` reason).
     pub async fn run(&mut self) -> Result<()> {
+        // Held across the loop, so the snapshot reads as unlinked again
+        // however the channel ends, cancellation included.
+        let _unlink = UnlinkOnDrop(Arc::clone(&self.snapshot));
         let result = Box::pin(self.run_loop()).await;
         match &result {
             Ok(()) => info!("playback: run loop exited cleanly"),
@@ -1490,6 +1493,17 @@ impl PlaybackChannel {
         }
     }
 }
+/// Clears the snapshot's `channel_linked` when dropped, so `stats`
+/// leaves out `playback` once the channel has closed, rather than
+/// reporting a gone channel's last counters as if it were still open.
+struct UnlinkOnDrop(Arc<Mutex<crate::snapshots::PlaybackSnapshot>>);
+
+impl Drop for UnlinkOnDrop {
+    fn drop(&mut self) {
+        let mut snap = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        snap.channel_linked = false;
+    }
+}
 
 /// Map a SPICE audio-mode value to a [`PlaybackCodec`]. The
 /// mode comes from `SPICE_MSG_PLAYBACK_MODE`; values 1 and 3
@@ -1509,7 +1523,7 @@ mod tests {
     use super::{
         backoff_after_stream, opus_packet_samples_48k, pcm_bytes_to_i16, samples_per_frame_48k,
         AudioCounters, AudioOutputEvent, AudioThread, CallbackState, OutputStatus, Resampler,
-        OUTPUT_RETRY_INITIAL,
+        UnlinkOnDrop, OUTPUT_RETRY_INITIAL,
     };
     use crate::snapshots::PlaybackOutputInfo;
     use shakenfist_spice_protocol::NotifySeverity;
@@ -1572,6 +1586,19 @@ mod tests {
         let _held = state.lock().unwrap();
         assert!(CallbackState::lock_for_callback(&state, &counters).is_none());
         assert_eq!(counters.device_underrun_count.load(Ordering::Relaxed), 1);
+    }
+    #[test]
+    fn unlink_on_drop_clears_channel_linked() {
+        let snapshot = Arc::new(Mutex::new(crate::snapshots::PlaybackSnapshot {
+            channel_linked: true,
+            start_count: 3,
+            ..Default::default()
+        }));
+        drop(UnlinkOnDrop(Arc::clone(&snapshot)));
+        let snap = snapshot.lock().unwrap();
+        assert!(!snap.channel_linked);
+        // Only the flag changes; the counters stay for bug reports.
+        assert_eq!(snap.start_count, 3);
     }
 
     #[test]

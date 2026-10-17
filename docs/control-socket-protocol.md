@@ -833,7 +833,7 @@ whether that happened.
 published its counters, which it does after each batch of messages
 and every 100 ms while the server is silent. It is absent, not zeroed,
 when the server offered no playback channel, before the channel links,
-and always in a ryll built without the `audio` Cargo feature (the slim
+after it closes, and always in a ryll built without the `audio` Cargo feature (the slim
 `--no-default-features` build), so a client can tell "no audio here"
 from "audio, but nothing played". The counters count from the channel
 linking and survive `STOP` and the next `START`. It holds:
@@ -844,11 +844,11 @@ linking and survive `STOP` and the next `START`. It holds:
 | `stops` | u64 | `PLAYBACK_STOP` messages received. |
 | `packets_received` | u64 | `PLAYBACK_DATA` messages received, decodable or not. |
 | `packets_decoded` | u64 | `DATA` packets decoded (Opus) or passed through (raw PCM). |
-| `decode_failures` | u64 | `DATA` packets the Opus decoder failed on. A packet in a mode ryll cannot play is in neither this nor `packets_decoded`. |
+| `decode_failures` | u64 | `DATA` packets the Opus decoder failed on. A packet in a mode ryll cannot play, or with no audio data, is in neither this nor `packets_decoded`. |
 | `bytes_received` | u64 | Bytes of audio data received in `DATA` packets, before decoding. |
 | `codec` | string or null | The current stream's codec: `"opus"`, `"raw"`, or `"mode_N"` for any other SPICE `audio_data_mode` number N. `null` when no stream has started or the last one stopped. |
 | `sample_rate` | u32 or null | The current stream's sample rate from `START`, in Hz; `null` as for `codec`. |
-| `channels` | u8 or null | The current stream's channel count from `START`; `null` as for `codec`. |
+| `channels` | u8 or null | The current stream's channel count from `START`, saturating at 255; `null` as for `codec`. |
 
 The codec is the data mode the server last sent in `PLAYBACK_MODE`.
 Decoding does not need a sound device: a ryll with `audio` and no
@@ -1536,8 +1536,9 @@ line and is immediately closed.
   clipboard, the main channel's display-size queue, and the display
   and playback channels' published `DisplaySnapshot` and
   `PlaybackSnapshot`, which `stats` reads. The playback snapshot's
-  `channel_linked` flag, set only by a running playback channel,
-  decides whether `stats` includes `playback`. Each client gets a
+  `channel_linked` flag, set by a running playback channel and
+  cleared when it closes, decides whether `stats` includes
+  `playback`. Each client gets a
   clone.
 - The clipboard is a `MemoryClipboard` (`clipboard.rs`), an
   implementation of the same `ClipboardBackend` trait the GUI's

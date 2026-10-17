@@ -368,8 +368,8 @@ pub struct PlaybackStats {
     /// The current stream's sample rate from `START`, in Hz, or `null`
     /// as for `codec`.
     pub sample_rate: Option<u32>,
-    /// The current stream's channel count from `START`, or `null` as
-    /// for `codec`.
+    /// The current stream's channel count from `START`, saturating at
+    /// 255, or `null` as for `codec`.
     pub channels: Option<u8>,
 }
 

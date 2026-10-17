@@ -159,6 +159,11 @@ impl WireType for PlaybackPacket {
 /// `capabilities::PLAYBACK_VOLUME`. A count of zero is valid on the wire
 /// and reads as no volumes; spice-gtk ignores such a message, since it
 /// applies only `volume[0]`.
+///
+/// The wire's count is a `u8`, so at most 255 volumes fit. Build one with
+/// [`PlaybackVolume::new`], which refuses more; `write` sends only the
+/// first 255 of a longer list built directly, so the count always
+/// matches the volumes that follow it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaybackVolume {
     pub volumes: Vec<u16>,

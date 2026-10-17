@@ -263,9 +263,9 @@ a reader and a writer, whichever direction ryll itself needs: the common
 and main channel messages, the vdagent messages, the cursor and inputs
 channels, the display channel's surfaces, monitors config, streams and
 `DRAW_COPY`, and the playback channel's `START`, `MODE`, `DATA`, `VOLUME`,
-`MUTE` and `LATENCY`. They implement `WireType` (or `ClipboardWireType`), and each
-is tested against itself and against hand-written bytes laid out from
-spice.proto. The other draw operations (`SpiceFill`, `SpiceOpaque`,
+`MUTE` and `LATENCY`. They implement `WireType` (or `ClipboardWireType`),
+and each is tested against itself and against hand-written bytes laid out
+from spice.proto. The other draw operations (`SpiceFill`, `SpiceOpaque`,
 `SpiceTransparent`, `SpiceAlphaBlend`, `SpiceBlackness` and the brushes)
 still have readers only, since only a client parses them.
 
