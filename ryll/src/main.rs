@@ -583,6 +583,8 @@ fn run_web(
         // moves into the connection task.
         #[cfg(unix)]
         let display_snapshot = snapshots.display.clone();
+        #[cfg(unix)]
+        let playback_snapshot = snapshots.playback.clone();
         let connection_config: shakenfist_spice_protocol::ConnectionConfig = (&config).into();
 
         // Pedantic-mode bug-report observer. As in headless,
@@ -891,6 +893,7 @@ fn run_web(
                 clipboard,
                 resize_tx: resize_tx_for_control,
                 display_snapshot: display_snapshot.clone(),
+                playback_snapshot: playback_snapshot.clone(),
             };
             shakenfist_spice_renderer::spawn_control_socket(
                 server,

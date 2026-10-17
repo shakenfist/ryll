@@ -688,10 +688,13 @@ pub async fn run_headless(
     // hold theirs.
     #[cfg_attr(not(unix), allow(unused_variables))]
     let (resize_tx, resize_rx) = mpsc::channel(32);
-    // The display channel's counters, for the control socket's `stats`
-    // verb; `snapshots` itself moves into the connection task.
+    // The display and playback channels' counters, for the control
+    // socket's `stats` verb; `snapshots` itself moves into the
+    // connection task.
     #[cfg_attr(not(unix), allow(unused_variables))]
     let display_snapshot = snapshots.display.clone();
+    #[cfg_attr(not(unix), allow(unused_variables))]
+    let playback_snapshot = snapshots.playback.clone();
     // For the periodic `Stats:` line.
     let stats_snapshots = snapshots.clone();
 
@@ -859,6 +862,7 @@ pub async fn run_headless(
             clipboard,
             resize_tx: resize_tx.clone(),
             display_snapshot: display_snapshot.clone(),
+            playback_snapshot: playback_snapshot.clone(),
         };
         spawn_control_socket(
             server,

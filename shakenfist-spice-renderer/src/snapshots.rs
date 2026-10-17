@@ -665,6 +665,12 @@ pub struct PlaybackOutputInfo {
 /// computed from two bug reports.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct PlaybackSnapshot {
+    /// Whether a running playback channel has published this snapshot.
+    /// It stays `false` in a build without the `audio` feature, and in a
+    /// session whose server offered no playback channel, and returns to
+    /// `false` when the channel closes. The control socket's `stats`
+    /// leaves out its `playback` object while it is `false`.
+    pub channel_linked: bool,
     pub bytes_in: u64,
     pub bytes_out: u64,
     /// See `DisplaySnapshot::last_recv_ts_secs`.
