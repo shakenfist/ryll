@@ -49,8 +49,15 @@ cd "$(dirname "$0")/.."
 
 # --- fetch latest develop ---
 
+# Tags are force-updated from origin. The release workflow's sign-tag
+# job replaces each release tag with a Sigstore-signed one at the same
+# commit, so the clone that ran the previous tag-release still holds
+# the unsigned original, and a plain --tags fetch refuses to clobber
+# it. origin's release tags are the authoritative ones. Not --quiet,
+# which would hide a rejected ref and leave only the exit status.
 info "Fetching origin"
-git fetch origin develop --tags --quiet
+git fetch origin develop '+refs/tags/*:refs/tags/*' \
+    || err "fetching origin failed; see git's output above"
 
 # --- tag must not already exist ---
 
