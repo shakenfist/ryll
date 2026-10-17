@@ -644,10 +644,6 @@
       "author": "mikal"
     },
     {
-      "path": "AGENTS.md",
-      "author": "mikal"
-    },
-    {
       "path": "ARCHITECTURE.md",
       "author": "mikal"
     },
@@ -661,10 +657,6 @@
     },
     {
       "path": "STYLEGUIDE.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/channel-diagnostics-audit.md",
       "author": "mikal"
     },
     {
@@ -705,10 +697,6 @@
     },
     {
       "path": "docs/session-lifecycle.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/spice-protocol.md",
       "author": "mikal"
     },
     {
@@ -769,10 +757,6 @@
     },
     {
       "path": "ryll/src/display_gui.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/main.rs",
       "author": "mikal"
     },
     {

@@ -85,10 +85,6 @@
       "sha": "4f075c1b65ff62c072d9ed7a09fc5a20be23eb8a",
       "date": "2026-10-05"
     },
-    "AGENTS.md": {
-      "sha": "c765748cb7527b7a6003ead9c00399313b194b94",
-      "date": "2026-10-16"
-    },
     "ARCHITECTURE.md": {
       "sha": "223895f1003e1a88f1a5b8b430a752cd575ac0b4",
       "date": "2026-10-16"
@@ -120,10 +116,6 @@
     "clippy.toml": {
       "sha": "154626ef4e81f6aa3e7c271ef613fe017ad658f9",
       "date": "2026-09-23"
-    },
-    "docs/channel-diagnostics-audit.md": {
-      "sha": "14f800181a7e177c9c39bab8a044e5dcf252c970",
-      "date": "2026-10-16"
     },
     "docs/ci.md": {
       "sha": "b8c64c51e53cdc2c8b259a94d09ea68e0fb78959",
@@ -175,10 +167,6 @@
     },
     "docs/session-lifecycle.md": {
       "sha": "23ff3796f6fa89602535c7708fdfface65e69594",
-      "date": "2026-10-16"
-    },
-    "docs/spice-protocol.md": {
-      "sha": "0a39366adb8259439345017a3481a92ffe5de257",
       "date": "2026-10-16"
     },
     "docs/web-frontend.md": {
@@ -659,10 +647,6 @@
     },
     "ryll/src/display_gui.rs": {
       "sha": "e363fd1127f0d1201f7272ca4c3da13e2ec9a499",
-      "date": "2026-10-17"
-    },
-    "ryll/src/main.rs": {
-      "sha": "ab8e13756bfaab620949d9ec50d74d8bee534be8",
       "date": "2026-10-17"
     },
     "ryll/src/settings.rs": {
