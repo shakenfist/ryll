@@ -48,6 +48,18 @@ ignore = [
     # Tracked in PLAN-supply-chain-followups.md.
     # https://rustsec.org/advisories/RUSTSEC-2026-0192
     "RUSTSEC-2026-0192",
+
+    # RUSTSEC-2026-0370, -0371, -0372: zvariant, zbus_names and
+    # zvariant_derive unmaintained; folded into zbus 6.0.0. Reach us
+    # via eframe's Linux accessibility stack (accesskit_unix -> atspi
+    # -> zbus 5.x). No fix until accesskit moves to zbus 6.
+    # Tracked in PLAN-supply-chain-followups.md.
+    # https://rustsec.org/advisories/RUSTSEC-2026-0370
+    # https://rustsec.org/advisories/RUSTSEC-2026-0371
+    # https://rustsec.org/advisories/RUSTSEC-2026-0372
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
 ]
 
 [licenses]
