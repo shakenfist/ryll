@@ -123,7 +123,7 @@ below. When an ignore is resolved, delete both the
 - **Remove ignore when:** `ttf-parser` no longer appears in
   `cargo tree`, or maintenance resumes upstream.
 
-### 5. `zvariant` / `zbus_names` / `zvariant_derive` 5.x unmaintained (RUSTSEC-2026-0370, -0371, -0372)
+### 5. `zvariant` / `zbus_names` / `zvariant_derive` unmaintained (RUSTSEC-2026-0370, -0371, -0372)
 
 - **Ignore rationale:** upstream folded all three crates
   into `zbus` 6.0.0 (as its `zvariant` and `names` modules)

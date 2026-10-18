@@ -30,7 +30,8 @@ ignore = [
     "RUSTSEC-2026-0192",
 
     # zvariant, zbus_names and zvariant_derive unmaintained (merged
-    # into zbus 6); transitive via eframe -> accesskit_unix -> zbus 5.
+    # into zbus 6); transitive via eframe -> accesskit_unix -> atspi
+    # -> zbus 5.
     # Nothing to change until accesskit moves to zbus 6. See
     # PLAN-supply-chain-followups.md item 5.
     "RUSTSEC-2026-0370",
