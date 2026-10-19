@@ -730,6 +730,42 @@
     {
       "path": ".github/workflows",
       "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/encode/h264.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/encode/mod.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/encode",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/lib.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/lz4.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/video.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/README.md",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
