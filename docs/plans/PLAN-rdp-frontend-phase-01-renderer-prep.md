@@ -816,40 +816,40 @@ Read decisions 8 to 10 and the survey's items 4 and 5 first.
 
 ## Definition of done
 
-- [ ] `tools/check-slim-renderer.sh` exists, `make lint` runs
+- [x] `tools/check-slim-renderer.sh` exists, `make lint` runs
       it, and it passes. It fails when `nusb` is made
       non-optional (verified in step 7, not committed).
-- [ ] `cargo tree -p shakenfist-spice-renderer
+- [x] `cargo tree -p shakenfist-spice-renderer
       --no-default-features -e normal,build` lists none of
       `openh264`, `openh264-sys2`, `mozjpeg-sys`, `nusb`,
       `dav-server`, `hyper`, `cpal`, `alsa-sys`. Its output is
       recorded in *Results* below.
-- [ ] `grep -rn "fn take_damage" shakenfist-spice-renderer/src`
+- [x] `grep -rn "fn take_damage" shakenfist-spice-renderer/src`
       and `grep -rn "pub struct PointerTranslator"` and
       `grep -rn "pub struct EventBus"` each find one
       definition. `grep -n "last_mouse_pos\|last_pos"
       ryll/src/app/mod.rs ryll/src/web/inputs.rs` finds no
       hand-rolled position state.
-- [ ] `grep -rn "broadcast::channel::<" ryll/src/main.rs
+- [x] `grep -rn "broadcast::channel::<" ryll/src/main.rs
       shakenfist-spice-renderer/src/session.rs` finds nothing;
       both modes use `EventBus`.
-- [ ] `grep -rn "OpusPacketSink" --include=*.rs --include=*.md
+- [x] `grep -rn "OpusPacketSink" --include=*.rs --include=*.md
       . | grep -v docs/plans/` finds nothing.
-- [ ] `run_web` passes `PlaybackOutput::Sink`; a `--web`
+- [x] `run_web` passes `PlaybackOutput::Sink`; a `--web`
       session against the local test server logs no audio
       thread start.
-- [ ] Damage tests cover `copy_bits` destination-only damage,
+- [x] Damage tests cover `copy_bits` destination-only damage,
       the 32-rectangle bound and the lag path; pointer tests
       cover both modes and the catch-up delta.
-- [ ] `make build`, `make test`, `make lint`, `make
+- [x] `make build`, `make test`, `make lint`, `make
       check-windows` and `pre-commit run --all-files` pass.
-- [ ] The GUI is checked by hand (pointer in both modes,
+- [x] The GUI is checked by hand (pointer in both modes,
       wheel, local audio) and the result is recorded in
       *Results*.
-- [ ] The docs listed in brief 8 are updated, and no doc
+- [x] The docs listed in brief 8 are updated, and no doc
       outside `docs/plans/` describes `--web` as opening a
       local audio device.
-- [ ] The master plan's acceptance for phase 1 is met. Where
+- [x] The master plan's acceptance for phase 1 is met. Where
       it differs from this plan (decision 5's `--web`
       behaviour change), the difference is recorded here.
 
@@ -894,7 +894,42 @@ Filled in by the management session as steps land.
     acceleration on relative motion, with no pointer grab or warp
     in the GUI to correct it (spice-gtk grabs in server mode).
     Recorded in *Future work*.
-- GUI local audio check: *pending step 6*.
+- Audio checks after step 6, same guest, with `alsa-utils`
+  installed in it and `speaker-test` playing (it played pink noise,
+  its default, rather than the intended sine):
+  - GUI (`Local`): Mikal heard the audio. The log showed `MODE: 3`
+    (Opus), START, and the local audio thread starting. The develop
+    build sounded the same.
+  - `--web` (`Sink`): the log showed `MODE: 3`, START and the Opus
+    decoder starting, and no line about a local audio thread or
+    output device (0 matches for "audio output started", "audio
+    output unavailable" or "audio thread"). No browser was attached,
+    so audio arriving in a browser was not checked.
+- Final tree: `make build`, `make test` (1505 passed, 0 failed),
+  `make lint` (including the slim check), `make check-windows`,
+  `make package-check` and `pre-commit run --all-files` all pass.
+
+## Execution notes
+
+- Run on 2026-10-20 (AEDT), steps in plan order.
+- The plan was written at low planning effort, not the high effort
+  the master plan asks for; Mikal chose to proceed with it as
+  written.
+- Steps 5 and 6 ran in worktrees made by hand from the phase
+  branch, then fast-forwarded into it, because the Agent tool's own
+  worktree isolation branches from the default branch.
+- Step 4 ran while the desktop guest was booting for the step 3 GUI
+  check, which used a binary copied out of the tree first.
+- The desktop guest ran on SPICE port 5910 via
+  `tools/start-desktop-qemu.sh`, because the local andris service
+  holds 5900, so `make test-qemu-desktop` could not be used as is.
+- Review changes beyond the briefs:
+  - Step 4: gated run_headless's mirror handle, which step 2 had
+    left unused on Windows.
+  - Steps 5 and 8: corrected two comment and doc claims.
+  - Step 8: added the GUI's server-mode drift to the parity
+    matrix.
+  Each commit message says what review changed.
 
 ## Future work
 
