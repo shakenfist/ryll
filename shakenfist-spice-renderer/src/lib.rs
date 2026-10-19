@@ -42,7 +42,7 @@ pub use channels::inputs::make_scancode;
 pub use channels::{ChannelEvent, CursorImage, DisplaySize, InputEvent, UsbCommand, WebdavCommand};
 pub use clipboard::{ClipboardBackend, MemoryClipboard};
 pub use device_config::{ShareDirConfig, VirtualDiskConfig};
-pub use display::DisplaySurface;
+pub use display::{DamageRect, DamageRegion, DisplaySurface, MAX_DAMAGE_RECTS};
 pub use encoder::{
     even_dimensions, EncodedFrame, EncoderControl, EncoderTask, FrameRef, FrameSource, H264Encoder,
     RealFrameSource, SyntheticFrameSource,

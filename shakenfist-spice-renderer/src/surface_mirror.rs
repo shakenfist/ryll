@@ -300,6 +300,19 @@ impl SurfaceMirror {
         let key = self.primary_key()?;
         self.surfaces.get_mut(&key)
     }
+
+    /// Mark every surface fully damaged and dirty.
+    ///
+    /// For a caller that knows the mirror missed events (its broadcast
+    /// subscription lagged, say). The pixels have already diverged from
+    /// the guest's, and the recorded damage is missing the draws that
+    /// were never applied, so every consumer must resend each surface
+    /// whole rather than trust either.
+    pub fn mark_all_damaged(&mut self) {
+        for surface in self.surfaces.values_mut() {
+            surface.mark_all_damaged();
+        }
+    }
 }
 
 impl Default for SurfaceMirror {
@@ -345,6 +358,7 @@ impl SurfaceMirror {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::display::DamageRect;
 
     #[test]
     fn surface_created_inserts_entry() {
@@ -677,6 +691,41 @@ mod tests {
             );
         }
         assert!(m.surfaces.is_empty());
+    }
+
+    #[test]
+    fn draws_through_the_mirror_record_damage() {
+        let mut m = SurfaceMirror::new();
+        created(&mut m, 4, 4);
+        m.primary_surface_mut().expect("primary").take_damage();
+        m.apply_event(&image_ready(1, 1, 2, 2));
+        let s = m.primary_surface().expect("primary");
+        assert_eq!(s.damage().bounding_box(), Some(DamageRect::new(1, 1, 3, 3)));
+    }
+
+    #[test]
+    fn mark_all_damaged_covers_every_surface() {
+        let mut m = SurfaceMirror::new();
+        created(&mut m, 4, 4);
+        m.apply_event(&ChannelEvent::SurfaceCreated {
+            display_channel_id: 1,
+            surface_id: 7,
+            width: 8,
+            height: 2,
+        });
+        for s in m.surfaces.values_mut() {
+            s.take_damage();
+            s.consume_dirty();
+        }
+
+        m.mark_all_damaged();
+
+        let primary = &m.surfaces[&(0, 0)];
+        assert_eq!(primary.damage().rects(), &[DamageRect::new(0, 0, 4, 4)]);
+        assert!(primary.is_dirty());
+        let other = &m.surfaces[&(1, 7)];
+        assert_eq!(other.damage().rects(), &[DamageRect::new(0, 0, 8, 2)]);
+        assert!(other.is_dirty());
     }
 
     #[test]

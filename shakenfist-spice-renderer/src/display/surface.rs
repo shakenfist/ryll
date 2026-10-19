@@ -1,12 +1,15 @@
 /// Display surface: pixel substrate for SPICE draw operations.
 ///
-/// Holds an RGBA pixel buffer plus a dirty flag. Consumers (the
-/// GUI texture cache today; the H.264 encoder and WebRTC pipeline
-/// in future) wrap this and bind their own representation. No
-/// rendering-framework imports live here — the wrapper that turns
+/// Holds an RGBA pixel buffer plus a dirty flag and a damage region.
+/// Consumers (the GUI texture cache, the H.264 encoder and WebRTC
+/// pipeline) wrap this and bind their own representation; the dirty
+/// flag says whether anything changed, the damage region says where.
+/// No rendering-framework imports live here — the wrapper that turns
 /// these pixels into a GUI texture lives in `display_gui.rs`
 /// alongside the rest of the GUI plumbing.
 use tracing::warn;
+
+use super::damage::{DamageRect, DamageRegion};
 
 /// Maximum surface side length. Server-supplied or auto-computed
 /// dimensions larger than this are clamped to prevent
@@ -20,13 +23,20 @@ use tracing::warn;
 pub const MAX_SURFACE_DIMENSION: u32 = shakenfist_spice_compression::limits::MAX_IMAGE_DIMENSION;
 
 /// A display surface that holds RGBA pixel data and tracks
-/// whether it has been mutated since the last consumer read.
+/// whether, and where, it has been mutated since the last consumer
+/// read.
+///
+/// The dirty flag and the damage region are independent: reading
+/// one with [`consume_dirty`](Self::consume_dirty) or
+/// [`take_damage`](Self::take_damage) leaves the other alone, so a
+/// whole-frame consumer and a damage consumer can share a surface.
 pub struct DisplaySurface {
     pub id: u32,
     pub width: u32,
     pub height: u32,
     pixels: Vec<u8>, // RGBA format
     dirty: bool,
+    damage: DamageRegion,
 }
 
 impl DisplaySurface {
@@ -63,6 +73,7 @@ impl DisplaySurface {
             height,
             pixels,
             dirty: true,
+            damage: DamageRegion::full(width, height),
         }
     }
 
@@ -97,6 +108,12 @@ impl DisplaySurface {
             }
         }
 
+        // The rows and columns the loop above can reach. A pixel buffer
+        // shorter than width x height leaves some of them unwritten, but
+        // reporting those too only costs a consumer a resend.
+        let right = left + (copy_width / 4) as u32;
+        let bottom = top.saturating_add(height).min(self.height);
+        self.damage.add(DamageRect::new(left, top, right, bottom));
         self.dirty = true;
     }
 
@@ -121,6 +138,7 @@ impl DisplaySurface {
         let mut wrote = false;
         if clip.is_empty() {
             self.fill_subrect(l, t, r, b, colour);
+            self.damage.add(DamageRect::new(l, t, r, b));
             wrote = true;
         } else {
             for &(cl, ct, cr, cb) in clip {
@@ -132,6 +150,7 @@ impl DisplaySurface {
                     continue;
                 }
                 self.fill_subrect(il, it, ir, ib, colour);
+                self.damage.add(DamageRect::new(il, it, ir, ib));
                 wrote = true;
             }
         }
@@ -209,9 +228,12 @@ impl DisplaySurface {
         }
 
         // Step 3: apply clip rects (or just surface bounds if empty).
+        // Only the destination is damage; the source is read, not
+        // written.
         let mut wrote = false;
         if clip.is_empty() {
             self.copy_subrect(sx, sy, dl, dt, dr, db);
+            self.damage.add(DamageRect::new(dl, dt, dr, db));
             wrote = true;
         } else {
             for &(cl, ct, cr, cb) in clip {
@@ -226,6 +248,7 @@ impl DisplaySurface {
                 let ssx = sx + (il - dl);
                 let ssy = sy + (it - dt);
                 self.copy_subrect(ssx, ssy, il, it, ir, ib);
+                self.damage.add(DamageRect::new(il, it, ir, ib));
                 wrote = true;
             }
         }
@@ -254,6 +277,7 @@ impl DisplaySurface {
         let mut wrote = false;
         if clip.is_empty() {
             self.invert_subrect(l, t, r, b);
+            self.damage.add(DamageRect::new(l, t, r, b));
             wrote = true;
         } else {
             for &(cl, ct, cr, cb) in clip {
@@ -265,6 +289,7 @@ impl DisplaySurface {
                     continue;
                 }
                 self.invert_subrect(il, it, ir, ib);
+                self.damage.add(DamageRect::new(il, it, ir, ib));
                 wrote = true;
             }
         }
@@ -332,6 +357,8 @@ impl DisplaySurface {
         }
 
         if wrote {
+            self.damage
+                .add(DamageRect::new(left, top, left + clip_w, top + clip_h));
             self.dirty = true;
         }
     }
@@ -398,6 +425,8 @@ impl DisplaySurface {
             }
         }
 
+        self.damage
+            .add(DamageRect::new(left, top, left + clip_w, top + clip_h));
         self.dirty = true;
     }
 
@@ -497,6 +526,26 @@ impl DisplaySurface {
         let was_dirty = self.dirty;
         self.dirty = false;
         was_dirty
+    }
+
+    /// The damage recorded since the last
+    /// [`take_damage`](Self::take_damage). Non-mutating peek.
+    pub fn damage(&self) -> &DamageRegion {
+        &self.damage
+    }
+
+    /// Return the damage recorded since the last call and clear it. A
+    /// new surface starts fully damaged, so the first call covers the
+    /// whole surface. Independent of [`consume_dirty`](Self::consume_dirty).
+    pub fn take_damage(&mut self) -> DamageRegion {
+        std::mem::take(&mut self.damage)
+    }
+
+    /// Mark the whole surface damaged and dirty, for when a caller knows
+    /// the recorded damage can no longer be trusted (it missed draws).
+    pub(crate) fn mark_all_damaged(&mut self) {
+        self.damage = DamageRegion::full(self.width, self.height);
+        self.dirty = true;
     }
 
     /// Get raw pixel data.
@@ -873,6 +922,205 @@ mod tests {
         assert_eq!(pixel_at(&s, 1, 1), [255, 0, 0, 255]);
         assert_eq!(pixel_at(&s, 0, 0), [0, 0, 0, 255]);
         assert_eq!(pixel_at(&s, 0, 1), [0, 0, 0, 255]);
+        assert!(s.is_dirty());
+    }
+
+    /// A blank surface with its initial damage and dirty flag cleared.
+    fn undamaged_surface(width: u32, height: u32) -> DisplaySurface {
+        let mut s = DisplaySurface::new(0, width, height);
+        s.take_damage();
+        s.consume_dirty();
+        s
+    }
+
+    fn rect(l: u32, t: u32, r: u32, b: u32) -> DamageRect {
+        DamageRect::new(l, t, r, b)
+    }
+
+    #[test]
+    fn new_surface_is_fully_damaged() {
+        let s = DisplaySurface::new(0, 8, 6);
+        assert_eq!(s.damage().rects(), &[rect(0, 0, 8, 6)]);
+    }
+
+    #[test]
+    fn new_clamped_surface_is_damaged_to_its_clamped_size() {
+        let s = DisplaySurface::new(0, u32::MAX, 1);
+        assert_eq!(s.damage().rects(), &[rect(0, 0, MAX_SURFACE_DIMENSION, 1)]);
+    }
+
+    #[test]
+    fn take_damage_returns_and_clears() {
+        let mut s = DisplaySurface::new(0, 8, 6);
+        let taken = s.take_damage();
+        assert_eq!(taken.rects(), &[rect(0, 0, 8, 6)]);
+        assert!(s.damage().is_empty());
+        assert!(s.take_damage().is_empty());
+    }
+
+    #[test]
+    fn dirty_and_damage_are_independent() {
+        let mut s = DisplaySurface::new(0, 4, 4);
+        assert!(s.consume_dirty());
+        assert_eq!(s.damage().rects(), &[rect(0, 0, 4, 4)]);
+
+        s.fill_rect(0, 0, 1, 1, [1, 2, 3, 255], &[]);
+        let taken = s.take_damage();
+        assert!(!taken.is_empty());
+        assert!(s.is_dirty());
+        assert!(s.consume_dirty());
+        assert!(s.damage().is_empty());
+    }
+
+    #[test]
+    fn blit_damages_the_clamped_rect() {
+        let mut s = undamaged_surface(4, 4);
+        let src = [255u8, 0, 0, 255].repeat(9);
+        s.blit(2, 3, 3, 3, &src);
+        assert_eq!(s.damage().rects(), &[rect(2, 3, 4, 4)]);
+    }
+
+    #[test]
+    fn blit_off_the_surface_adds_no_damage() {
+        let mut s = undamaged_surface(4, 4);
+        let src = [255u8, 0, 0, 255].repeat(4);
+        s.blit(4, 0, 2, 2, &src);
+        s.blit(0, u32::MAX, 2, 2, &src);
+        assert!(s.damage().is_empty());
+    }
+
+    #[test]
+    fn blit_with_a_huge_height_does_not_overflow() {
+        let mut s = undamaged_surface(4, 4);
+        s.blit(0, 1, 1, u32::MAX, &[9u8; 4]);
+        assert_eq!(s.damage().rects(), &[rect(0, 1, 1, 4)]);
+    }
+
+    #[test]
+    fn fill_rect_damages_the_clamped_rect() {
+        let mut s = undamaged_surface(4, 4);
+        s.fill_rect(2, 2, 10, 10, [255, 0, 0, 255], &[]);
+        assert_eq!(s.damage().rects(), &[rect(2, 2, 4, 4)]);
+    }
+
+    #[test]
+    fn fill_rect_damages_each_clip_rect() {
+        let mut s = undamaged_surface(8, 8);
+        s.fill_rect(
+            1,
+            1,
+            8,
+            8,
+            [255, 0, 0, 255],
+            &[(0, 0, 2, 2), (6, 6, 9, 9), (3, 0, 4, 1)],
+        );
+        // The third clip rect misses the fill entirely.
+        assert_eq!(s.damage().rects(), &[rect(1, 1, 2, 2), rect(6, 6, 8, 8)]);
+    }
+
+    #[test]
+    fn fill_rect_off_the_surface_adds_no_damage() {
+        let mut s = undamaged_surface(4, 4);
+        s.fill_rect(4, 4, 8, 8, [255, 0, 0, 255], &[]);
+        s.fill_rect(3, 3, 3, 3, [255, 0, 0, 255], &[]);
+        s.fill_rect(0, 0, 4, 4, [255, 0, 0, 255], &[(5, 5, 6, 6)]);
+        assert!(s.damage().is_empty());
+        assert!(!s.is_dirty());
+    }
+
+    #[test]
+    fn invert_rect_damages_each_clip_rect() {
+        let mut s = undamaged_surface(8, 8);
+        s.invert_rect(0, 0, 8, 8, &[(0, 0, 2, 2), (6, 6, 8, 8)]);
+        assert_eq!(s.damage().rects(), &[rect(0, 0, 2, 2), rect(6, 6, 8, 8)]);
+
+        let mut s = undamaged_surface(8, 8);
+        s.invert_rect(5, 5, 20, 20, &[]);
+        assert_eq!(s.damage().rects(), &[rect(5, 5, 8, 8)]);
+    }
+
+    #[test]
+    fn copy_bits_damages_only_the_destination() {
+        let mut s = undamaged_surface(8, 8);
+        s.copy_bits(0, 0, 6, 6, 8, 8, &[]);
+        assert_eq!(s.damage().rects(), &[rect(6, 6, 8, 8)]);
+    }
+
+    #[test]
+    fn copy_bits_damages_the_destination_after_source_clipping() {
+        // As in copy_bits_source_off_surface: only one column of the
+        // source is on the surface, so only one destination pixel moves.
+        let mut s = undamaged_surface(4, 4);
+        s.copy_bits(3, 0, 0, 0, 4, 1, &[]);
+        assert_eq!(s.damage().rects(), &[rect(0, 0, 1, 1)]);
+    }
+
+    #[test]
+    fn copy_bits_damages_each_clipped_destination_rect() {
+        let mut s = undamaged_surface(8, 8);
+        s.copy_bits(
+            0,
+            0,
+            4,
+            0,
+            8,
+            8,
+            &[(4, 0, 5, 1), (7, 7, 8, 8), (0, 0, 2, 2)],
+        );
+        // The third clip rect covers only the source, which is not damage.
+        assert_eq!(s.damage().rects(), &[rect(4, 0, 5, 1), rect(7, 7, 8, 8)]);
+    }
+
+    #[test]
+    fn copy_bits_off_the_surface_adds_no_damage() {
+        let mut s = undamaged_surface(4, 4);
+        s.copy_bits(0, 0, 4, 4, 6, 6, &[]);
+        s.copy_bits(4, 0, 0, 0, 1, 1, &[]);
+        assert!(s.damage().is_empty());
+    }
+
+    #[test]
+    fn blit_chroma_damages_the_clamped_rect() {
+        let mut s = undamaged_surface(2, 2);
+        let src = [255u8, 0, 0, 255].repeat(9);
+        s.blit_chroma(1, 0, 3, 3, &src, [255, 0, 255, 255]);
+        assert_eq!(s.damage().rects(), &[rect(1, 0, 2, 2)]);
+    }
+
+    #[test]
+    fn blit_chroma_of_only_chroma_pixels_adds_no_damage() {
+        let mut s = undamaged_surface(2, 2);
+        let src = [255u8, 0, 255, 255].repeat(4);
+        s.blit_chroma(0, 0, 2, 2, &src, [255, 0, 255, 255]);
+        s.blit_chroma(2, 0, 2, 2, &src, [0, 0, 0, 255]);
+        assert!(s.damage().is_empty());
+        assert!(!s.is_dirty());
+    }
+
+    #[test]
+    fn blit_alpha_damages_the_clamped_rect() {
+        let mut s = undamaged_surface(2, 2);
+        let src = [255u8, 0, 0, 255].repeat(9);
+        s.blit_alpha(0, 1, 3, 3, &src, 255);
+        assert_eq!(s.damage().rects(), &[rect(0, 1, 2, 2)]);
+    }
+
+    #[test]
+    fn blit_alpha_that_writes_nothing_adds_no_damage() {
+        let mut s = undamaged_surface(2, 2);
+        let src = [255u8, 0, 0, 255].repeat(4);
+        s.blit_alpha(0, 0, 2, 2, &src, 0);
+        s.blit_alpha(0, 2, 2, 2, &src, 255);
+        assert!(s.damage().is_empty());
+        assert!(!s.is_dirty());
+    }
+
+    #[test]
+    fn mark_all_damaged_sets_full_damage_and_dirty() {
+        let mut s = undamaged_surface(5, 3);
+        s.fill_rect(0, 0, 1, 1, [1, 2, 3, 255], &[]);
+        s.mark_all_damaged();
+        assert_eq!(s.damage().rects(), &[rect(0, 0, 5, 3)]);
         assert!(s.is_dirty());
     }
 
