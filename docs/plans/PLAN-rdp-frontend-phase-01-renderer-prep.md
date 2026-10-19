@@ -857,8 +857,44 @@ Read decisions 8 to 10 and the survey's items 4 and 5 first.
 
 Filled in by the management session as steps land.
 
-- Slim dependency tree: *pending step 5*.
-- GUI manual check: *pending step 3 and step 6*.
+- Slim dependency tree after step 5 (`cargo tree -p
+  shakenfist-spice-renderer --no-default-features -e
+  normal,build`, 266 lines):
+  - Direct dependencies: anyhow, base64, flate2, image, libc,
+    lz4_flex, serde, serde_json, shakenfist-spice-compression,
+    shakenfist-spice-protocol, socket2, tokio, tokio-util, tracing.
+  - None of `openh264`, `openh264-sys2`, `mozjpeg-sys`, `nusb`,
+    `dav-server`, `hyper`, `cpal` or `alsa-sys` appear (checked by
+    grep in the management session).
+  - The only `-sys` crate left is `aws-lc-sys` (a C build needing
+    cmake). It does not come from the renderer: the protocol
+    crate's `tokio-rustls` takes rustls's default crypto provider,
+    aws-lc-rs. The master plan's acceptance names openh264, nusb,
+    dav-server and cpal, so the criterion is met, but a slim
+    consumer still needs a C toolchain. Recorded in *Future work*.
+- GUI pointer check after step 3, 2026-10-20 (AEDT), against the
+  `debian-xfce:13` desktop guest on SPICE port 5910 (5900 was in
+  use by the local andris service):
+  - Client mode: Mikal checked hover, click, drag, right-click and
+    wheel; all fine.
+  - Server mode: buttons, wheel and relative motion work. Getting
+    the guest into server mode took more than stopping vdagent.
+    q35's default `vmmouse` is an absolute device, so spice-server
+    keeps offering client mode through it. The guest was restarted
+    with `-machine q35,vmport=off`, `-vga virtio` and
+    `agent-mouse=off`, after which the server offered server mode
+    only.
+  - In server mode the host and guest cursors drift apart until
+    the host cursor leaves the window before reaching the target.
+    This predates the phase. A scripted closed pointer path,
+    replayed with python-xlib over each window, moved the guest
+    cursor about 50 px left per run in both the develop `7690e1e`
+    build and the step-3 build (runs: −53, −51, −49 px; matching
+    cursor-move counts). The cause is the guest's pointer
+    acceleration on relative motion, with no pointer grab or warp
+    in the GUI to correct it (spice-gtk grabs in server mode).
+    Recorded in *Future work*.
+- GUI local audio check: *pending step 6*.
 
 ## Future work
 
@@ -876,6 +912,22 @@ Filled in by the management session as steps land.
   affect a renderer consumer, but tidies ryll's own tree.
 - **Web mouse wheel** (survey item 9): add a wheel message to
   `app.js` and the relay, through `PointerTranslator::wheel`.
+- **GUI server-mode pointer grab.** In server mouse mode the GUI
+  sends relative deltas from host hover positions without grabbing
+  or warping the pointer, so guest acceleration makes the two
+  cursors drift until parts of the guest display cannot be reached
+  (see *Results*). spice-gtk grabs the pointer in server mode.
+  This predates the phase; the RDP frontend will meet the same
+  problem in server mode.
+- **The protocol crate's TLS provider.**
+  `shakenfist-spice-protocol` depends on `tokio-rustls` with
+  default features, which pulls in aws-lc-rs and `aws-lc-sys` (a
+  cmake C build), while ryll itself installs `ring` as its rustls
+  provider. Choosing one provider in the protocol crate (probably
+  `ring`, with `default-features = false`) would take the last C
+  build out of the slim renderer and stop ryll building two crypto
+  libraries. Check what Kerbside's proxy expects before changing
+  it.
 - **cargo-deny on the slim tree**: it runs with
   `--all-features`, so it audits a superset. Probably fine;
   noted in case a licence ever differs between the two trees.
