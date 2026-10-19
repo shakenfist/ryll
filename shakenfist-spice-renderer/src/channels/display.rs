@@ -175,6 +175,27 @@ fn preferred_video_codecs(h264: H264Offer) -> &'static [u8] {
     }
 }
 
+/// The H.264 offer this build can honour: `requested` when the
+/// renderer has an H.264 decoder (the `h264-decode` feature), and
+/// [`H264Offer::Off`] when it does not.
+///
+/// Without a decoder, every H.264 stream the server chose would be
+/// refused at `STREAM_CREATE` and its frames dropped, leaving that
+/// part of the screen blank. `Off` withholds both the capability bit
+/// (`link::display_channel_caps`) and the codec preference
+/// ([`preferred_video_codecs`]), so the server streams MJPEG or sends
+/// plain draw commands instead. The session applies this before it
+/// builds the display channel's link caps, and
+/// [`DisplayChannel::new`] applies it again so a channel built any
+/// other way cannot ask for what it cannot decode.
+pub(crate) fn supported_h264_offer(requested: H264Offer) -> H264Offer {
+    if cfg!(feature = "h264-decode") {
+        requested
+    } else {
+        H264Offer::Off
+    }
+}
+
 /// Sliding-window threshold for triggering a STREAM_REPORT
 /// early due to consecutive frame drops. Matches spice-gtk's
 /// `STREAM_REPORT_DROP_SEQ_LEN_LIMIT` at
@@ -1089,7 +1110,7 @@ impl DisplayChannel {
             last_send_snapshot_publish: None,
             recently_destroyed_streams: VecDeque::new(),
             mm_clock,
-            h264,
+            h264: supported_h264_offer(h264),
             mjpeg_recent_durations: VecDeque::new(),
             mjpeg_decode_total_count: 0,
             mjpeg_decode_failed_count: 0,
@@ -3553,7 +3574,7 @@ mod tests {
     use crate::channels::test_support::{loopback, NullTraffic, TestChannelPeers};
     use shakenfist_spice_protocol::constants::{clip_type, image_compression};
     use shakenfist_spice_protocol::messages::{
-        BitmapPalette, BitmapPayload, Clip, DrawCopyBuilder, ImagePayload, SpiceImage, StreamData,
+        BitmapPalette, BitmapPayload, Clip, DrawCopyBuilder, ImagePayload, SpiceImage,
         StreamDataHeader, StreamDataSized,
     };
 
@@ -4819,6 +4840,7 @@ mod tests {
 
     /// `count` 64x64 H.264 frames, each decodable on its own after the
     /// first (an IDR), from the encoder a SPICE server would use.
+    #[cfg(all(feature = "h264-decode", feature = "encoder"))]
     fn h264_frames(count: usize) -> Vec<Vec<u8>> {
         use shakenfist_spice_compression::{Bgrx, H264Config, H264Encoder};
         let mut config = H264Config::new(64, 64, 30);
@@ -4839,7 +4861,9 @@ mod tests {
     }
 
     /// A `STREAM_DATA` body carrying `data` for stream `id`.
+    #[cfg(feature = "h264-decode")]
     fn stream_data_payload(id: u32, data: &[u8]) -> Vec<u8> {
+        use shakenfist_spice_protocol::messages::StreamData;
         let mut v = Vec::new();
         StreamData {
             base: StreamDataHeader {
@@ -4853,6 +4877,7 @@ mod tests {
     }
 
     /// Send each of `frames` to stream `id`.
+    #[cfg(feature = "h264-decode")]
     async fn send_stream_frames(channel: &mut DisplayChannel, id: u32, frames: &[Vec<u8>]) {
         for frame in frames {
             channel
@@ -4865,7 +4890,10 @@ mod tests {
     // A streaming agent may pick H.264 although ryll asks for MJPEG
     // first, and spice-server's H.264 does not decode in ryll (#398).
     // Nothing shows on screen to say why, so ryll warns, once per
-    // stream, naming --no-h264.
+    // stream, naming --no-h264. Needs the H.264 decoder: without it the
+    // stream is refused at STREAM_CREATE and there is nothing to warn
+    // about.
+    #[cfg(feature = "h264-decode")]
     #[tokio::test]
     async fn an_h264_stream_that_never_decodes_is_warned_about_once() {
         let (mut channel, _peers) = test_display_channel().await;
@@ -4889,6 +4917,7 @@ mod tests {
         assert!(stream.warned_never_decodes, "not warned at the threshold");
     }
 
+    #[cfg(all(feature = "h264-decode", feature = "encoder"))]
     #[tokio::test]
     async fn streams_that_decode_or_are_mjpeg_are_not_warned_about() {
         let (mut channel, _peers) = test_display_channel().await;
@@ -4914,8 +4943,9 @@ mod tests {
 
     // The control socket's `stats` reads what the channel publishes. Fill
     // the snapshot through the channel itself, not by hand, so that a
-    // change to the opcode key or the publish path shows here.
-    #[cfg(unix)]
+    // change to the opcode key or the publish path shows here. Drives a
+    // real H.264 stream, so it needs both the encoder and the decoder.
+    #[cfg(all(unix, feature = "h264-decode", feature = "encoder"))]
     #[tokio::test]
     async fn stats_reports_what_the_channel_publishes() {
         use crate::control::protocol::{CodecDecodeStats, DisplayStats};
@@ -5843,8 +5873,13 @@ mod tests {
                 .await
                 .expect("send link-up preferences");
             assert_eq!(peers.read_sent(7).await, vec![103, 0, 1, 0, 0, 0, wire]);
-            // MJPEG (1) then H.264 (3); see preferred_video_codecs.
-            assert_eq!(peers.read_sent(9).await, vec![105, 0, 3, 0, 0, 0, 2, 1, 3]);
+            if cfg!(feature = "h264-decode") {
+                // MJPEG (1) then H.264 (3); see preferred_video_codecs.
+                assert_eq!(peers.read_sent(9).await, vec![105, 0, 3, 0, 0, 0, 2, 1, 3]);
+            } else {
+                // No decoder, so no H.264: MJPEG (1) only.
+                assert_eq!(peers.read_sent(8).await, vec![105, 0, 2, 0, 0, 0, 1, 1]);
+            }
         }
     }
 
@@ -5902,6 +5937,30 @@ mod tests {
         let sent = peers.read_sent(6 + 256).await;
         assert_eq!(&sent[..7], &[105, 0, 0, 1, 0, 0, 255]);
         assert_eq!(&sent[7..], &codecs[..255]);
+    }
+
+    #[test]
+    fn the_h264_offer_is_off_without_a_decoder() {
+        for requested in [H264Offer::Off, H264Offer::AfterMjpeg, H264Offer::Preferred] {
+            let expected = if cfg!(feature = "h264-decode") {
+                requested
+            } else {
+                H264Offer::Off
+            };
+            assert_eq!(supported_h264_offer(requested), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_display_channel_only_offers_h264_it_can_decode() {
+        // test_display_channel() asks for the default offer.
+        let (channel, _peers) = test_display_channel().await;
+        let expected = if cfg!(feature = "h264-decode") {
+            H264Offer::default()
+        } else {
+            H264Offer::Off
+        };
+        assert_eq!(channel.h264, expected);
     }
 
     #[test]

@@ -94,9 +94,9 @@ rand = "0.8"
 # PCM if SPICE ever negotiates an uncompressed playback format.
 opus = "0.4"
 
-# Renderer crate: provides EncodedFrame, EncoderControl, EncoderTask,
-# H264Encoder, and SyntheticFrameSource used for the media pumps
-# and the integration test.
+# Renderer crate: provides EncodedFrame and EncoderControl for the
+# media pumps. No renderer features: the bridge only moves encoded
+# frames, so it does not need the H.264 encoder or any decoder.
 shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.3.0", default-features = false }
 
 [dev-dependencies]
@@ -106,3 +106,7 @@ shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "
 # module and cannot enable a feature on themselves any other way.
 # Cargo supports this specifically for the case.
 shakenfist-spice-webrtc = { path = ".", features = ["test-support"] }
+# The tests drive a real H264Encoder, EncoderTask and
+# SyntheticFrameSource through the bridge, so they need the
+# renderer's `encoder` feature, which production code does not.
+shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.3.0", default-features = false, features = ["encoder"] }

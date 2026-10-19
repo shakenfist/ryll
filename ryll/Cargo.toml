@@ -115,7 +115,19 @@ lz4_flex = "0.14"
 # cargo-release; see tools/cut-release.sh.
 shakenfist-spice-compression = { path = "../shakenfist-spice-compression", version = "0.3.0" }
 shakenfist-spice-protocol = { path = "../shakenfist-spice-protocol", version = "0.3.0" }
-shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.3.0", default-features = false }
+# The renderer's features are named explicitly rather than taken from
+# its defaults, so ryll's own `--no-default-features` build controls
+# `audio` (forwarded by ryll's `audio` feature above) while keeping
+# everything else ryll uses: USB redirection, WebDAV sharing, the
+# H.264 encoder (`--web` and `--capture`), H.264 decode and the SIMD
+# JPEG decoder.
+shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.3.0", default-features = false, features = [
+    "usbredir",
+    "webdav",
+    "encoder",
+    "h264-decode",
+    "mozjpeg",
+] }
 shakenfist-spice-usbredir = { path = "../shakenfist-spice-usbredir", version = "0.3.0" }
 shakenfist-spice-webrtc = { path = "../shakenfist-spice-webrtc", version = "0.3.0" }
 

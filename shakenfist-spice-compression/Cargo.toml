@@ -13,7 +13,7 @@ readme = "README.md"
 workspace = true
 
 [features]
-default = ["quic", "glz", "lz", "lz4", "jpeg", "mozjpeg"]
+default = ["quic", "glz", "lz", "lz4", "jpeg", "mozjpeg", "h264-decode"]
 quic = []
 glz = ["dep:tokio"]
 lz = []
@@ -22,7 +22,7 @@ lz4 = ["dep:lz4_flex"]
 # decoder features above, so `default-features = false, features =
 # ["encode"]` builds. LZ4 and JPEG encode images, H.264 (openh264)
 # video streams.
-encode = ["dep:lz4_flex", "dep:jpeg-encoder", "dep:openh264-sys2"]
+encode = ["dep:lz4_flex", "dep:jpeg-encoder", "dep:openh264", "dep:openh264-sys2"]
 jpeg = ["dep:jpeg-decoder"]
 # Cross-platform SIMD-accelerated JPEG decode via the `mozjpeg`
 # crate. The `with_simd` feature on `mozjpeg-sys` is enabled by
@@ -31,6 +31,12 @@ jpeg = ["dep:jpeg-decoder"]
 # `JpegDecoder` trait surface exists; the pure-Rust
 # `jpeg-decoder` crate remains the universal fallback.
 mozjpeg = ["dep:mozjpeg", "jpeg"]
+# H.264 stream decode (`H264VideoDecoder`) via openh264, which builds
+# Cisco's C++ codec from vendored source. Without it `for_stream`
+# refuses H.264 as an unsupported codec, so a consumer that leaves it
+# off must not advertise H.264 to the server. Only meaningful with
+# `jpeg`, which is what compiles the `video` module.
+h264-decode = ["dep:openh264"]
 
 [dependencies]
 anyhow = "1"
@@ -67,7 +73,9 @@ mozjpeg = { version = "=0.10.13", optional = true, features = ["with_simd"] }
 # together, and recheck the encoder's tests: its behaviour notes
 # (the screen-content QP clamp, bitrate ceilings, lazy
 # initialisation) are about this version.
-openh264 = "=0.9.8"
+#
+# Optional: pulled in by `h264-decode` (decode) or `encode` (encode).
+openh264 = { version = "=0.9.8", optional = true }
 # The raw option types openh264 does not re-export (SBitrateInfo,
 # SEncParamExt and the ENCODER_OPTION_* constants), for the encoder's
 # live bitrate, frame rate and slice settings. Only with `encode`.

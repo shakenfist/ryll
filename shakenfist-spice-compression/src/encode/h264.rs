@@ -1185,7 +1185,9 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "jpeg")]
+    // Decodes with the client's stream decoder, which needs the
+    // `video` module (`jpeg`) and the H.264 decoder in it.
+    #[cfg(all(feature = "jpeg", feature = "h264-decode"))]
     mod round_trip {
         use super::*;
         use crate::video::for_stream;

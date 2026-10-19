@@ -336,6 +336,9 @@ mod jpeg_tests {
 
     /// Every decoder built, each with a name for failure messages.
     fn decoders() -> Vec<(&'static str, Box<dyn JpegDecoder>)> {
+        // Only pushed to when mozjpeg is built, which a renderer
+        // consumer without its `mozjpeg` feature leaves out.
+        #[cfg_attr(not(feature = "mozjpeg"), allow(unused_mut))]
         let mut decoders: Vec<(&'static str, Box<dyn JpegDecoder>)> =
             vec![("jpeg-decoder", Box::new(JpegDecoderRsDecoder::new()))];
         #[cfg(feature = "mozjpeg")]

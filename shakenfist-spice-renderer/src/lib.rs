@@ -34,7 +34,9 @@ pub mod session_state;
 pub mod snapshots;
 pub mod surface_mirror;
 pub mod traffic;
+#[cfg(feature = "usbredir")]
 pub mod usb;
+#[cfg(feature = "webdav")]
 pub mod webdav;
 
 pub use audio_sink::OpusPacketSink;
@@ -46,9 +48,11 @@ pub use clipboard::{ClipboardBackend, MemoryClipboard};
 pub use device_config::{ShareDirConfig, VirtualDiskConfig};
 pub use display::{DamageRect, DamageRegion, DisplaySurface, MAX_DAMAGE_RECTS};
 pub use encoder::{
-    even_dimensions, EncodedFrame, EncoderControl, EncoderTask, FrameRef, FrameSource, H264Encoder,
-    RealFrameSource, SyntheticFrameSource,
+    even_dimensions, EncodedFrame, EncoderControl, FrameRef, FrameSource, RealFrameSource,
+    SyntheticFrameSource,
 };
+#[cfg(feature = "encoder")]
+pub use encoder::{EncoderTask, H264Encoder};
 pub use event_bus::{EventBus, EventBusHandles};
 pub use image_cache::{BoundedImageCache, InsertOutcome, RefusedReason};
 pub use log_config::LogConfig;

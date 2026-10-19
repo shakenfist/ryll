@@ -7,9 +7,11 @@ pub mod main_channel;
 pub mod playback;
 #[cfg(test)]
 pub(crate) mod test_support;
+#[cfg(feature = "usbredir")]
 pub mod usbredir;
 pub mod volume;
 mod watchdog;
+#[cfg(feature = "webdav")]
 pub mod webdav;
 
 pub use cursor::CursorChannel;
@@ -19,8 +21,10 @@ pub use inputs::{translate_paste, InputsChannel, PasteError, PasteKey};
 pub use main_channel::{align_monitor_dimension, DisplaySize, MainChannel};
 #[cfg(feature = "audio")]
 pub use playback::PlaybackChannel;
+#[cfg(feature = "usbredir")]
 pub use usbredir::UsbredirChannel;
 pub use volume::VolumeControl;
+#[cfg(feature = "webdav")]
 pub use webdav::WebdavChannel;
 
 use std::collections::BTreeMap;

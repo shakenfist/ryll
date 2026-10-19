@@ -14,7 +14,7 @@ pub struct EncodedFrame {
     pub keyframe: bool,
 }
 
-/// Control messages sent to a running [`EncoderTask`].
+/// Control messages sent to a running `EncoderTask`.
 #[derive(Debug)]
 pub enum EncoderControl {
     /// Force the next encoded frame to be an IDR keyframe. Sent
