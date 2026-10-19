@@ -25,13 +25,6 @@ use tracing::info;
 
 use super::signalling::EncoderInfra;
 
-/// Default capacity of the broadcast channel that fan-outs
-/// `ChannelEvent`s from the renderer to web-mode consumers
-/// (surface mirror in 5b, cursor relay in 5d, audio sink in 5e).
-/// 5a installs no real subscribers; a slow / absent subscriber
-/// would simply lose old messages with `RecvError::Lagged`,
-/// which is fine because the events are stateless deltas.
-pub const EVENT_BROADCAST_CAPACITY: usize = 1024;
 /// Capacity of the `InputEvent` mpsc fed by browser
 /// keyboard/mouse messages.
 pub const INPUT_CHANNEL_CAPACITY: usize = 256;

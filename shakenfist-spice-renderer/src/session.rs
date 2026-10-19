@@ -45,6 +45,7 @@ use crate::channels::{
 };
 use crate::clipboard::ClipboardBackend;
 use crate::device_config::{ShareDirConfig, VirtualDiskConfig};
+use crate::event_bus::EventBus;
 use crate::log_config::LogConfig;
 use crate::mm_clock::MmClock;
 use crate::notification::{NotificationEntry, NotificationSource};
@@ -679,7 +680,7 @@ pub async fn run_headless(
         })
         .transpose()?;
 
-    let (event_tx, mut event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
+    let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
     let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
     let (_usb_tx, usb_rx) = mpsc::channel(16);
     let (_webdav_tx, webdav_rx) = mpsc::channel(16);
@@ -717,7 +718,8 @@ pub async fn run_headless(
     // drains the renderer's mpsc and republishes each event onto
     // this bus, so SPICE channel producers are never back-pressured
     // by any single consumer (e.g. a slow control-socket client).
-    let (event_broadcast_tx, _) = broadcast::channel::<ChannelEvent>(EVENT_BROADCAST_CAPACITY);
+    let event_bus = EventBus::new(EVENT_BROADCAST_CAPACITY);
+    let event_broadcast_tx = event_bus.sender();
 
     // Headless mode does not paint anything, but the channel handlers still
     // call notify_one().  Give them a Notify whose notifications nobody
@@ -746,7 +748,7 @@ pub async fn run_headless(
     // — both code paths call the same `apply_event` helper directly on
     // the mirror, so the apply logic itself is shared without an extra
     // indirection.
-    let surface_mirror = Arc::new(tokio::sync::Mutex::new(SurfaceMirror::new()));
+    let surface_mirror = event_bus.mirror();
 
     // Watch the primary surface for a QR-encoded visual digest.  See
     // `spawn_digest_poller`, which `run_web` calls too — the scenario
@@ -880,62 +882,17 @@ pub async fn run_headless(
         }
     }
 
-    // Event fan-out task: drains the renderer's mpsc and republishes
-    // each `ChannelEvent` onto the broadcast bus.  This is the
+    // Event fan-out and surface-mirror apply tasks.  The fan-out is the
     // architectural pivot that lets multiple consumers (the headless
     // stats drain below, control-socket clients, future digest
     // consumers) tap the same stream without back-pressuring the
-    // SPICE channel producers.  The web-mode equivalent in
-    // `ryll/src/main.rs::run_web` follows the same shape; we keep
-    // both paths separate rather than abstracting because each is
-    // five lines and the surrounding wiring differs.
-    let stats_event_rx = event_broadcast_tx.subscribe();
-    let fanout_broadcast_tx = event_broadcast_tx.clone();
-    let _fanout_handle = tokio::spawn(async move {
-        while let Some(event) = event_rx.recv().await {
-            // `broadcast::Sender::send` is non-blocking.  An error
-            // means there are no current receivers, which is fine
-            // for events the headless stats drain does not care
-            // about (everything proceeds normally — the broadcast
-            // sender re-arms automatically when subscribers appear).
-            let _ = fanout_broadcast_tx.send(event);
-        }
-    });
-    // Surface-mirror apply task: subscribes to the broadcast bus and
-    // pipes every `ChannelEvent` through `SurfaceMirror::apply_event`.
-    // Mirrors `ryll/src/main.rs::run_web`'s identically-shaped task —
-    // both code paths call the same `SurfaceMirror::apply_event`
-    // helper directly on the shared mirror, so the apply dispatch is
-    // single-sourced inside `surface_mirror.rs` itself.  A `Lagged`
-    // error means a slow consumer missed N events; for the mirror
-    // that's bad because surface state diverges from what SPICE sent,
-    // but the same trade-off `run_web` already makes — log and continue.
-    let mirror_for_apply = surface_mirror.clone();
-    let mut mirror_event_rx = event_broadcast_tx.subscribe();
-    let _mirror_apply_handle = tokio::spawn(async move {
-        loop {
-            match mirror_event_rx.recv().await {
-                Ok(event) => {
-                    let mut m = mirror_for_apply.lock().await;
-                    m.apply_event(&event);
-                }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(
-                        "headless: surface mirror lagged by {} events; \
-                         surface state may briefly diverge",
-                        n
-                    );
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    info!("headless: surface mirror task exiting (broadcast closed)");
-                    break;
-                }
-            }
-        }
-    });
+    // SPICE channel producers; see `EventBus`.  Subscribe the stats
+    // drain before starting it so it cannot miss an early event.
+    let stats_event_rx = event_bus.subscribe();
+    let _event_bus_handles = event_bus.start(event_rx, "headless");
 
     // Drop our extra reference to the broadcast sender so that, once
-    // the fan-out task exits (on `event_rx` closing), the remaining
+    // the fan-out task exits (on the event mpsc closing), the remaining
     // receivers see `RecvError::Closed` and tear themselves down.
     drop(event_broadcast_tx);
 

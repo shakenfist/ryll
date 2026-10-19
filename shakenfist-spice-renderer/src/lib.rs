@@ -20,6 +20,7 @@ pub mod device_config;
 pub mod digest;
 pub mod display;
 pub mod encoder;
+pub mod event_bus;
 pub mod image_cache;
 pub mod log_config;
 pub mod metrics;
@@ -47,6 +48,7 @@ pub use encoder::{
     even_dimensions, EncodedFrame, EncoderControl, EncoderTask, FrameRef, FrameSource, H264Encoder,
     RealFrameSource, SyntheticFrameSource,
 };
+pub use event_bus::{EventBus, EventBusHandles};
 pub use image_cache::{BoundedImageCache, InsertOutcome, RefusedReason};
 pub use log_config::LogConfig;
 pub use mm_clock::MmClock;
