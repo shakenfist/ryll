@@ -3,7 +3,6 @@ pub mod cursor;
 pub mod display;
 pub mod inputs;
 pub mod main_channel;
-#[cfg(feature = "audio")]
 pub mod playback;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -19,7 +18,6 @@ pub use display::DisplayChannel;
 #[allow(unused_imports)] // PasteKey is part of translate_paste's public return type
 pub use inputs::{translate_paste, InputsChannel, PasteError, PasteKey};
 pub use main_channel::{align_monitor_dimension, DisplaySize, MainChannel};
-#[cfg(feature = "audio")]
 pub use playback::PlaybackChannel;
 #[cfg(feature = "usbredir")]
 pub use usbredir::UsbredirChannel;

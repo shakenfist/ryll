@@ -34,19 +34,16 @@ use shakenfist_spice_protocol::{
     ChannelType, ConnectionConfig, NotifySeverity, SpiceClient, CA_ALONE_WARNING,
 };
 
-use crate::audio_sink::OpusPacketSink;
 use crate::byte_counter::ByteCounter;
 use crate::capture_sink::CaptureSink;
 use crate::channels::display::supported_h264_offer;
-#[cfg(feature = "audio")]
-use crate::channels::PlaybackChannel;
 #[cfg(feature = "usbredir")]
 use crate::channels::UsbredirChannel;
 #[cfg(feature = "webdav")]
 use crate::channels::WebdavChannel;
 use crate::channels::{
     ChannelEvent, CursorChannel, DisplayChannel, EventSink, InputEvent, InputsChannel, MainChannel,
-    UsbCommand, VolumeControl, WebdavCommand,
+    PlaybackChannel, UsbCommand, VolumeControl, WebdavCommand,
 };
 use crate::clipboard::ClipboardBackend;
 use crate::device_config::{ShareDirConfig, VirtualDiskConfig};
@@ -55,6 +52,7 @@ use crate::log_config::LogConfig;
 use crate::mm_clock::MmClock;
 use crate::notification::{NotificationEntry, NotificationSource};
 use crate::notification_sink::NotificationSink;
+use crate::playback_sink::PlaybackOutput;
 use crate::session_state::SessionState;
 use crate::snapshots::ChannelSnapshots;
 use crate::surface_mirror::SurfaceMirror;
@@ -198,11 +196,17 @@ impl crate::control::StatusProvider for SessionStatus {
 /// `h264-decode` feature has no H.264 decoder, so it offers H.264 not
 /// at all whatever `h264` asks for.
 ///
+/// `playback` is where the guest's audio goes. `PlaybackOutput::Local`
+/// plays it on this host's default output device, which needs the
+/// `audio` feature: without it the playback channel is not linked.
+/// `PlaybackOutput::Sink` hands it to the sink, opens no device, and
+/// links the playback channel in every build.
+///
 /// The parameter list is the same in every feature configuration. A
 /// channel whose feature is compiled out is not linked, and the
 /// arguments only it would use (the usbredir receiver and virtual
-/// disks, the webdav receiver and share, the volume control and Opus
-/// sink) are accepted and ignored.
+/// disks, the webdav receiver and share) are accepted and ignored, as
+/// is the volume control in a build without local audio output.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_connection(
     config: ConnectionConfig,
@@ -225,21 +229,17 @@ pub async fn run_connection(
     log_config: LogConfig,
     cancel: Arc<AtomicBool>,
     clipboard: Option<Arc<dyn ClipboardBackend>>,
-    opus_sink: Option<Arc<dyn OpusPacketSink>>,
+    playback: PlaybackOutput,
     h264: H264Offer,
     image_cache_cap_bytes: usize,
     glz_dictionary_cap_bytes: usize,
     preferred_compression: u8,
 ) -> Result<()> {
-    // When the `audio` feature is off, `volume_control` and
-    // `opus_sink` are never read (the playback channel arm is
-    // gated out below).  Keep the function's public signature
-    // stable across feature configurations so host callers do
-    // not have to know which features the renderer was built
-    // with; suppress the resulting unused-variable lints here.
-    #[cfg(not(feature = "audio"))]
-    let _ = (&volume_control, &opus_sink);
-    // Likewise for the usbredir and webdav channels.
+    // Keep the function's public signature stable across feature
+    // configurations so host callers do not have to know which
+    // features the renderer was built with. When the usbredir or
+    // webdav channel is compiled out, the arguments only it reads go
+    // unused; suppress the resulting lints here.
     #[cfg(not(feature = "usbredir"))]
     let _ = (&usb_rx, &virtual_disks);
     #[cfg(not(feature = "webdav"))]
@@ -347,7 +347,7 @@ pub async fn run_connection(
         info!("RYLL_K1_MAIN_ONLY set — skipping all secondary channels (main only)");
     }
 
-    for (channel_type, channel_id, link) in plan_channel_links(&channels) {
+    for (channel_type, channel_id, link) in plan_channel_links(&channels, &playback) {
         if main_only {
             continue;
         }
@@ -488,7 +488,6 @@ pub async fn run_connection(
                 }
             }
 
-            #[cfg(feature = "audio")]
             ChannelType::Playback => {
                 let stream = client
                     .connect_channel(session_id, channel_type, channel_id)
@@ -502,15 +501,16 @@ pub async fn run_connection(
                     volume_control.clone(),
                     log_config,
                     cancel.clone(),
-                    opus_sink.clone(),
+                    playback.clone(),
                 );
                 handles.push((
                     ChannelType::Playback,
                     tokio::spawn(async move { channel.run().await }),
                 ));
             }
-            // plan_channel_links() skips every other type, and playback,
-            // usbredir and webdav too when their features are off.
+            // plan_channel_links() skips every other type, usbredir and
+            // webdav too when their features are off, and local playback
+            // without the audio feature.
             _ => {}
         }
     }
@@ -821,7 +821,9 @@ pub async fn run_headless(
             log_config,
             cancel_for_conn,
             clipboard_for_conn,
-            None, // headless mode: no opus sink (cpal output only)
+            // Headless plays the guest's audio on this host, as it always
+            // has.
+            PlaybackOutput::Local,
             h264,
             image_cache_cap_bytes,
             glz_dictionary_cap_bytes,
@@ -1135,19 +1137,27 @@ enum ChannelLink {
 /// one receiver the host hands in, so the first of each kind is linked
 /// and any later one is skipped. The main channel is already linked by
 /// the time the list arrives. A channel whose handler is compiled out
-/// (playback without `audio`, usbredir without `usbredir`, webdav
-/// without `webdav`) is skipped with a reason saying so.
-fn plan_channel_links(channels: &[(ChannelType, u8)]) -> Vec<(ChannelType, u8, ChannelLink)> {
+/// (usbredir without `usbredir`, webdav without `webdav`) is skipped
+/// with a reason saying so, as is playback to a `Local` output in a
+/// build without `audio`. Playback to a `Sink` is linked in every
+/// build.
+fn plan_channel_links(
+    channels: &[(ChannelType, u8)],
+    playback: &PlaybackOutput,
+) -> Vec<(ChannelType, u8, ChannelLink)> {
     let mut seen_single = Vec::new();
     channels
         .iter()
         .map(|&(channel_type, channel_id)| {
             let link = match channel_type {
                 ChannelType::Display | ChannelType::Cursor => ChannelLink::Open,
-                ChannelType::Playback if cfg!(feature = "audio") => ChannelLink::Open,
-                ChannelType::Playback => {
-                    ChannelLink::Skip("audio feature disabled at compile time")
-                }
+                ChannelType::Playback => match playback {
+                    PlaybackOutput::Sink(_) => ChannelLink::Open,
+                    PlaybackOutput::Local if cfg!(feature = "audio") => ChannelLink::Open,
+                    PlaybackOutput::Local => {
+                        ChannelLink::Skip("audio feature disabled at compile time")
+                    }
+                },
                 ChannelType::Usbredir if !cfg!(feature = "usbredir") => {
                     ChannelLink::Skip("usbredir feature disabled at compile time")
                 }
@@ -1252,7 +1262,7 @@ mod tests {
             (ChannelType::Usbredir, 0),
             (ChannelType::Webdav, 0),
         ];
-        let plan = plan_channel_links(&list);
+        let plan = plan_channel_links(&list, &PlaybackOutput::Local);
         assert_eq!(opened(&plan), linkable(&list));
     }
 
@@ -1268,7 +1278,7 @@ mod tests {
             (ChannelType::Cursor, 0),
             (ChannelType::Display, 0),
         ];
-        let plan = plan_channel_links(&list);
+        let plan = plan_channel_links(&list, &PlaybackOutput::Local);
         assert_eq!(
             opened(&plan),
             linkable(&[
@@ -1305,7 +1315,10 @@ mod tests {
             (ChannelType::Cursor, 0),
             (ChannelType::Cursor, 1),
         ];
-        assert_eq!(opened(&plan_channel_links(&list)), list.to_vec());
+        assert_eq!(
+            opened(&plan_channel_links(&list, &PlaybackOutput::Local)),
+            list.to_vec()
+        );
     }
 
     #[test]
@@ -1318,7 +1331,7 @@ mod tests {
             (ChannelType::Tunnel, 0),
             (ChannelType::Cursor, 0),
         ];
-        let plan = plan_channel_links(&list);
+        let plan = plan_channel_links(&list, &PlaybackOutput::Local);
         assert_eq!(opened(&plan), vec![(ChannelType::Cursor, 0)]);
         assert_eq!(plan[0].2, ChannelLink::Skip("already linked"));
         assert!(plan[1..5]
@@ -1326,9 +1339,20 @@ mod tests {
             .all(|(_, _, link)| *link == ChannelLink::Skip("not supported")));
     }
 
+    /// A sink that ignores everything, for tests that only need a
+    /// `PlaybackOutput::Sink`.
+    struct NullPlaybackSink;
+
+    impl crate::playback_sink::PlaybackSink for NullPlaybackSink {
+        fn on_opus_packet(&self, _packet: &[u8], _samples_in_packet: u32) {}
+    }
+
     #[test]
     fn playback_follows_the_audio_feature() {
-        let plan = plan_channel_links(&[(ChannelType::Playback, 0), (ChannelType::Cursor, 0)]);
+        let list = [(ChannelType::Playback, 0), (ChannelType::Cursor, 0)];
+
+        // Local output needs cpal, so it links only with `audio`.
+        let plan = plan_channel_links(&list, &PlaybackOutput::Local);
         let expected = if cfg!(feature = "audio") {
             ChannelLink::Open
         } else {
@@ -1336,11 +1360,19 @@ mod tests {
         };
         assert_eq!(plan[0].2, expected);
         assert_eq!(plan[1].2, ChannelLink::Open);
+
+        // A sink needs no device, so it links in every build.
+        let plan = plan_channel_links(&list, &PlaybackOutput::Sink(Arc::new(NullPlaybackSink)));
+        assert_eq!(plan[0].2, ChannelLink::Open);
+        assert_eq!(plan[1].2, ChannelLink::Open);
     }
 
     #[test]
     fn usbredir_follows_the_usbredir_feature() {
-        let plan = plan_channel_links(&[(ChannelType::Usbredir, 0), (ChannelType::Cursor, 0)]);
+        let plan = plan_channel_links(
+            &[(ChannelType::Usbredir, 0), (ChannelType::Cursor, 0)],
+            &PlaybackOutput::Local,
+        );
         let expected = if cfg!(feature = "usbredir") {
             ChannelLink::Open
         } else {
@@ -1352,7 +1384,10 @@ mod tests {
 
     #[test]
     fn webdav_follows_the_webdav_feature() {
-        let plan = plan_channel_links(&[(ChannelType::Webdav, 0), (ChannelType::Cursor, 0)]);
+        let plan = plan_channel_links(
+            &[(ChannelType::Webdav, 0), (ChannelType::Cursor, 0)],
+            &PlaybackOutput::Local,
+        );
         let expected = if cfg!(feature = "webdav") {
             ChannelLink::Open
         } else {

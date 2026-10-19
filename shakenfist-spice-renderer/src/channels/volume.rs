@@ -5,9 +5,8 @@
 //! only carries two atomics.  Keeping it out of `playback.rs`
 //! means callers (`session::run_connection` takes an
 //! `Arc<VolumeControl>` regardless of audio mode) can always
-//! construct it, and the rest of the audio plumbing
-//! (`PlaybackChannel`, cpal stream, opus decoder) gates cleanly
-//! behind the `audio` feature.
+//! construct it, and the local output it applies to (the cpal
+//! stream) gates cleanly behind the `audio` feature.
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;

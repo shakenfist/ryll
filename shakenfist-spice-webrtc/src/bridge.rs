@@ -1262,7 +1262,7 @@ impl WebrtcBridge {
     ///
     /// The caller is responsible for plugging the corresponding
     /// `mpsc::Sender` into the playback channel's
-    /// `OpusPacketSink`. The pump exits cleanly when the channel
+    /// `PlaybackSink`. The pump exits cleanly when the channel
     /// closes (every sender dropped, e.g. when the active bridge
     /// is replaced by a fresh `/offer` and the previous viewer's
     /// sender is dropped).

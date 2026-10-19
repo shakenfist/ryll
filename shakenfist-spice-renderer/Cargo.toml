@@ -22,9 +22,12 @@ workspace = true
 # gate. (The protocol crate's TLS stack is not among them.)
 default = ["audio", "usbredir", "webdav", "encoder", "h264-decode", "mozjpeg"]
 
-# `audio` pulls in the cpal/opus/rtrb playback stack and the
-# `channels::playback` module that depends on them.
-audio = ["dep:cpal", "dep:opus-decoder", "dep:rtrb"]
+# `audio` is local audio output: the cpal thread that plays the
+# guest's audio through this host's default device, and the rtrb ring
+# that feeds it. The playback channel and its Opus decoder are always
+# built, so a `PlaybackOutput::Sink` session gets the guest's audio
+# without this feature; only `PlaybackOutput::Local` needs it.
+audio = ["dep:cpal", "dep:rtrb"]
 
 # `usbredir` is the usbredir channel (`channels::usbredir`) and the
 # USB device backends in `usb` (physical passthrough via nusb on
@@ -64,14 +67,16 @@ digest-decode = ["dep:shakenfist-visual-digest"]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
-# Audio playback. A dedicated audio thread owns the cpal stream
+# Local audio output. A dedicated audio thread owns the cpal stream
 # so it never needs to be Send. The rtrb ring buffer provides
-# lock-free sample transfer from the tokio network task. All
-# three live behind the default-on `audio` feature so a slim
-# build (`--no-default-features`) does not link them.
+# lock-free sample transfer from the tokio network task. Both live
+# behind the default-on `audio` feature so a slim build
+# (`--no-default-features`) does not link them (cpal pulls in ALSA).
 cpal = { version = "0.18", optional = true }
-opus-decoder = { version = "0.1", optional = true }
 rtrb = { version = "0.4", optional = true }
+
+# Opus decode for the playback channel, in every build. Pure Rust.
+opus-decoder = "0.1"
 
 # Logging
 tracing = "0.1"

@@ -89,7 +89,7 @@ pub struct WebState {
     pub surface_mirror: Arc<Mutex<SurfaceMirror>>,
     /// Slot holding the active bridge's audio-pump
     /// `mpsc::Sender`. The renderer-side
-    /// [`crate::web::audio::WebOpusSink`] reads from this slot
+    /// [`crate::web::audio::WebPlaybackSink`] reads from this slot
     /// on every Opus DATA packet; the signalling handler writes
     /// a fresh `Sender` into the slot at every `/offer`. `None`
     /// outside web-with-SPICE sessions (e.g. unit tests of the

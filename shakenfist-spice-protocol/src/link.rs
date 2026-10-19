@@ -708,6 +708,7 @@ pub fn default_channel_caps(channel_type: ChannelType) -> u32 {
         ChannelType::Display => capabilities::DEFAULT_DISPLAY,
         ChannelType::Usbredir => capabilities::DEFAULT_SPICEVMC,
         ChannelType::Main => capabilities::DEFAULT_MAIN,
+        ChannelType::Playback => capabilities::DEFAULT_PLAYBACK,
         _ => capabilities::DEFAULT_OTHER,
     }
 }
@@ -1997,13 +1998,16 @@ mod tests {
             0,
             "main must advertise AGENT_CONNECTED_TOKENS (#452)"
         );
-        // The other channels keep the word they advertised before #452:
-        // bit 2 is PLAYBACK_CAP_LATENCY on playback, so it must not leak.
-        for other in [
-            ChannelType::Inputs,
-            ChannelType::Cursor,
-            ChannelType::Playback,
-        ] {
+        // Playback offers Opus alone: not the CELT bit it once borrowed
+        // from DEFAULT_OTHER, and not bit 2 (PLAYBACK_CAP_LATENCY), which
+        // DEFAULT_MAIN sets for AGENT_CONNECTED_TOKENS (#452).
+        assert_eq!(
+            default_channel_caps(ChannelType::Playback),
+            capabilities::DEFAULT_PLAYBACK
+        );
+        assert_eq!(capabilities::DEFAULT_PLAYBACK, capabilities::PLAYBACK_OPUS);
+        // The other channels keep the word they advertised before #452.
+        for other in [ChannelType::Inputs, ChannelType::Cursor] {
             assert_eq!(default_channel_caps(other), capabilities::DEFAULT_OTHER);
         }
         assert_eq!(capabilities::DEFAULT_OTHER, 0b1001);

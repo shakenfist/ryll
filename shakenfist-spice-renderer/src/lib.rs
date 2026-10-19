@@ -8,7 +8,6 @@
 //! few host-policy concerns (Ctrl+C handling, the in-app
 //! notification store, pedantic bug-report registration).
 
-pub mod audio_sink;
 pub mod byte_counter;
 pub mod capture_sink;
 pub mod channels;
@@ -28,6 +27,7 @@ pub mod mm_clock;
 pub mod notification;
 pub mod notification_sink;
 pub mod opcode_counters;
+pub mod playback_sink;
 pub mod pointer;
 pub mod session;
 pub mod session_state;
@@ -39,7 +39,6 @@ pub mod usb;
 #[cfg(feature = "webdav")]
 pub mod webdav;
 
-pub use audio_sink::OpusPacketSink;
 pub use byte_counter::ByteCounter;
 pub use capture_sink::CaptureSink;
 pub use channels::inputs::make_scancode;
@@ -60,6 +59,7 @@ pub use mm_clock::MmClock;
 pub use notification::{NotificationEntry, NotificationSource};
 pub use notification_sink::NotificationSink;
 pub use opcode_counters::{OpcodeCounters, OpcodeSnapshotTarget};
+pub use playback_sink::{PlaybackFormat, PlaybackOutput, PlaybackSink};
 pub use pointer::PointerTranslator;
 #[cfg(feature = "digest-decode")]
 pub use session::spawn_digest_poller;

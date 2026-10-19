@@ -319,7 +319,7 @@ pub async fn post_offer(
     let _video_handle = bridge.spawn_video_pump(frame_rx);
     // Real Opus passthrough from the SPICE playback channel. Build a
     // fresh per-viewer mpsc and plug the Sender into the shared slot
-    // the renderer-side `WebOpusSink` reads from. The previous
+    // the renderer-side `WebPlaybackSink` reads from. The previous
     // bridge's Sender is replaced atomically; that drops the
     // previous audio pump's `Receiver` and causes that pump to exit
     // cleanly.

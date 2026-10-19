@@ -700,11 +700,13 @@ fn run_web(
         let surface_mirror = event_bus.mirror();
 
         // Build the Opus passthrough sink. The sink is handed to
-        // `run_connection` so the playback channel taps every Opus packet
-        // into it; the matching slot is stashed in `WebState` so each
-        // `/offer` can plug a fresh Sender in for its audio pump.
-        let (opus_sink, active_opus_tx) = crate::web::audio::WebOpusSink::new();
-        let opus_sink_dyn: Arc<dyn shakenfist_spice_renderer::OpusPacketSink> = opus_sink;
+        // `run_connection` as the session's playback output, so the
+        // playback channel taps every Opus packet into it and opens no
+        // audio device on this host; the matching slot is stashed in
+        // `WebState` so each `/offer` can plug a fresh Sender in for its
+        // audio pump.
+        let (playback_sink, active_opus_tx) = crate::web::audio::WebPlaybackSink::new();
+        let playback = shakenfist_spice_renderer::PlaybackOutput::Sink(playback_sink);
 
         // Cancel flag bridged from the process-global
         // `SHUTDOWN_REQUESTED`. Same shape as the headless path.
@@ -779,7 +781,7 @@ fn run_web(
                 log_config,
                 connection_cancel,
                 clipboard_for_conn,
-                /* opus_sink */ Some(opus_sink_dyn),
+                playback,
                 h264,
                 image_cache_cap_bytes,
                 glz_dictionary_cap_bytes,
