@@ -28,6 +28,7 @@ pub mod mm_clock;
 pub mod notification;
 pub mod notification_sink;
 pub mod opcode_counters;
+pub mod pointer;
 pub mod session;
 pub mod session_state;
 pub mod snapshots;
@@ -55,6 +56,7 @@ pub use mm_clock::MmClock;
 pub use notification::{NotificationEntry, NotificationSource};
 pub use notification_sink::NotificationSink;
 pub use opcode_counters::{OpcodeCounters, OpcodeSnapshotTarget};
+pub use pointer::PointerTranslator;
 #[cfg(feature = "digest-decode")]
 pub use session::spawn_digest_poller;
 pub use session::{run_connection, run_headless};
