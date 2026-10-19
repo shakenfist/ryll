@@ -10,6 +10,7 @@
 //! The settings here follow what openh264 0.9.8 does, rather than
 //! what its crate's builder suggests; the comments on each say why.
 
+use crate::even_dimensions;
 use anyhow::{anyhow, bail, Result};
 use openh264::encoder::{
     BitRate, Encoder, EncoderConfig, FrameRate, FrameType, IntraFramePeriod, Profile, QpRange,
@@ -71,17 +72,6 @@ pub fn target_bitrate_bps(width: u32, height: u32, fps: u32) -> u32 {
     let pixels_per_second = (width as u64) * (height as u64) * (fps as u64);
     let bps = pixels_per_second * MILLIBITS_PER_PIXEL_PER_FRAME / 1000;
     bps.clamp(MIN_BITRATE_BPS as u64, MAX_BITRATE_BPS as u64) as u32
-}
-
-/// Round a size down to the even dimensions H.264 requires.
-///
-/// 4:2:0 chroma subsampling halves both axes, so both must be even.
-/// [`H264Encoder::encode`] accepts an image of an odd size whose
-/// rounded size is the encoder's, and drops its last row or column,
-/// so a producer of odd frames rounds with this when it picks the
-/// encoder's size, and compares sizes after rounding.
-pub fn even_dimensions(width: u32, height: u32) -> (u32, u32) {
-    (width & !1, height & !1)
 }
 
 /// The number of slices [`H264Config::new`] chooses: four, or fewer

@@ -33,7 +33,6 @@ use tokio::sync::{mpsc, Notify};
 use tracing::{info, warn};
 
 use crate::notification::NotificationEntry;
-use crate::usb::UsbDeviceInfo;
 use shakenfist_spice_protocol::ChannelType;
 
 /// A caller-chosen correlation token carried in every control-socket
@@ -447,10 +446,6 @@ pub enum ChannelEvent {
     /// A USB device connection attempt failed
     UsbConnectFailed(String),
 
-    /// Available USB devices changed (enumeration result)
-    #[allow(dead_code)]
-    UsbDevicesChanged(Vec<UsbDeviceInfo>),
-
     /// A WebDAV channel connected successfully
     WebdavChannelReady,
 
@@ -598,7 +593,6 @@ impl ChannelEvent {
             ChannelEvent::UsbDeviceConnected { .. } => "UsbDeviceConnected",
             ChannelEvent::UsbDeviceDisconnected => "UsbDeviceDisconnected",
             ChannelEvent::UsbConnectFailed { .. } => "UsbConnectFailed",
-            ChannelEvent::UsbDevicesChanged { .. } => "UsbDevicesChanged",
             ChannelEvent::WebdavChannelReady => "WebdavChannelReady",
             ChannelEvent::WebdavSharingStarted { .. } => "WebdavSharingStarted",
             ChannelEvent::WebdavSharingStopped => "WebdavSharingStopped",

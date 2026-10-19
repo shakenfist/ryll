@@ -14,7 +14,10 @@
 mod frame_source;
 mod h264;
 mod task;
+mod types;
 
 pub use frame_source::{FrameRef, FrameSource, RealFrameSource, SyntheticFrameSource};
-pub use h264::{even_dimensions, EncodedFrame, H264Encoder};
-pub use task::{EncoderControl, EncoderTask};
+pub use h264::H264Encoder;
+pub use shakenfist_spice_compression::even_dimensions;
+pub use task::EncoderTask;
+pub use types::{EncodedFrame, EncoderControl};

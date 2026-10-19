@@ -7,7 +7,10 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 
 use super::frame_source::FrameSource;
-use super::h264::{even_dimensions, EncodedFrame, H264Encoder};
+use shakenfist_spice_compression::even_dimensions;
+
+use super::h264::H264Encoder;
+use super::types::{EncodedFrame, EncoderControl};
 
 /// How many consecutive failed frames the task tolerates before it
 /// gives up and returns the error.
@@ -19,17 +22,6 @@ use super::h264::{even_dimensions, EncodedFrame, H264Encoder};
 /// genuinely broken encoder still surfaces as an error rather than as
 /// a silently stalled picture.
 const MAX_CONSECUTIVE_ERRORS: u32 = 30;
-
-/// Control messages sent to a running [`EncoderTask`].
-#[derive(Debug)]
-pub enum EncoderControl {
-    /// Force the next encoded frame to be an IDR keyframe. Sent
-    /// whenever a new viewer attaches.
-    RequestKeyframe,
-    /// Stop the task. The task returns `Ok(())` after the
-    /// current encode (if any) completes.
-    Stop,
-}
 
 /// Async driver around an [`H264Encoder`]. Spawned via
 /// [`EncoderTask::spawn`], which returns a [`tokio::task::JoinHandle`]

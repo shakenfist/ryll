@@ -30,18 +30,6 @@ digest-decode = ["dep:shakenfist-visual-digest"]
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
-tokio-rustls = "0.26"
-rustls-pemfile = "2"
-webpki-roots = "1.0"
-
-# Binary protocol handling
-bytes = "1"
-byteorder = "1"
-
-# Cryptography for SPICE auth
-rsa = "0.9"
-sha1 = "0.10"
-rand = "0.8"
 
 # Audio playback. A dedicated audio thread owns the cpal stream
 # so it never needs to be Send. The rtrb ring buffer provides
@@ -73,30 +61,21 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Error handling
-thiserror = "2"
 anyhow = "1"
-
-# Async channels
-async-channel = "2"
 
 # CancellationToken for coordinated task shutdown (control socket)
 tokio-util = "0.7"
 
-# TCP keepalive configuration (matches spice-gtk behaviour)
+# Control socket bind (control/server.rs)
 socket2 = { version = "0.6", features = ["all"] }
-
-# USB device access (pure Rust, no libusb)
-nusb = "0.2"
 
 # Zlib decompression for SPICE ZLIB_GLZ_RGB (type 107), used in
 # the display channel
 flate2 = "1"
 
-# JPEG decoding for SPICE JPEG image type. The `jpeg-decoder` crate
-# has moved to `shakenfist-spice-compression`, where it backs
-# `JpegDecoderRsDecoder`. The `image` crate is still needed for its
-# own JPEG-adjacent uses elsewhere in the renderer, plus the `png`
-# feature for the control socket's `screenshot` verb.
+# PNG encoding for the control socket's `screenshot` verb, and JPEG
+# fixtures in the display channel's tests. SPICE JPEG decoding lives
+# in `shakenfist-spice-compression`.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 # Base64 encoding for the control socket's `screenshot` verb (3e):
@@ -118,8 +97,6 @@ dav-server = { version = "0.11", default-features = false, features = ["localfs"
 # HTTP framing for WebDAV byte-stream transport
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
-http = "1"
-http-body-util = "0.1"
 
 # Runtime metrics (src/metrics.rs) are the only libc consumer:
 # sysconf(_SC_CLK_TCK) on Linux, and the Mach task/thread FFI on
@@ -128,7 +105,13 @@ http-body-util = "0.1"
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 libc = "0.2"
 
+# USB device access (pure Rust, no libusb). Physical passthrough is
+# Linux-only; see usb/mod.rs.
+[target.'cfg(target_os = "linux")'.dependencies]
+nusb = "0.2"
+
 [dev-dependencies]
+bytes = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
 

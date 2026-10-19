@@ -739,15 +739,11 @@ pub async fn run_headless(
     let session_state = SessionState::new();
     let session_state_rx = session_state.subscribe();
 
-    // Live pixel store rebuilt from the broadcast bus.  Constructed
-    // unconditionally so the control socket's `screenshot` verb and
-    // `status` surface list always have a coherent source; the apply
-    // task below subscribes to the broadcast bus and pipes every
-    // display-bearing `ChannelEvent` through `SurfaceMirror::apply_event`.
-    // This is the same wrap pattern `run_web` uses in `ryll/src/main.rs`
-    // — both code paths call the same `apply_event` helper directly on
-    // the mirror, so the apply logic itself is shared without an extra
-    // indirection.
+    // Live pixel store the event bus keeps up to date, for the control
+    // socket's `screenshot` verb and `status` surface list and for the
+    // digest poller.  Both are Unix- or feature-only, so the handle is
+    // too; the bus applies events to the mirror regardless.
+    #[cfg(any(unix, feature = "digest-decode"))]
     let surface_mirror = event_bus.mirror();
 
     // Watch the primary surface for a QR-encoded visual digest.  See
