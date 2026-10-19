@@ -1,70 +1,114 @@
+# Release workflow for Ryll
+#
+# Triggers on version tags (v*), which tools/tag-release.sh pushes once
+# the version bump from tools/propose-release.sh has merged through the
+# merge queue. Nothing is signed or published unless CI passed on the
+# tagged commit and a reviewer approves the 'release' environment.
+#
+# Every job outside the marked build section is the same in every Rust
+# repository. The build section holds ryll's own build and publish jobs.
+# See docs/releasing.md for the release process.
+#
+# Template source: shakenfist/development/templates/release-automation-rust/
+
 name: Release
+
+permissions: {}
 
 on:
   push:
     tags:
       - 'v*'
 
-permissions: {}
+  # A dry run of the build, on any ref: it runs check-version and the
+  # build jobs, and every job with an effect outside the run is skipped.
+  workflow_dispatch:
+
+# One run per ref at a time, never cancelled part way: a release that has
+# signed its tag or begun publishing must finish.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
+  # Fails the release unless the named CI workflows succeeded on the
+  # tagged commit, so that nothing is signed or published from code CI
+  # did not pass. It carries the same push and tag guard as the
+  # publishing jobs, so a workflow_dispatch dry run skips it and still
+  # exercises the build. See docs/releasing.md for what counts as CI, and
+  # https://github.com/shakenfist/actions/blob/main/docs/actions.md
+  # (the require-ci-success section) for how the gate works.
+  ci-gate:
+    name: Require CI success on the tagged commit
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: [self-hosted, static]
+
+    permissions:
+      actions: read
+      contents: read
+
+    steps:
+      - name: Require CI success
+        uses: shakenfist/actions/require-ci-success@main
+        # A few API calls per commit, at most 21 commits, and up to
+        # five pages of the default branch's history.
+        timeout-minutes: 5
+        with:
+          workflows: |
+            ci.yml
+
+  # The root of the build graph: every other job needs this one, directly
+  # or through a job that does, so the gate sits upstream of all of them.
+  # A skipped ci-gate would otherwise skip this job too, so the guard lets
+  # a skipped gate through, but only on a run that publishes nothing. A
+  # tag push always runs the gate, and this job then needs its success. A
+  # workflow_dispatch skips the gate by design, and never reaches a
+  # publishing job. The ${{ }} wrapper is required: YAML reads a bare
+  # value starting with "!" as a tag.
+  #
+  # The tag must name the version the tree carries, and Cargo.lock must
+  # agree with it, because the release builds from the lockfile. All six
+  # crates inherit [workspace.package]'s version, so the root Cargo.toml
+  # is authoritative. On a dry run with no tag there is nothing to compare
+  # with, and the script checks only that the two files agree.
   check-version:
-    name: Verify version matches tag
+    name: Check the version matches the tag
+    needs: ci-gate
+    if: >-
+      ${{ !cancelled() && (needs.ci-gate.result == 'success' ||
+      (github.event_name != 'push' && needs.ci-gate.result == 'skipped')) }}
     runs-on: [self-hosted, static]
     timeout-minutes: 10
+
     permissions:
       contents: read
-      issues: write
+
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
-      - name: Check version consistency
-        id: check
-        run: |
-          TAG_NAME="${GITHUB_REF#refs/tags/}"
-          EXPECTED="${TAG_NAME#v}"
-          # All six crates inherit from [workspace.package].version,
-          # so a single check on the root Cargo.toml is authoritative.
-          ACTUAL=$(awk '
-            /^\[workspace\.package\]/ { in_wp=1; next }
-            /^\[/ { in_wp=0 }
-            in_wp && /^version = / {
-              gsub(/version = "|"/, "")
-              print
-              exit
-            }
-          ' Cargo.toml)
-          echo "Tag: ${TAG_NAME}"
-          echo "Expected version: ${EXPECTED}"
-          echo "Workspace version: ${ACTUAL}"
+      - name: Check the version
+        run: tools/release-version.sh check "${GITHUB_REF}"
 
-          if [ "${ACTUAL}" != "${EXPECTED}" ]; then
-            {
-              echo "mismatch=true"
-              echo "tag=${TAG_NAME}"
-              echo "expected=${EXPECTED}"
-              echo "actual=${ACTUAL}"
-            } >> "$GITHUB_OUTPUT"
-            echo "::error::Version mismatch: tag ${TAG_NAME} expects ${EXPECTED} but workspace Cargo.toml has ${ACTUAL}"
-            exit 1
-          fi
-
-      - name: File issue on version mismatch
-        if: failure() && steps.check.outputs.mismatch == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh issue create \
-            --title "Release ${{ steps.check.outputs.tag }}: workspace version mismatch" \
-            --label "bug" \
-            --body "The release workflow for tag \`${{ steps.check.outputs.tag }}\` failed because the workspace version does not match the tag.
-
-          - **Tag expects:** ${{ steps.check.outputs.expected }}
-          - **[workspace.package].version has:** ${{ steps.check.outputs.actual }}
-
-          To fix: update \`version\` in \`[workspace.package]\` in the root \`Cargo.toml\`, commit, and re-tag. Normally this is done via \`make propose-release X.Y.Z\` then \`make tag-release X.Y.Z\`.
-
-          See the [failed workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details."
+  # ---------------------------------------------------------------------
+  # BEGIN repository build and publish jobs.
+  #
+  # The constraints on this section, from the template:
+  #
+  # - every build job needs check-version, directly or through another
+  #   build job, and carries no if: of its own that would run it after a
+  #   dependency failed or was skipped;
+  # - every build job is listed in sign-tag's needs, so the tag is never
+  #   signed while a build is running or after one has failed;
+  # - an artifact whose name starts with release- is one github-release
+  #   attaches to the GitHub release, and no other artifact is;
+  # - a job that builds a Python wheel runs check-dist on it before
+  #   uploading it;
+  # - every publishing job needs sign-tag, carries the push and tag
+  #   guard, and holds only the permissions its registry needs.
+  # ---------------------------------------------------------------------
 
   # Linux x86_64 release builds run on a self-hosted runner inside
   # the devcontainer via the Makefile, so this job's steps differ
@@ -170,11 +214,12 @@ jobs:
         with:
           key: release-${{ matrix.target }}
 
-      - name: Get version from tag
+      # The version the tree carries, which check-version has already
+      # matched against the tag on a release. A workflow_dispatch dry run
+      # has no tag, and this still names its tarball and zip sensibly.
+      - name: Get version
         shell: bash
-        run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+        run: echo "VERSION=$(tools/release-version.sh get)" >> "$GITHUB_ENV"
 
       # On Linux we install libopus-dev so audiopus_sys (the opus crate)
       # dynamic-links to libopus.so.0; cargo-deb's $auto then records
@@ -296,44 +341,24 @@ jobs:
       - name: Build wheel
         run: tools/build-ryll-wheel.sh ${{ matrix.arch }}
 
+      # Stops the release before anything is signed if the wheel carries
+      # a test directory, or nothing outside its metadata.
+      - name: Check the wheel contents
+        timeout-minutes: 2
+        uses: shakenfist/actions/check-dist@main
+        with:
+          path: target/wheels/
+
       - name: Upload ryll wheel artifact
         uses: actions/upload-artifact@v7
         with:
           name: ryll-wheel-${{ matrix.arch }}
           path: target/wheels/*.whl
 
-  # Keyless Sigstore-sign the release tag, gated on the `release`
-  # environment's manual approval, mirroring kerbside's sign-tag job.
-  # EVERY publishing job below needs this one, so the (approved) signed
-  # tag exists before anything is published -- crates.io, the GitHub
-  # release, and the ryll PyPI wheels alike. Gate on all artifact
-  # builds so signing never becomes eligible (and the tag is never
-  # force-pushed) while a build is still running or has failed.
-  sign-tag:
-    name: Sign release tag with Sigstore
-    needs: [build, build-linux, build-ryll-wheels]
-    # audit-ok: github-hosted-runner -- ephemeral runner for tag signing; installs gitsign via sudo and writes global git config, so it must be throwaway rather than the shared self-hosted pool
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    environment: release
-    permissions:
-      contents: write
-      id-token: write
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - name: Sign and push release tag
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: >-
-          tools/sign-release-tag.sh
-          "${GITHUB_REF#refs/tags/}" "${GITHUB_SHA}"
-
   publish-crates:
     name: Publish workspace crates to crates.io
     needs: [build, build-linux, sign-tag]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: [self-hosted, vm, debian-13-docker, l]
     timeout-minutes: 120
     permissions:
@@ -357,35 +382,6 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: make publish-crates
 
-  github-release:
-    name: Create GitHub Release
-    needs: [build, build-linux, sign-tag]
-    runs-on: [self-hosted, static]
-    timeout-minutes: 15
-    permissions:
-      contents: write
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v8
-        with:
-          pattern: release-*
-          merge-multiple: true
-
-      - name: List artifacts
-        run: ls -la
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          generate_release_notes: true
-          files: |
-            *.deb
-            *.rpm
-            *.tar.gz
-            *.zip
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   # Publishes both per-arch wheels built by build-ryll-wheels to PyPI
   # via a Trusted Publisher (OIDC `id-token: write`), the same token-free
   # auth mechanism kerbside's release.yml uses for
@@ -405,6 +401,7 @@ jobs:
   publish-ryll-pypi:
     name: Publish ryll to PyPI
     needs: [build-ryll-wheels, github-release, sign-tag]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     # pypa/gh-action-pypi-publish is a Docker container action, so it must
     # run on a Docker-capable runner (matching publish-crates), not the
     # static runner used by the JS-action jobs (github-release,
@@ -436,6 +433,7 @@ jobs:
   update-homebrew:
     name: Update Homebrew tap
     needs: github-release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: [self-hosted, static]
     timeout-minutes: 10
     continue-on-error: true
@@ -470,3 +468,86 @@ jobs:
           git diff --cached --quiet && echo "No changes to commit" && exit 0
           git commit -m "Update ryll to ${VERSION}"
           git push
+
+  # ---------------------------------------------------------------------
+  # END repository build and publish jobs.
+  # ---------------------------------------------------------------------
+
+  # Keyless Sigstore signing of the tag, gated on approval of the release
+  # environment. Every publishing job needs this one, so nothing is
+  # published until a reviewer approves, and it needs every build job, so
+  # the tag is never re-pushed while a build is running or after one has
+  # failed.
+  #
+  # The event is tested as well as the ref because a dispatch can be
+  # aimed at a tag: the ref test alone passes there, and the run re-signs
+  # and force-pushes a tag that already exists, rewriting a signed object
+  # someone may already have verified. Nothing is lost by requiring push:
+  # re-running a failed release goes through "Re-run jobs", which keeps
+  # the original push event.
+  sign-tag:
+    name: Sign release tag with Sigstore
+    needs: [build, build-linux, build-ryll-wheels]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    # audit-ok: github-hosted-runner -- ephemeral runner for tag signing; installs gitsign via sudo and writes global git config, so it must be throwaway rather than the shared self-hosted pool
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: release
+
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Sign and push the release tag
+        run: tools/sign-release-tag.sh "${GITHUB_REF_NAME}" "${GITHUB_SHA}"
+
+  # This job does not check out, and does not need to:
+  # action-gh-release is a JavaScript action running on the host, so it
+  # reads an absolute path happily. The static pool persists between jobs
+  # and download-artifact extracts into its target rather than replacing
+  # it, so the artefacts go to the per-job runner.temp, where nothing an
+  # earlier job left can join the release.
+  #
+  # fail_on_unmatched_files is the other half: action-gh-release treats a
+  # glob that matches nothing as a warning, so without it a release that
+  # attached no files at all still reported success. Each of the four
+  # globs below must match, which every release does: build-linux and
+  # the build matrix's Linux leg give the .deb and .rpm files, and the
+  # macOS and Windows legs the tarball and the zips.
+  github-release:
+    name: Create GitHub Release
+    needs: [build, build-linux, sign-tag]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: [self-hosted, static]
+    timeout-minutes: 15
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release artefacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: ${{ runner.temp }}/dist/
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la "${RUNNER_TEMP}/dist/"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          generate_release_notes: true
+          files: |
+            ${{ runner.temp }}/dist/*.deb
+            ${{ runner.temp }}/dist/*.rpm
+            ${{ runner.temp }}/dist/*.tar.gz
+            ${{ runner.temp }}/dist/*.zip
+          fail_on_unmatched_files: true
