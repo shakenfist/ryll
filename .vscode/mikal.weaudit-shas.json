@@ -61,6 +61,14 @@
       "sha": "91ff1783e6589e198ce5d14aab473112761b7ce2",
       "date": "2026-10-16"
     },
+    ".github/workflows/release.yml": {
+      "sha": "a42a5b84650dcd920936a3ddb045cc50359dd35f",
+      "date": "2026-10-14"
+    },
+    ".github/workflows/renovate.yml": {
+      "sha": "07e038ce4f1ba143eeb172e17e3d24c6e43e203a",
+      "date": "2026-10-20"
+    },
     ".github/workflows/supply-chain.yml": {
       "sha": "c855b8e116194dc365244a69aff28900f33023fe",
       "date": "2026-09-26"
@@ -153,6 +161,10 @@
       "sha": "25445d1d9682af06818915b0ec4b115bbdb9cd70",
       "date": "2026-10-16"
     },
+    "docs/web-mode-internals.md": {
+      "sha": "fa062fb0e86fb7e3746b4a545461f7090fa80462",
+      "date": "2026-10-17"
+    },
     "examples/control-socket-demo.py": {
       "sha": "1e39ea70aaa51526508b15997706449a378ce09a",
       "date": "2026-09-17"
@@ -165,9 +177,49 @@
       "sha": "b0803d125978073b943df8c6a6207879c41f5157",
       "date": "2026-07-26"
     },
+    "ryll/pyproject.toml": {
+      "sha": "0756b44f85a528b982c09d93a507ce33cea2545b",
+      "date": "2026-10-17"
+    },
+    "ryll/src/app/agent_state.rs": {
+      "sha": "fc4c47f87b07819e755aa39168ec5882e1ff93d6",
+      "date": "2026-10-17"
+    },
+    "ryll/src/app/notification_snapshots.rs": {
+      "sha": "76c732cf34ff7fb901bd042373fd699b8bac1d1f",
+      "date": "2026-10-17"
+    },
+    "ryll/src/app/reconnect.rs": {
+      "sha": "6134d2847cf1c6f82354b3da75c3bd4bc089330a",
+      "date": "2026-10-17"
+    },
+    "ryll/src/app/resize.rs": {
+      "sha": "255eff1eefba2e7cb50f981662e61cc77ca5a3d3",
+      "date": "2026-10-17"
+    },
+    "ryll/src/app/session_init.rs": {
+      "sha": "2bcdae8100211a0be291fc150461d53cc7f402d7",
+      "date": "2026-10-17"
+    },
+    "ryll/src/clipboard_arboard.rs": {
+      "sha": "058ef513df12824921acda54af01c9b1893f4197",
+      "date": "2026-10-17"
+    },
+    "ryll/src/config.rs": {
+      "sha": "09d56b68bbba4c6fe8491c42e60df11a79bf51cd",
+      "date": "2026-10-17"
+    },
+    "ryll/src/display_gui.rs": {
+      "sha": "e363fd1127f0d1201f7272ca4c3da13e2ec9a499",
+      "date": "2026-10-17"
+    },
     "ryll/src/notifications.rs": {
       "sha": "cfd7c5df773b57965f15ed83526d46f5d217b747",
       "date": "2026-09-18"
+    },
+    "ryll/src/settings.rs": {
+      "sha": "49e01fb6f74b107664fad7fa1de33dbb787a17c5",
+      "date": "2026-10-17"
     },
     "ryll/src/streaming_state.rs": {
       "sha": "97a8b835b632848460133f977573a678f8d6c395",
@@ -189,9 +241,17 @@
       "sha": "a8862ff70dcfa6aad31e68dd4a40370f4eb93e6c",
       "date": "2026-09-18"
     },
+    "ryll/src/web/control.rs": {
+      "sha": "3af3da761d733c9511595a43c84e5d140dea0291",
+      "date": "2026-10-17"
+    },
     "ryll/src/web/cursor.rs": {
       "sha": "d90e2349477fd7aabd3e8f299acb6b09821fb867",
       "date": "2026-08-18"
+    },
+    "ryll/src/web/inputs.rs": {
+      "sha": "bbcc0cc3affc07cbe70e4eda705ee1b8acfb7012",
+      "date": "2026-10-17"
     },
     "ryll/src/web/lifecycle.rs": {
       "sha": "edc8d98358c50af750f3c134e6adacbf63628a03",
@@ -200,6 +260,14 @@
     "ryll/src/web/mod.rs": {
       "sha": "b97b31c030126cfaf504fb20d972734c30d88b79",
       "date": "2026-08-18"
+    },
+    "ryll/src/web/server.rs": {
+      "sha": "0b90afff390bf578d357a07717ef4e92b8b63431",
+      "date": "2026-10-17"
+    },
+    "ryll/src/web/signalling.rs": {
+      "sha": "05919a0798565e73fffabf1c7fdebf28209bb8e3",
+      "date": "2026-10-17"
     },
     "scripts/check-rust.sh": {
       "sha": "6b134226743b654c751c04352cc9072f20476bb9",
@@ -576,66 +644,6 @@
     "tools/web-soak.sh": {
       "sha": "f320aa85e217ad9610042bd7c2ef62a03250cc22",
       "date": "2026-10-16"
-    },
-    "docs/web-mode-internals.md": {
-      "sha": "fa062fb0e86fb7e3746b4a545461f7090fa80462",
-      "date": "2026-10-17"
-    },
-    "ryll/pyproject.toml": {
-      "sha": "0756b44f85a528b982c09d93a507ce33cea2545b",
-      "date": "2026-10-17"
-    },
-    "ryll/src/app/agent_state.rs": {
-      "sha": "fc4c47f87b07819e755aa39168ec5882e1ff93d6",
-      "date": "2026-10-17"
-    },
-    "ryll/src/app/notification_snapshots.rs": {
-      "sha": "76c732cf34ff7fb901bd042373fd699b8bac1d1f",
-      "date": "2026-10-17"
-    },
-    "ryll/src/app/reconnect.rs": {
-      "sha": "6134d2847cf1c6f82354b3da75c3bd4bc089330a",
-      "date": "2026-10-17"
-    },
-    "ryll/src/app/resize.rs": {
-      "sha": "255eff1eefba2e7cb50f981662e61cc77ca5a3d3",
-      "date": "2026-10-17"
-    },
-    "ryll/src/app/session_init.rs": {
-      "sha": "2bcdae8100211a0be291fc150461d53cc7f402d7",
-      "date": "2026-10-17"
-    },
-    "ryll/src/clipboard_arboard.rs": {
-      "sha": "058ef513df12824921acda54af01c9b1893f4197",
-      "date": "2026-10-17"
-    },
-    "ryll/src/config.rs": {
-      "sha": "09d56b68bbba4c6fe8491c42e60df11a79bf51cd",
-      "date": "2026-10-17"
-    },
-    "ryll/src/display_gui.rs": {
-      "sha": "e363fd1127f0d1201f7272ca4c3da13e2ec9a499",
-      "date": "2026-10-17"
-    },
-    "ryll/src/settings.rs": {
-      "sha": "49e01fb6f74b107664fad7fa1de33dbb787a17c5",
-      "date": "2026-10-17"
-    },
-    "ryll/src/web/control.rs": {
-      "sha": "3af3da761d733c9511595a43c84e5d140dea0291",
-      "date": "2026-10-17"
-    },
-    "ryll/src/web/inputs.rs": {
-      "sha": "bbcc0cc3affc07cbe70e4eda705ee1b8acfb7012",
-      "date": "2026-10-17"
-    },
-    "ryll/src/web/server.rs": {
-      "sha": "0b90afff390bf578d357a07717ef4e92b8b63431",
-      "date": "2026-10-17"
-    },
-    "ryll/src/web/signalling.rs": {
-      "sha": "05919a0798565e73fffabf1c7fdebf28209bb8e3",
-      "date": "2026-10-17"
     }
   }
 }
