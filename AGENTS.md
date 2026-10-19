@@ -239,6 +239,9 @@ that needs a GUI, audio, capture or digest type, **gate the import at
 the use site** — an ungated import breaks the no-default-features
 build, which only some CI lanes exercise. The feature list and what
 each pulls in is in [`docs/development.md`](docs/development.md).
+`shakenfist-spice-renderer` has its own feature set with the same
+rule, and `make lint` builds it with `--no-default-features` to catch
+an ungated use.
 
 ## Process documents
 
