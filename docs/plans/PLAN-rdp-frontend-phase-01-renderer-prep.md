@@ -945,16 +945,16 @@ Filled in by the management session as steps land.
   webpki-roots and async-channel (per the survey; `http::`
   hits in `ryll/src` are `axum::http`). Pruning them does not
   affect a renderer consumer, but tidies ryll's own tree.
-- **Web mouse wheel** (survey item 9): add a wheel message to
+- **Web mouse wheel** (#594, survey item 9): add a wheel message to
   `app.js` and the relay, through `PointerTranslator::wheel`.
-- **GUI server-mode pointer grab.** In server mouse mode the GUI
+- **GUI server-mode pointer grab** (#592). In server mouse mode the GUI
   sends relative deltas from host hover positions without grabbing
   or warping the pointer, so guest acceleration makes the two
   cursors drift until parts of the guest display cannot be reached
   (see *Results*). spice-gtk grabs the pointer in server mode.
   This predates the phase; the RDP frontend will meet the same
   problem in server mode.
-- **The protocol crate's TLS provider.**
+- **The protocol crate's TLS provider** (#593).
   `shakenfist-spice-protocol` depends on `tokio-rustls` with
   default features, which pulls in aws-lc-rs and `aws-lc-sys` (a
   cmake C build), while ryll itself installs `ring` as its rustls
