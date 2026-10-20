@@ -1,139 +1,179 @@
 #!/bin/bash
 #
-# Tag and push a release of the ryll workspace.
+# Tag a release: the second of a release's two stages, run after the
+# release-X.Y.Z pull request that tools/propose-release.sh opened has
+# merged through the queue.
 #
-# Meant to be run after the release-X.Y.Z PR produced by
-# tools/propose-release.sh has been reviewed and merged into develop.
-# Fetches origin/develop, verifies its tip has the expected workspace
-# version, and (after confirmation) creates an annotated tag vX.Y.Z
-# pointing at that commit and pushes it. Pushing the tag triggers
-# .github/workflows/release.yml, which builds binaries, publishes
-# the workspace crates to crates.io, creates a GitHub Release,
-# and updates the Homebrew tap.
+# Finds the commit that merged the release, checks that it is on the
+# default branch's first-parent history and carries version X.Y.Z, and,
+# after confirmation, creates an annotated tag vX.Y.Z there and pushes
+# it. The push starts .github/workflows/release.yml, which checks CI on
+# that commit, builds, waits for approval on the `release` environment,
+# signs the tag and publishes.
+#
+# The commit to tag is not the default branch's tip. Other pull requests
+# may have merged since, and what is tagged is what is built and
+# published, so it must be what was reviewed as the release: by default,
+# the first commit on the first-parent history that contains the commit
+# "Release X.Y.Z.", which with a merge queue is the queue's merge of the
+# release pull request. Give COMMIT to tag a later commit instead, for
+# example when the release gate refused the first one (see the
+# template's README for when that happens).
 #
 # Usage:
-#   tools/tag-release.sh VERSION
-#   make tag-release VERSION
+#   tools/tag-release.sh X.Y.Z [COMMIT]
 #
-# Example:
-#   make tag-release 0.1.4
+# Requirements on the host: git, and gh signed in (gh auth login).
 #
-# Requirements on the host:
-#   - gh CLI: for watching the release workflow
-#   - jq:     for parsing gh output
+# Template source: shakenfist/development/templates/release-automation-rust/
 
 set -euo pipefail
 
 err() { echo "error: $*" >&2; exit 1; }
 info() { echo "==> $*"; }
 
-# --- arg parsing ---
+# --- arguments ---
 
-[[ $# -eq 1 ]] || err "usage: $0 VERSION (e.g. 0.1.4)"
+[[ $# -ge 1 && $# -le 2 ]] || err "usage: $0 X.Y.Z [COMMIT] (e.g. 0.1.0)"
 VERSION="$1"
+REQUESTED="${2:-}"
+[[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || err "version must be X.Y.Z, got: ${VERSION}"
+TAG="v${VERSION}"
 
-[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
-    || err "version must be X.Y.Z, got: $VERSION"
-
-TAG="v$VERSION"
-
-# --- tool availability ---
-
-command -v gh >/dev/null || err "gh CLI not installed"
-command -v jq >/dev/null || err "jq not installed"
-
-# --- working directory must be repo root ---
+for tool in git gh; do
+    command -v "${tool}" >/dev/null || err "${tool} is not installed"
+done
 
 cd "$(dirname "$0")/.."
-[[ -f Cargo.toml ]] || err "could not find repo root"
+[[ -x tools/release-version.sh ]] || err "could not find the repository root"
 
-# --- fetch latest develop ---
+DEFAULT_BRANCH="$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)" \
+    || err "could not ask GitHub for the default branch; is gh signed in?"
+UPSTREAM="origin/${DEFAULT_BRANCH}"
 
-# Tags are force-updated from origin. The release workflow's sign-tag
-# job replaces each release tag with a Sigstore-signed one at the same
-# commit, so the clone that ran the previous tag-release still holds
-# the unsigned original, and a plain --tags fetch refuses to clobber
-# it. origin's release tags are the authoritative ones. Not --quiet,
-# which would hide a rejected ref and leave only the exit status.
+# --- fetch ---
+#
+# Tags are force-updated from origin. sign-tag replaces each release tag
+# with a Sigstore-signed one at the same commit, so the clone that tagged
+# the previous release still holds the unsigned original, and a plain
+# --tags fetch refuses to clobber it. origin's release tags are the
+# authoritative ones. Not --quiet, which would hide a rejected ref and
+# leave only the exit status.
+
 info "Fetching origin"
-git fetch origin develop '+refs/tags/*:refs/tags/*' \
+git fetch origin "${DEFAULT_BRANCH}" '+refs/tags/*:refs/tags/*' \
     || err "fetching origin failed; see git's output above"
 
-# --- tag must not already exist ---
-
-if git rev-parse "$TAG" >/dev/null 2>&1; then
-    err "tag $TAG already exists locally"
+if git rev-parse --verify --quiet "refs/tags/${TAG}" >/dev/null; then
+    err "tag ${TAG} already exists locally"
 fi
-if git ls-remote --tags --exit-code origin "$TAG" >/dev/null 2>&1; then
-    err "tag $TAG already exists on origin"
+if git ls-remote --tags --exit-code origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+    err "tag ${TAG} already exists on origin"
 fi
 
-# --- verify workspace version on origin/develop ---
+# --- the commit to tag ---
 
-info "Verifying [workspace.package].version on origin/develop"
-WORKSPACE_TOML=$(git show origin/develop:Cargo.toml)
-ACTUAL=$(printf '%s\n' "$WORKSPACE_TOML" | awk '
-    /^\[workspace\.package\]/ { in_wp=1; next }
-    /^\[/ { in_wp=0 }
-    in_wp && /^version *= */ {
-        gsub(/version *= *"|"/, "")
-        print
-        exit
-    }
-')
+if [[ -n "${REQUESTED}" ]]; then
+    TARGET_SHA="$(git rev-parse --verify --quiet "${REQUESTED}^{commit}")" \
+        || err "${REQUESTED} is not a commit"
+else
+    info "Finding the commit that merged release ${VERSION}"
+    # awk reads all of git log's output rather than exiting at the match:
+    # under pipefail, an early exit kills git log with SIGPIPE, and the
+    # whole pipeline then fails with status 141.
+    # A squash merge appends " (#N)" to the subject, so that suffix is
+    # accepted too, and nothing else.
+    RELEASE_SHA="$(git log "${UPSTREAM}" --format='%H%x09%s' \
+        | awk -F '\t' -v want="Release ${VERSION}." \
+            'found == "" && ($2 == want || (index($2, want " (#") == 1 && $2 ~ /\(#[0-9]+\)$/)) { found = $1 }
+             END { if (found != "") print found }')"
+    [[ -n "${RELEASE_SHA}" ]] \
+        || err "no commit 'Release ${VERSION}.' on ${UPSTREAM}. Has the release-${VERSION} pull request merged?"
+    TARGET_SHA=''
+    while read -r commit; do
+        if git merge-base --is-ancestor "${RELEASE_SHA}" "${commit}"; then
+            TARGET_SHA="${commit}"
+            break
+        fi
+    done < <(git rev-list --first-parent --reverse "${UPSTREAM}" --not "${RELEASE_SHA}^@")
+    [[ -n "${TARGET_SHA}" ]] || err "could not find where ${RELEASE_SHA} merged into ${UPSTREAM}"
+fi
 
-[[ -n "$ACTUAL" ]] \
-    || err "could not read [workspace.package].version from origin/develop"
-[[ "$ACTUAL" == "$VERSION" ]] \
-    || err "origin/develop workspace version is $ACTUAL, expected $VERSION. Has the release-$VERSION PR been merged?"
+# The release gate counts CI only on the default branch's first-parent
+# history, so a tag anywhere else is refused there, after the tag is
+# already public. Refuse it here instead. A commit reached only through a
+# merge's second parent is a pull request's own commit, which the queue
+# never ran on. grep reads to the end, not -q, for the same SIGPIPE
+# reason as above.
+git rev-list --first-parent "${UPSTREAM}" | grep -x "${TARGET_SHA}" >/dev/null \
+    || err "${TARGET_SHA} is not on ${UPSTREAM}'s first-parent history, so the release gate would refuse it"
+TARGET_SUBJECT="$(git log -1 --format=%s "${TARGET_SHA}")"
 
-TARGET_SHA=$(git rev-parse origin/develop)
-TARGET_SUBJECT=$(git log -1 --format=%s origin/develop)
+# --- the version there ---
 
-# --- confirmation ---
+info "Checking the version at ${TARGET_SHA}"
+tools/release-version.sh at "${TARGET_SHA}" "${VERSION}"
+
+LATER="$(git log --oneline --first-parent "${TARGET_SHA}..${UPSTREAM}")"
+
+# --- confirm ---
 
 echo
-echo "About to tag $TAG at $TARGET_SHA on origin/develop:"
-echo "  $TARGET_SUBJECT"
+echo "About to tag ${TAG} at ${TARGET_SHA}:"
+echo "  ${TARGET_SUBJECT}"
+if [[ -n "${LATER}" ]]; then
+    echo
+    echo "These merged into ${DEFAULT_BRANCH} after it, and are NOT in ${TAG}:"
+    while IFS= read -r line; do echo "  ${line}"; done <<< "${LATER}"
+fi
 echo
-echo "Pushing this tag will trigger the release workflow:"
-echo "  - build binaries on Linux / macOS / Windows"
-echo "  - wait for approval on the release environment (twice:"
-echo "    once for signing, once more for PyPI)"
-echo "  - publish every workspace crate to crates.io (IRREVERSIBLE)"
-echo "  - create the GitHub Release"
-echo "  - publish the ryll wheels to PyPI"
-echo "  - update the Homebrew tap"
+echo "Pushing the tag starts the release workflow, which:"
+echo "  - checks that CI passed on this commit, and stops if it did not;"
+echo "  - builds the release;"
+echo "  - waits for approval on the release environment, then signs the"
+echo "    tag and publishes. Most registries never accept a version"
+echo "    twice: once anything is published, this cannot be undone."
 echo
-read -rp "Create and push tag $TAG? [y/N] " REPLY
-[[ "$REPLY" =~ ^[Yy]$ ]] || {
+read -rp "Create and push tag ${TAG}? [y/N] " REPLY
+[[ "${REPLY}" =~ ^[Yy]$ ]] || {
     info "Aborted."
     exit 1
 }
 
-# --- tag and push ---
+info "Creating annotated tag ${TAG}"
+git tag -a "${TAG}" -m "Release ${VERSION}" "${TARGET_SHA}"
 
-info "Creating annotated tag $TAG"
-git tag -a "$TAG" -m "Release $VERSION" "$TARGET_SHA"
+info "Pushing ${TAG} (this starts the release workflow)"
+PUSHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+git push origin "refs/tags/${TAG}" || {
+    git tag -d "${TAG}" >/dev/null
+    err "pushing ${TAG} failed; the local tag was removed, so this can be re-run"
+}
 
-info "Pushing tag $TAG (this triggers the release workflow)"
-git push origin "$TAG"
+# --- watch ---
+#
+# The run for this tag is the one whose head is the tag and whose event
+# is the push, on the tagged commit and created after this push: during
+# a recovery, an earlier run for the same tag name may still be listed. GitHub can take a few seconds to create it. Failing to
+# find or watch it is not a failure of the release, which is already
+# under way, so it only says where to look.
 
-# --- watch the workflow ---
+info "Waiting for the release workflow to start"
+RUN_ID=''
+for _ in 1 2 3 4 5 6; do
+    sleep 5
+    RUN_ID="$(gh run list --workflow=release.yml --branch "${TAG}" --event push \
+        --limit 10 --json databaseId,headSha,createdAt \
+        --jq "[.[] | select(.headSha == \"${TARGET_SHA}\" and .createdAt >= \"${PUSHED_AT}\")][0].databaseId // empty" \
+        2>/dev/null || true)"
+    [[ -z "${RUN_ID}" ]] || break
+done
 
-info "Waiting for release workflow to start"
-sleep 5
-RUN_ID=$(gh run list \
-    --workflow=release.yml \
-    --limit 1 \
-    --json databaseId \
-    --jq '.[0].databaseId')
-
-if [[ -n "$RUN_ID" ]]; then
-    info "Watching workflow run $RUN_ID"
-    gh run watch "$RUN_ID" || info "workflow did not complete cleanly"
-    info "Opening release page"
-    gh release view "$TAG" --web || true
+if [[ -n "${RUN_ID}" ]]; then
+    info "Watching workflow run ${RUN_ID}; approve the release environment when it asks"
+    gh run watch "${RUN_ID}" || info "the workflow did not complete cleanly"
+    gh release view "${TAG}" --web || true
 else
-    info "Could not find workflow run. Check manually: gh run list --workflow=release.yml"
+    info "Could not find the workflow run. Check: gh run list --workflow=release.yml"
 fi

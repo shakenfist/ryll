@@ -1,208 +1,238 @@
 #!/bin/bash
 #
-# Propose a release of the ryll workspace.
+# Propose a release: the first of a release's two stages.
 #
-# Creates a `release-X.Y.Z` branch from develop, bumps the workspace
-# version, runs the test suite, and (after confirmation) commits and
-# pushes the branch. Does NOT open a PR and does NOT tag — both of
-# those happen outside the script:
+# Creates a release-X.Y.Z branch from the default branch, bumps the
+# version, runs pre-commit and the tests, and, after confirmation,
+# commits, pushes the branch and opens a pull request. It does not tag.
+# The release then goes:
 #
 #   1. Run this script.
-#   2. Open a PR from release-X.Y.Z to develop, get it reviewed
-#      and merged like any other change.
-#   3. Run tools/tag-release.sh X.Y.Z to tag the merge commit on
-#      develop and push the tag (that is what triggers
-#      .github/workflows/release.yml).
+#   2. Get the pull request reviewed, and land it through the merge
+#      queue like any other change. The queue's run on the merged commit
+#      is the CI result the release's ci-gate job requires.
+#   3. Run tools/tag-release.sh X.Y.Z, which tags the merged commit and
+#      pushes the tag; that is what starts .github/workflows/release.yml.
+#
+# The version bump goes through the queue rather than straight onto the
+# default branch so that the commit which is tagged has a CI result. A
+# bump pushed around the queue has none, and the release gate refuses it.
 #
 # Usage:
-#   tools/propose-release.sh VERSION
-#   make propose-release VERSION
+#   tools/propose-release.sh X.Y.Z
 #
-# Example:
-#   make propose-release 0.1.4
+# Requirements on the host: git, gh signed in (gh auth login), and
+# pre-commit, plus whatever the per-repository functions below run.
 #
-# Requirements on the host:
-#   - cargo-release:  cargo install --locked cargo-release
-#     (or cargo install --locked cargo-release@0.25.18 on rustc 1.85)
-#   - curl, jq:       for querying crates.io
+# Template source: shakenfist/development/templates/release-automation-rust/
 
 set -euo pipefail
 
 err() { echo "error: $*" >&2; exit 1; }
 info() { echo "==> $*"; }
 
-# --- arg parsing ---
+# --- per-repository settings ---
+#
+# Adapt these three functions to the repository. Everything after them
+# is the same in every repository that uses this template.
 
-[[ $# -eq 1 ]] || err "usage: $0 VERSION (e.g. 0.1.4)"
+# Sets the release version to $1 everywhere the repository records it,
+# Cargo.lock included. The six crates inherit [workspace.package]'s
+# version, but the renderer and ryll also name their sibling crates with
+# a `version =` qualifier beside the `path`, which crates.io requires and
+# which must move with it. cargo-release rewrites both (it only edits
+# Cargo.toml files, so the host's cargo need not meet the workspace's
+# MSRV). `make lock` then rewrites Cargo.lock inside the build container:
+# `make test` is --frozen, so a stale lockfile would stop the proposal.
+bump_version() {
+    command -v cargo-release >/dev/null \
+        || err "cargo-release is not installed; run: cargo install --locked cargo-release"
+    cargo release version "$1" --workspace --execute --no-confirm
+    make lock
+}
+
+# The tests to run on the bumped tree before it is committed. The queue
+# runs CI again on the merged commit, so this is a cheap early warning,
+# not the release's test result.
+run_tests() {
+    make test
+}
+
+# Fails if a registry the release publishes to already has version $1.
+# Most registries never accept a version twice, so a version one of them
+# already has cannot be released, and finding that out here costs
+# nothing. Call require_unpublished once per published package, with a
+# URL that answers 404 when that version does not exist, for example:
+#
+#   require_unpublished "https://crates.io/api/v1/crates/<crate>/$1"
+#   require_unpublished "https://pypi.org/pypi/<package>/$1/json"
+#
+# A repository that publishes only to GitHub Releases leaves this empty.
+#
+# ryll publishes every workspace crate to crates.io. The crates come from
+# the workspace rather than a list here, so a new crate cannot be missed,
+# and `publish = false` shows up as an empty list. tools/publish-crates.sh
+# has to list them by hand, because it publishes in dependency order, so
+# a crate missing from it is caught here, before a tag exists. The PyPI
+# wheel publishes with skip-existing, so it needs no check.
+check_unpublished() {
+    local crates crate
+    command -v jq >/dev/null || err "jq is not installed"
+    mapfile -t crates < <(cargo metadata --no-deps --format-version 1 \
+        | jq -r '.packages[] | select(.publish != []) | .name')
+    [[ ${#crates[@]} -gt 0 ]] || err "cargo metadata listed no publishable crates"
+    for crate in "${crates[@]}"; do
+        grep -qE "^[[:space:]]+${crate}"'( \\|;)' tools/publish-crates.sh \
+            || err "${crate} is a workspace crate but tools/publish-crates.sh does not publish it"
+        require_unpublished "https://crates.io/api/v1/crates/${crate}/$1"
+    done
+}
+
+# --- end of per-repository settings ---
+
+require_unpublished() {
+    local url="$1" code
+    code="$(curl -s -o /dev/null -w '%{http_code}' \
+        -A 'shakenfist-release-script (https://github.com/shakenfist)' "${url}")"
+    case "${code}" in
+        404) ;;
+        200) err "already published: ${url}" ;;
+        *) err "unexpected HTTP ${code} from ${url}" ;;
+    esac
+}
+
+# --- arguments ---
+
+[[ $# -eq 1 ]] || err "usage: $0 X.Y.Z (e.g. 0.1.0)"
 VERSION="$1"
+[[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || err "version must be X.Y.Z, got: ${VERSION}"
 
-[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
-    || err "version must be X.Y.Z, got: $VERSION"
+TAG="v${VERSION}"
+RELEASE_BRANCH="release-${VERSION}"
 
-TAG="v$VERSION"
-RELEASE_BRANCH="release-$VERSION"
-
-# --- tool availability ---
-
-command -v cargo-release >/dev/null \
-    || err "cargo-release not installed. Run: cargo install --locked cargo-release"
-command -v jq >/dev/null || err "jq not installed"
-
-# --- working directory must be repo root ---
-
-cd "$(dirname "$0")/.."
-[[ -f Cargo.toml ]] || err "could not find repo root"
-
-# --- workspace crates ---
-
-# Derived from the workspace rather than listed here, so a new crate
-# cannot be missed. `publish = false` shows up as an empty list.
-mapfile -t CRATES < <(cargo metadata --no-deps --format-version 1 \
-    | jq -r '.packages[] | select(.publish != []) | .name')
-[[ ${#CRATES[@]} -gt 0 ]] || err "cargo metadata listed no publishable crates"
-
-# tools/publish-crates.sh has to list the crates by hand, because it
-# publishes them in dependency order. Catch a crate missing from it
-# here, before a tag exists, rather than in the release workflow.
-for crate in "${CRATES[@]}"; do
-    grep -qE "^[[:space:]]+${crate}"'( \\|;)' tools/publish-crates.sh \
-        || err "$crate is a workspace crate but tools/publish-crates.sh does not publish it"
+for tool in git gh curl pre-commit; do
+    command -v "${tool}" >/dev/null || err "${tool} is not installed"
 done
 
-# --- git state checks ---
+cd "$(dirname "$0")/.."
+[[ -x tools/release-version.sh ]] || err "could not find the repository root"
+
+DEFAULT_BRANCH="$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)" \
+    || err "could not ask GitHub for the default branch; is gh signed in?"
+
+# --- git state ---
 
 info "Checking git state"
 
-BRANCH=$(git rev-parse --abbrev-ref HEAD)
-[[ "$BRANCH" == "develop" ]] \
-    || err "must be on develop, currently on: $BRANCH"
+BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+[[ "${BRANCH}" == "${DEFAULT_BRANCH}" ]] \
+    || err "must be on ${DEFAULT_BRANCH}, currently on: ${BRANCH}"
+[[ -z "$(git status --porcelain)" ]] || err "working tree is dirty; commit or stash first"
 
-[[ -z "$(git status --porcelain)" ]] \
-    || err "working tree is dirty; commit or stash first"
+git fetch origin "${DEFAULT_BRANCH}" --quiet
+[[ "$(git rev-parse HEAD)" == "$(git rev-parse "origin/${DEFAULT_BRANCH}")" ]] \
+    || err "local ${DEFAULT_BRANCH} is not in sync with origin/${DEFAULT_BRANCH}"
 
-git fetch origin develop --quiet
-LOCAL=$(git rev-parse HEAD)
-REMOTE=$(git rev-parse origin/develop)
-[[ "$LOCAL" == "$REMOTE" ]] \
-    || err "local develop is not in sync with origin/develop"
-
-if git rev-parse "$TAG" >/dev/null 2>&1; then
-    err "tag $TAG already exists locally"
+if git rev-parse --verify --quiet "refs/tags/${TAG}" >/dev/null; then
+    err "tag ${TAG} already exists locally"
 fi
-if git ls-remote --tags --exit-code origin "$TAG" >/dev/null 2>&1; then
-    err "tag $TAG already exists on origin"
+if git ls-remote --tags --exit-code origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+    err "tag ${TAG} already exists on origin"
 fi
-
-if git rev-parse --verify "$RELEASE_BRANCH" >/dev/null 2>&1; then
-    err "branch $RELEASE_BRANCH already exists locally"
+if git rev-parse --verify --quiet "refs/heads/${RELEASE_BRANCH}" >/dev/null; then
+    err "branch ${RELEASE_BRANCH} already exists locally"
 fi
-if git ls-remote --heads --exit-code origin "$RELEASE_BRANCH" >/dev/null 2>&1; then
-    err "branch $RELEASE_BRANCH already exists on origin"
+if git ls-remote --heads --exit-code origin "refs/heads/${RELEASE_BRANCH}" >/dev/null 2>&1; then
+    err "branch ${RELEASE_BRANCH} already exists on origin"
 fi
 
-# --- crates.io version availability ---
+# --- the version must move forward ---
 
-info "Checking crates.io for existing $VERSION"
+CURRENT="$(tools/release-version.sh get)"
+[[ "${CURRENT}" != "${VERSION}" ]] || err "the repository is already at ${VERSION}"
+HIGHEST="$(printf '%s\n%s\n' "${CURRENT}" "${VERSION}" | sort -V | tail -n 1)"
+[[ "${HIGHEST}" == "${VERSION}" ]] || err "${VERSION} is older than the current ${CURRENT}"
 
-for crate in "${CRATES[@]}"; do
-    # The crates.io versions endpoint returns a JSON object with a
-    # "version" key when present, and 404 when the version does not
-    # exist. We treat anything other than 404 as "taken".
-    url="https://crates.io/api/v1/crates/$crate/$VERSION"
-    code=$(curl -s -o /dev/null -w '%{http_code}' \
-        -A 'ryll-release-script (mikal@stillhq.com)' "$url")
-    case "$code" in
-        404) ;;  # good, version is free
-        200) err "$crate $VERSION already published on crates.io" ;;
-        *)   err "unexpected HTTP $code checking $crate $VERSION" ;;
-    esac
-done
+info "Checking that ${VERSION} is not already published"
+check_unpublished "${VERSION}"
 
-# --- create release branch ---
+# --- the release branch ---
 
-info "Creating branch $RELEASE_BRANCH from develop"
-git switch -c "$RELEASE_BRANCH"
+info "Creating ${RELEASE_BRANCH} from ${DEFAULT_BRANCH}"
+git switch -c "${RELEASE_BRANCH}"
 
-# Ensure we clean up the branch if the script aborts after this
-# point without a successful push.
+# Until the push succeeds, any exit puts the checkout back as it was.
 CLEANUP_BRANCH=1
 cleanup() {
-    if [[ "${CLEANUP_BRANCH:-0}" == "1" ]]; then
-        info "Cleaning up: switching back to develop and deleting $RELEASE_BRANCH"
+    if [[ "${CLEANUP_BRANCH}" == "1" ]]; then
+        info "Cleaning up: switching back to ${DEFAULT_BRANCH} and deleting ${RELEASE_BRANCH}"
         git checkout -- . 2>/dev/null || true
-        git switch develop 2>/dev/null || true
-        git branch -D "$RELEASE_BRANCH" 2>/dev/null || true
+        git switch "${DEFAULT_BRANCH}" 2>/dev/null || true
+        git branch -D "${RELEASE_BRANCH}" 2>/dev/null || true
     fi
 }
 trap cleanup EXIT
 
-# --- pre-commit ---
+# --- bump ---
 
+info "Bumping the version from ${CURRENT} to ${VERSION}"
+bump_version "${VERSION}"
+
+# A bump that creates a file would be left out of the commit, which
+# stages tracked files only, and left behind by the cleanup.
+UNTRACKED="$(git status --porcelain --untracked-files=all | awk '$1 == "??" { print $2 }')"
+[[ -z "${UNTRACKED}" ]] \
+    || err "the version bump left untracked files, which the release commit would leave out: ${UNTRACKED//$'\n'/ }"
+
+# Linted after the bump, so that the files it changed are checked
+# before the pull request opens.
 info "Running pre-commit"
 pre-commit run --all-files
 
-# --- bump versions ---
+# The release workflow's own check, run against the tag this release
+# will have, so that a bump check-version would refuse never reaches
+# review.
+tools/release-version.sh check "refs/tags/${TAG}"
 
-info "Bumping workspace to $VERSION"
-cargo release version "$VERSION" \
-    --workspace \
-    --execute \
-    --no-confirm
+info "Running the tests"
+run_tests
 
-# --- re-lock ---
-#
-# The version bump above rewrites every workspace member's version,
-# which Cargo.lock records. `make test` is --frozen and its `fetch`
-# prerequisite is --locked, so a lockfile left out of sync would abort
-# the proposal here rather than self-heal. `make lock` is the one
-# target allowed to write it; it is a no-op when nothing moved, and
-# `git add -u` below commits the result.
-
-info "Refreshing Cargo.lock for the bumped versions"
-make lock
-
-# --- final test gate ---
-#
-# Delegate to `make test` so the test compile/run uses the
-# devcontainer's toolchain. Running `cargo test` directly here
-# would pick up the host's rustc, which is typically older than
-# what the workspace's dependency tree requires.
-
-info "Running workspace tests (via make test, in devcontainer)"
-make test
-
-# --- confirmation ---
+# --- confirm, commit, push and open the pull request ---
 
 echo
-echo "About to propose release $VERSION on branch $RELEASE_BRANCH."
-echo "Pending changes:"
+echo "About to propose release ${VERSION} on branch ${RELEASE_BRANCH}."
 git diff --stat
 echo
-read -rp "Commit and push $RELEASE_BRANCH? [y/N] " REPLY
-[[ "$REPLY" =~ ^[Yy]$ ]] || {
+read -rp "Commit, push ${RELEASE_BRANCH} and open a pull request? [y/N] " REPLY
+[[ "${REPLY}" =~ ^[Yy]$ ]] || {
     info "Aborted at confirmation."
     exit 1
 }
 
-# --- commit and push ---
-
-info "Creating release proposal commit"
+# tag-release.sh finds the release by this subject, so it must not
+# change. A merge or rebase queue keeps it as written; a squash queue
+# appends " (#N)", which tag-release.sh also accepts.
+info "Committing"
 git add -u
 git commit -m "Release ${VERSION}."
 
-info "Pushing $RELEASE_BRANCH"
-git push --set-upstream origin "$RELEASE_BRANCH"
+info "Pushing ${RELEASE_BRANCH}"
+git push --set-upstream origin "${RELEASE_BRANCH}"
 
-# Successful push — disable cleanup so we leave the user on the
-# release branch for PR creation.
+# Pushed: leave the checkout on the release branch, whatever happens next.
 CLEANUP_BRANCH=0
 
+info "Opening the pull request"
+gh pr create --base "${DEFAULT_BRANCH}" --head "${RELEASE_BRANCH}" \
+    --title "Release ${VERSION}." \
+    --body "Bumps the version to ${VERSION}. Once this has merged through the queue, \`tools/tag-release.sh ${VERSION}\` tags the merged commit and starts the release." \
+    || err "the branch is pushed, but opening the pull request failed; open it by hand from ${RELEASE_BRANCH}"
+
 echo
-info "Release proposed on branch $RELEASE_BRANCH."
+info "Release ${VERSION} proposed."
 echo
 echo "Next steps:"
-echo "  1. Open a PR from $RELEASE_BRANCH into develop:"
-echo "     https://github.com/shakenfist/ryll/pull/new/$RELEASE_BRANCH"
-echo "  2. Get it reviewed and merged."
-echo "  3. Run 'make tag-release $VERSION' to tag develop and"
-echo "     trigger the release workflow."
+echo "  1. Get the pull request reviewed, and land it through the merge queue."
+echo "  2. Run 'tools/tag-release.sh ${VERSION}' to tag the merged commit,"
+echo "     which starts the release workflow."
