@@ -728,10 +728,6 @@
       "author": "mikal"
     },
     {
-      "path": ".github/workflows",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-compression/src/encode/h264.rs",
       "author": "mikal"
     },

@@ -61,10 +61,6 @@
       "sha": "91ff1783e6589e198ce5d14aab473112761b7ce2",
       "date": "2026-10-16"
     },
-    ".github/workflows/release.yml": {
-      "sha": "a42a5b84650dcd920936a3ddb045cc50359dd35f",
-      "date": "2026-10-14"
-    },
     ".github/workflows/renovate.yml": {
       "sha": "07e038ce4f1ba143eeb172e17e3d24c6e43e203a",
       "date": "2026-10-20"
