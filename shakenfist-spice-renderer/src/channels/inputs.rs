@@ -301,10 +301,12 @@ impl InputsChannel {
         // real lock state here instead; the renderer cannot read the
         // host's locks (egui and winit expose none, and headless and
         // web mode have no local keyboard), so this asserts the most
-        // common host state. It is the only KEY_MODIFIERS ryll sends:
-        // the server toggles each lock that differs from its own
-        // record, so a later one could only undo a lock changed from
-        // inside the guest or by another client sharing the desktop.
+        // common host state. A frontend that knows its client's lock
+        // state can send another with InputEvent::KeyModifiers. The
+        // server toggles each lock that differs from its own record,
+        // so ryll never restates the locks on its own: that could
+        // only undo a lock changed from inside the guest or by
+        // another client sharing the desktop.
         self.send_key_modifiers(keyboard_modifiers::NUM_LOCK)
             .await?;
 
@@ -688,6 +690,20 @@ impl InputsChannel {
                     0xB8 => self.alt_held = false,
                     _ => {}
                 }
+            }
+
+            InputEvent::KeyModifiers(modifiers) => {
+                self.record_event(InputEventRecord {
+                    event_type: "KeyModifiers".to_string(),
+                    scancode: 0,
+                    x: 0,
+                    y: 0,
+                    button_mask: 0,
+                    timestamp_secs: ts,
+                });
+
+                debug!("inputs: key modifiers: {:#x}", modifiers);
+                self.send_key_modifiers(modifiers).await?;
             }
 
             InputEvent::MouseMove { x, y } => {
@@ -2599,7 +2615,7 @@ mod tests {
         use tokio::io::AsyncWriteExt;
         use tokio::sync::mpsc;
 
-        use super::super::{InputsChannel, MAX_MESSAGE_BODY};
+        use super::super::{InputEvent, InputsChannel, MAX_MESSAGE_BODY};
         use crate::channels::test_support::{loopback, NullTraffic, TestChannelPeers};
         use crate::snapshots::InputsSnapshot;
         use crate::{ByteCounter, LogConfig};
@@ -2680,6 +2696,39 @@ mod tests {
                 "an idle inputs channel sent something after its opening KEY_MODIFIERS"
             );
             task.abort();
+        }
+
+        async fn dispatched_key_modifiers(bits: u16) -> u16 {
+            let (mut channel, mut peers) = test_inputs_channel().await;
+            channel
+                .handle_input_event(InputEvent::KeyModifiers(bits))
+                .await
+                .expect("the event is sent");
+            let mut sent = ReceiveBuffer::new();
+            sent.extend_from_slice(
+                &peers
+                    .read_sent(MessageHeader::SIZE + KeyModifiers::SIZE)
+                    .await,
+            );
+            let msg = sent
+                .take_message(MAX_MESSAGE_BODY)
+                .expect("a well-formed message")
+                .expect("a whole message");
+            assert_eq!(msg.header.message_type, inputs_client::KEY_MODIFIERS);
+            assert!(sent.take_message(MAX_MESSAGE_BODY).unwrap().is_none());
+            KeyModifiers::decode(msg.payload()).unwrap().modifiers
+        }
+
+        #[tokio::test]
+        async fn key_modifiers_event_sends_one_key_modifiers_message() {
+            let bits = keyboard_modifiers::CAPS_LOCK | keyboard_modifiers::SCROLL_LOCK;
+            assert_eq!(dispatched_key_modifiers(bits).await, bits);
+        }
+
+        #[tokio::test]
+        async fn key_modifiers_event_passes_unknown_bits_through() {
+            let bits = 0x8000 | keyboard_modifiers::NUM_LOCK;
+            assert_eq!(dispatched_key_modifiers(bits).await, bits);
         }
 
         #[tokio::test]
