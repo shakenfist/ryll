@@ -58,6 +58,13 @@ shakenfist-spice-protocol = { path = "../shakenfist-spice-protocol", version = "
 # thread of its own, so the multi-thread scheduler is not needed.
 tokio = { version = "1", features = ["rt", "sync", "time", "net", "macros"] }
 
+# TLS for both RDP security modes. `TlsIdentity::acceptor` returns
+# a `tokio_rustls::TlsAcceptor` and builds its rustls server config
+# from the process-wide crypto provider. The same release
+# `ironrdp-server` builds on and the other workspace crates use, so
+# this adds an edge, not a crate.
+tokio-rustls = "0.26"
+
 # Error handling
 anyhow = "1"
 

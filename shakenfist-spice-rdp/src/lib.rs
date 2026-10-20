@@ -17,6 +17,16 @@
 //! multi-thread tokio runtime. The server therefore runs on an OS
 //! thread of its own with a current-thread runtime, and talks to the
 //! SPICE session through the `Send` handles in [`SessionHandles`].
+//! [`serve`] starts it and returns an [`RdpServerHandle`].
+//!
+//! # Crypto provider
+//!
+//! Both RDP security modes run inside TLS, and
+//! [`TlsIdentity::acceptor`] uses the process-wide rustls
+//! `CryptoProvider`. An embedding process must install a default
+//! provider before calling [`serve`], e.g.
+//! `rustls::crypto::ring::default_provider().install_default()`.
+//! This crate does not pick a provider on the embedder's behalf.
 //!
 //! This is a reachability fallback, not a better path: a transcoded
 //! RDP session loses SPICE features such as USB redirection and
@@ -34,8 +44,17 @@ mod input;
 mod server;
 mod tls;
 
+pub use auth::{generate_password, SingleSession};
 pub use display::MirrorDisplay;
 pub use input::SpiceInputHandler;
+pub use server::{serve, RdpConfig, RdpSecurity, RdpServerHandle, DEFAULT_RDP_PORT};
+pub use tls::TlsIdentity;
+
+/// The username, password and domain an RDP client presents, as
+/// IronRDP carries them. Re-exported so a consumer can fill an
+/// [`RdpConfig`] and implement [`SessionProvider`] without depending
+/// on IronRDP. Its `Debug` output leaves out the password.
+pub use ironrdp_server::Credentials;
 
 /// What the RDP adapters need from one SPICE session.
 ///
@@ -102,11 +121,13 @@ impl SessionSlot {
 
 /// Chooses the SPICE session an authenticated RDP client is served.
 ///
-/// Called with the credentials the client presented: by the
-/// credential validator in TLS mode, and with the configured pair
-/// when a CredSSP (NLA) connection is accepted, since CredSSP checks
-/// the password itself. Returning [`Rejected`] refuses the
-/// connection.
+/// Called with the credentials the client presented, by the
+/// credential check of a TLS-mode server; returning [`Rejected`]
+/// refuses the connection. An NLA server calls it once instead, with
+/// the configured pair, when it starts: CredSSP checks the password
+/// itself and IronRDP offers no hook after that check, so every NLA
+/// client is served the session chosen then, and a rejection stops
+/// the server from starting.
 ///
 /// # Limits of this seam
 ///

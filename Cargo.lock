@@ -7300,6 +7300,7 @@ dependencies = [
  "shakenfist-spice-protocol",
  "shakenfist-spice-renderer",
  "tokio",
+ "tokio-rustls",
  "tracing",
 ]
 

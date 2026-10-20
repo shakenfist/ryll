@@ -13,6 +13,7 @@
 
 use std::collections::VecDeque;
 use std::num::{NonZeroU16, NonZeroUsize};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -40,6 +41,55 @@ const DAMAGE_POLL_INTERVAL: Duration = Duration::from_millis(16);
 /// sent to the client as they are, in [`PixelFormat::RgbA32`].
 const BYTES_PER_PIXEL: usize = 4;
 
+/// The desktop size the connected client has been told, shared by the
+/// display handler, its update streams and the server's connection
+/// handler.
+///
+/// IronRDP asks the display handler for the desktop size twice per
+/// connection: once before the handshake, which is the size announced
+/// to the client in the capability exchange, and once after
+/// authentication, which is the size the server builds its encoder
+/// with. In TLS mode the session slot is empty at the first ask,
+/// because the credential check that fills it has not run yet, so the
+/// client is told the fallback size while the encoder gets the
+/// surface's. The update stream therefore starts from the size the
+/// client was told, not the size last reported, and its first update
+/// is a resize to the surface's size; the deactivation and
+/// reactivation that follows announces that size to the client and
+/// rebuilds the encoder with it.
+///
+/// The connection handler forgets the size when a connection is
+/// accepted, so the first ask of every connection records afresh.
+/// Clones share the same record.
+#[derive(Clone, Default)]
+pub(crate) struct ClientSize(Arc<Mutex<Option<DesktopSize>>>);
+
+impl ClientSize {
+    /// Forget the client's size, for a new connection.
+    pub(crate) fn forget(&self) {
+        *self.lock() = None;
+    }
+
+    /// The size the client was last told, if any.
+    pub(crate) fn get(&self) -> Option<DesktopSize> {
+        *self.lock()
+    }
+
+    /// Record that the client has been told `size`.
+    pub(crate) fn set(&self, size: DesktopSize) {
+        *self.lock() = Some(size);
+    }
+
+    /// Lock the record. A panic while the lock was held cannot leave
+    /// the `Option` half-written, so a poisoned lock is recovered
+    /// rather than propagated.
+    fn lock(&self) -> MutexGuard<'_, Option<DesktopSize>> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 /// The RDP display handler for the session in a [`SessionSlot`].
 ///
 /// Reports the session's primary surface size as the desktop size and
@@ -50,10 +100,9 @@ const BYTES_PER_PIXEL: usize = 4;
 pub struct MirrorDisplay {
     slot: SessionSlot,
     fallback: DesktopSize,
-    /// The size [`RdpServerDisplay::size`] last reported. The server
-    /// builds its encoder with that size immediately before it asks
-    /// for an update stream, so a new stream starts from it.
-    reported: Option<DesktopSize>,
+    /// The size the connected client was told, which a new update
+    /// stream starts from.
+    client_size: ClientSize,
 }
 
 impl MirrorDisplay {
@@ -64,8 +113,14 @@ impl MirrorDisplay {
         Self {
             slot,
             fallback,
-            reported: None,
+            client_size: ClientSize::default(),
         }
+    }
+
+    /// A shared handle on the record of the client's desktop size, for
+    /// the connection handler to forget when a new connection starts.
+    pub(crate) fn client_size(&self) -> ClientSize {
+        self.client_size.clone()
     }
 
     /// The primary surface's size, or `fallback` when there is no
@@ -86,16 +141,24 @@ impl MirrorDisplay {
 impl RdpServerDisplay for MirrorDisplay {
     async fn size(&mut self) -> DesktopSize {
         let size = self.current_size().await;
-        self.reported = Some(size);
+        // The first ask of a connection is the size the client is
+        // told; later asks of the same connection do not change that.
+        if self.client_size.get().is_none() {
+            self.client_size.set(size);
+        }
         size
     }
 
     async fn updates(&mut self) -> Result<Box<dyn RdpServerDisplayUpdates>> {
-        let announced = match self.reported {
+        let announced = match self.client_size.get() {
             Some(size) => size,
             None => self.size().await,
         };
-        Ok(Box::new(MirrorUpdates::new(self.slot.clone(), announced)))
+        Ok(Box::new(MirrorUpdates::new(
+            self.slot.clone(),
+            self.client_size.clone(),
+            announced,
+        )))
     }
 }
 
@@ -107,10 +170,13 @@ impl RdpServerDisplay for MirrorDisplay {
 /// surface first.
 struct MirrorUpdates {
     slot: SessionSlot,
+    /// Updated with every resize sent, since the reactivation that
+    /// follows tells the client that size.
+    client_size: ClientSize,
     /// Updates taken from the mirror and not yet handed to the server.
     pending: VecDeque<DisplayUpdate>,
-    /// The desktop size the server's encoder currently has: the size
-    /// announced when the stream was built, or the last resize sent.
+    /// The desktop size the client currently has: the size it was
+    /// told when the stream was built, or the last resize sent.
     sent_size: DesktopSize,
     /// Whether the client has been sent the whole surface at
     /// `sent_size`. IronRDP seeds its framebuffer only from a bitmap
@@ -123,11 +189,12 @@ struct MirrorUpdates {
 }
 
 impl MirrorUpdates {
-    fn new(slot: SessionSlot, announced: DesktopSize) -> Self {
+    fn new(slot: SessionSlot, client_size: ClientSize, announced: DesktopSize) -> Self {
         let mut interval = tokio::time::interval(DAMAGE_POLL_INTERVAL);
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         Self {
             slot,
+            client_size,
             pending: VecDeque::new(),
             sent_size: announced,
             seeded: false,
@@ -161,6 +228,7 @@ impl MirrorUpdates {
                 size.width, size.height, self.sent_size.width, self.sent_size.height
             );
             self.pending.push_back(DisplayUpdate::Resize(size));
+            self.client_size.set(size);
             self.sent_size = size;
             self.seeded = false;
         }
@@ -621,6 +689,72 @@ mod tests {
         let bitmap = next_bitmap(&mut updates).await;
         assert_geometry(&bitmap, 4, 2, 3, 3);
         assert_eq!(bitmap_rows(&bitmap), numbered_pixels(3, 3, 60));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_session_chosen_after_the_first_size_starts_with_a_resize() {
+        // The TLS-mode sequence: the client is told the size before
+        // authentication, while the slot is empty; the credential check
+        // then fills the slot; the encoder is sized after that.
+        let (_other_slot, handles) = session_with_surface(8, 6);
+        let slot = SessionSlot::new();
+        let mut display = MirrorDisplay::new(slot.clone(), FALLBACK);
+        assert_eq!(display.size().await, FALLBACK);
+        slot.set(handles);
+        let surface = DesktopSize {
+            width: 8,
+            height: 6,
+        };
+        assert_eq!(display.size().await, surface);
+        assert_eq!(display.client_size().get(), Some(FALLBACK));
+
+        let mut updates = display.updates().await.expect("updates");
+        assert_eq!(next_resize(&mut updates).await, surface);
+        assert_eq!(display.client_size().get(), Some(surface));
+        let bitmap = next_bitmap(&mut updates).await;
+        assert_geometry(&bitmap, 0, 0, 8, 6);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_forgotten_client_size_is_recorded_afresh() {
+        let (slot, handles) = session_with_surface(8, 6);
+        let mut display = MirrorDisplay::new(slot.clone(), FALLBACK);
+        display.size().await;
+        let first = DesktopSize {
+            width: 8,
+            height: 6,
+        };
+        assert_eq!(display.client_size().get(), Some(first));
+
+        // A second connection, after the guest changed its resolution.
+        handles
+            .surface_mirror
+            .lock()
+            .await
+            .apply_event(&ChannelEvent::SurfaceCreated {
+                display_channel_id: 0,
+                surface_id: 0,
+                width: 16,
+                height: 12,
+            });
+        let second = DesktopSize {
+            width: 16,
+            height: 12,
+        };
+        // Without a forget, the record keeps the first connection's size.
+        assert_eq!(display.size().await, second);
+        assert_eq!(display.client_size().get(), Some(first));
+
+        display.client_size().forget();
+        assert_eq!(display.client_size().get(), None);
+        assert_eq!(display.size().await, second);
+        assert_eq!(display.client_size().get(), Some(second));
+
+        // The new connection's stream starts from the recorded size, so
+        // it seeds without a resize.
+        let mut updates = display.updates().await.expect("updates");
+        let bitmap = next_bitmap(&mut updates).await;
+        assert_geometry(&bitmap, 0, 0, 16, 12);
     }
 
     #[tokio::test(start_paused = true)]
