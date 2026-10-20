@@ -287,7 +287,10 @@ workflow**) on any branch is a dry run. It runs `check-version`,
 which on a branch checks only that `Cargo.toml` and `Cargo.lock`
 agree, and every build job, including the wheels and their
 `check-dist`. `ci-gate`, `sign-tag`, `github-release` and every
-publishing job show as skipped. This is the way to exercise a
+publishing job show as skipped. The build jobs run at all only
+because each tests `check-version`'s result itself: a job with no
+`if:` of its own is skipped when any job upstream of it was, and
+`ci-gate` was. This is the way to exercise a
 change to the release build before tagging; `manual-build.yml`
 remains for building a single platform's artefacts from a branch.
 

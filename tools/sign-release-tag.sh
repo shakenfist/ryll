@@ -12,7 +12,7 @@
 #
 # The signature can be checked afterwards with
 #   gitsign verify-tag TAG_NAME \
-#     --certificate-identity-regexp '^https://github.com/shakenfist/<repository>/' \
+#     --certificate-identity-regexp '^https://github.com/shakenfist/ryll/' \
 #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
 #
 # Template source: shakenfist/development/templates/release-automation-rust/
