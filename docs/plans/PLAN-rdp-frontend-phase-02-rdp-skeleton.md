@@ -1014,7 +1014,45 @@ stated. Each step is one commit, with the subject given.
 
 ## Results
 
-Filled in by the management session as steps land.
+### Step 1: dependency tree
+
+`cargo tree --frozen -p shakenfist-spice-rdp -e normal,build` in the
+devcontainer (957 lines, 2026-10-21), after `make lock` added 103
+packages to `Cargo.lock` and removed none:
+
+- `ironrdp-server v0.13.0` is present; `qoicoubeh`, `zstd-safe 7`,
+  `openh264`, `openh264-sys2`, `cpal`, `nusb` and `dav-server` are
+  absent. `zstd-safe` stays at 8.1.0 only, from ryll's `zip`.
+- `-sys` crates in the tree: `aws-lc-sys 0.45.0` (already in the
+  workspace through the protocol crate), `cryptoki-sys 0.5.0` (new;
+  loads a PKCS#11 module with `libloading`, no C build) and
+  `libz-sys 1.1.30` (new).
+- **A new C build, which the plan did not expect:** `sspi`'s `scard`
+  feature pulls `winscard`, which enables `flate2`'s `zlib` feature
+  and so `libz-sys`. In the devcontainer it links the system zlib;
+  for the Windows gnu target it compiles the bundled zlib with `cc`.
+  Because cargo unifies features, every build that includes this
+  crate also moves the renderer's `flate2` onto the C zlib backend.
+  That reaches the `ryll` binary only through the `rdp` feature
+  (step 7), which release builds do not enable. Recorded beside the
+  `aws-lc-rs` note in the master plan's dependency discussion (#593)
+  as the second native build the frontend brings.
+- Crates that now have two versions: aead 0.5/0.6, ctr 0.9/0.10,
+  der 0.7/0.8, md-5 0.10/0.11, num-bigint 0.3/0.4, pem-rfc7468
+  0.7/1.0, pkcs1 0.7/0.8.0-rc.4, pkcs8 0.10/0.11, reqwest
+  0.12/0.13, rsa 0.9/0.10.0-rc.18, signature 2/3, spki 0.7/0.8.
+  `deny.toml` warns rather than fails on these.
+- Licences of every added package are within `deny.toml`'s allow
+  list (IronRDP MIT OR Apache-2.0; the dalek crates BSD-3-Clause;
+  `iso7816-tlv` ISC); no git sources. cargo-deny itself could not
+  run locally (not in the devcontainer, and the upstream image pull
+  was refused), so advisories are checked by the pull request's job.
+- The crate compiles for `x86_64-pc-windows-gnu` (a one-off
+  `cargo check` with the Makefile's docker line); `make
+  check-windows` checks only `-p ryll` and so does not cover it
+  until step 7 enables the feature there.
+- `make test`: 1507 passed, 0 failed (the new crate has no tests
+  yet).
 
 ## Execution notes
 

@@ -1,0 +1,84 @@
+[package]
+name = "shakenfist-spice-rdp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "RDP frontend for the ryll SPICE client: serves a SPICE session to stock RDP clients with IronRDP"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+# The RDP server: connection acceptance, TLS and CredSSP security,
+# capability negotiation, and the bitmap and RemoteFX encoders. This
+# crate supplies the display and input handlers it is built with.
+# Every IronRDP minor release so far has changed the server API, so
+# the pin is to one minor and an upgrade is deliberate work. Default
+# features are off because the defaults include `qoi` and `qoiz`,
+# two IronRDP-private codecs that no stock RDP client negotiates and
+# that would pull `qoicoubeh` and a second `zstd-safe` major beside
+# the one ryll already carries through `zip`. `rayon` parallelises
+# RemoteFX tile encoding; `helper` provides `TlsIdentityCtx`, which
+# loads a PEM certificate and key and derives the public key CredSSP
+# needs.
+# Declares rust-version 1.89, which sets the workspace floor. Pulls in
+# the rest of the IronRDP family (acceptor, connector, pdu, graphics
+# and the static and dynamic channel crates), `sspi` and `picky` for
+# CredSSP, and a `reqwest` 0.12 beside ryll's 0.13 through
+# `ironrdp-tokio`. Through `sspi`'s smart-card support it also pulls
+# `winscard`, which turns on `flate2`'s `zlib` backend and so
+# `libz-sys`: that links the system zlib where pkg-config finds one
+# and otherwise builds the bundled copy with the C compiler. The
+# IronRDP crates are MIT OR Apache-2.0, and the rest of what they
+# pull is within deny.toml's licence allowlist.
+ironrdp-server = { version = "0.13", default-features = false, features = ["rayon", "helper"] }
+
+# The IronRDP display and input handler traits are declared with
+# `#[async_trait::async_trait]`, and `ironrdp-server` does not
+# re-export the macro, so implementors annotate their own impls with
+# it. Already in Cargo.lock, so this adds an edge, not a crate.
+async-trait = "0.1"
+
+# Renderer crate: provides the surface mirror the display handler
+# reads damage from, and the input event and display size types the
+# input handler sends. No renderer features: this crate reads
+# decoded surfaces and sends input, so it needs neither the H.264
+# encoder nor any optional decoder.
+shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.3.0", default-features = false }
+
+# Protocol crate: the mouse-mode and keyboard-modifier constants the
+# input handler maps RDP input onto.
+shakenfist-spice-protocol = { path = "../shakenfist-spice-protocol", version = "0.3.0" }
+
+# Async runtime. The server runs on a current-thread runtime on a
+# thread of its own, so the multi-thread scheduler is not needed.
+tokio = { version = "1", features = ["rt", "sync", "time", "net", "macros"] }
+
+# Error handling
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+
+# Byte buffers for bitmap updates (the type IronRDP's `BitmapUpdate`
+# carries its pixel data in)
+bytes = "1"
+
+# The per-launch password. 0.9 rather than the 0.8 the other
+# workspace crates use, because `ironrdp-connector` already pulls 0.9
+# into Cargo.lock, so this adds an edge, not a crate.
+rand = "0.9"
+
+# Self-signed certificate generation when no certificate is supplied.
+# The same version ryll/Cargo.toml uses for its --web TLS tests and
+# shakenfist-spice-protocol for its matcher tests.
+rcgen = "0.14"
+
+# SHA-256 fingerprint of the server certificate, printed at launch so
+# a user can match what the RDP client shows. 0.11 is the version
+# already in Cargo.lock.
+sha2 = "0.11"

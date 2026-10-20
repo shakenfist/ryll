@@ -10,6 +10,7 @@
 #   usbredir          → protocol
 #   renderer          → protocol + compression + usbredir
 #   webrtc            → renderer
+#   rdp               → protocol + renderer
 #   ryll              → all of the above
 #
 # Run via `make publish-crates`, which executes this inside the
@@ -29,6 +30,7 @@ for crate in \
         shakenfist-spice-usbredir \
         shakenfist-spice-renderer \
         shakenfist-spice-webrtc \
+        shakenfist-spice-rdp \
         ryll; do
     echo "=== Publishing ${crate} ==="
     cargo publish -p "${crate}"

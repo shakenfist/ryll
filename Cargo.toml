@@ -4,6 +4,7 @@ members = [
     "ryll",
     "shakenfist-spice-compression",
     "shakenfist-spice-protocol",
+    "shakenfist-spice-rdp",
     "shakenfist-spice-renderer",
     "shakenfist-spice-usbredir",
     "shakenfist-spice-webrtc",
@@ -15,12 +16,15 @@ unwrap_used = "warn"
 [workspace.package]
 version = "0.3.0"
 edition = "2021"
-# Fixed by `slice::as_chunks` in shakenfist-spice-compression, which
-# clippy's `chunks_exact_to_as_chunks` lint requires over the older
-# `chunks_exact`. Declared rather than left implicit so a too-old
-# toolchain fails with cargo's MSRV error instead of a confusing
-# "method not found" in a packaging lane.
-rust-version = "1.88"
+# Fixed by `ironrdp-server`, which shakenfist-spice-rdp depends on and
+# which declares 1.89 itself; a workspace whose RDP crate pulls a 1.89
+# dependency cannot honestly claim less. The older floor, 1.88 for
+# `slice::as_chunks` in shakenfist-spice-compression (which clippy's
+# `chunks_exact_to_as_chunks` lint requires over the older
+# `chunks_exact`), still holds beneath it. Declared rather than left
+# implicit so a too-old toolchain fails with cargo's MSRV error instead
+# of a confusing "method not found" in a packaging lane.
+rust-version = "1.89"
 license = "Apache-2.0"
 authors = ["Michael Still <mikal@stillhq.com>"]
 repository = "https://github.com/shakenfist/ryll"
