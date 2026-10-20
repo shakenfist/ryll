@@ -34,9 +34,9 @@ mozjpeg = ["dep:mozjpeg", "jpeg"]
 # H.264 stream decode (`H264VideoDecoder`) via openh264, which builds
 # Cisco's C++ codec from vendored source. Without it `for_stream`
 # refuses H.264 as an unsupported codec, so a consumer that leaves it
-# off must not advertise H.264 to the server. Only meaningful with
-# `jpeg`, which is what compiles the `video` module.
-h264-decode = ["dep:openh264"]
+# off must not advertise H.264 to the server. Implies `jpeg`, which is
+# what compiles the `video` module the decoder lives in.
+h264-decode = ["dep:openh264", "jpeg"]
 
 [dependencies]
 anyhow = "1"

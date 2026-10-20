@@ -103,7 +103,10 @@ impl DamageRect {
 ///
 /// No two rectangles held ever qualify to merge with each other, so
 /// adding one only has to merge the newcomer (and whatever it grows into)
-/// with the rest.
+/// with the rest. The merge loop stops only when the grown rectangle
+/// merges with none of the others, which keeps that true; a rectangle the
+/// newcomer grows to contain is absorbed too, because containment always
+/// passes the area rule.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DamageRegion {
     rects: Vec<DamageRect>,

@@ -30,7 +30,7 @@ set -euo pipefail
 PKG=shakenfist-spice-renderer
 
 # Features of the renderer, each checked in isolation.
-FEATURES=(audio usbredir webdav encoder h264-decode mozjpeg)
+FEATURES=(audio usbredir webdav encoder h264-decode mozjpeg digest-decode)
 
 # Packages that must not appear in the slim build's dependency tree.
 BANNED=(openh264 openh264-sys2 mozjpeg-sys nusb dav-server hyper cpal alsa-sys)

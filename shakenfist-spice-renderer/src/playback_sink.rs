@@ -44,6 +44,11 @@ pub struct PlaybackFormat {
 /// non-blocking and cheap; in practice they should `try_send`
 /// onto a downstream channel and drop on overflow rather than
 /// awaiting.
+///
+/// Samples arrive at full scale. Ryll's local volume control is
+/// applied only to local output, and the playback channel does not
+/// advertise `PLAYBACK_VOLUME`, so a sink is neither given nor told
+/// about any volume or mute state.
 pub trait PlaybackSink: Send + Sync {
     /// An audio stream started (`PLAYBACK_START`), or the server
     /// changed the data mode of a running one (`PLAYBACK_MODE`), so

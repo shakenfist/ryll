@@ -1743,9 +1743,8 @@ mod tests {
     /// it as a lost frame. Either way that is 960 samples per channel.
     const SILENT_STEREO_OPUS: [u8; 1] = [0xFC];
 
-    async fn sink_channel() -> (PlaybackChannel, Arc<RecordingSink>, TestChannelPeers) {
+    async fn channel_with(output: PlaybackOutput) -> (PlaybackChannel, TestChannelPeers) {
         let (stream, events, peers) = loopback().await;
-        let sink = Arc::new(RecordingSink::default());
         let channel = PlaybackChannel::new(
             stream,
             events,
@@ -1755,8 +1754,14 @@ mod tests {
             VolumeControl::new(),
             LogConfig::default(),
             Arc::new(AtomicBool::new(false)),
-            PlaybackOutput::Sink(sink.clone()),
+            output,
         );
+        (channel, peers)
+    }
+
+    async fn sink_channel() -> (PlaybackChannel, Arc<RecordingSink>, TestChannelPeers) {
+        let sink = Arc::new(RecordingSink::default());
+        let (channel, peers) = channel_with(PlaybackOutput::Sink(sink.clone())).await;
         (channel, sink, peers)
     }
 
@@ -1897,6 +1902,25 @@ mod tests {
         );
         assert_eq!(channel.data_packets_decoded, 1);
         assert_no_audio_thread(&channel);
+    }
+
+    #[cfg(feature = "audio")]
+    #[tokio::test]
+    async fn a_local_session_starts_and_stops_the_audio_thread() {
+        // The thread retries a missing output device rather than
+        // failing, so this holds on a host with no sound card.
+        let (mut channel, _peers) = channel_with(PlaybackOutput::Local).await;
+        feed(
+            &mut channel,
+            &[mode(audio_data_mode::RAW), start(2, 48_000)],
+        )
+        .await;
+        assert_eq!(channel.audio_thread_starts, 1);
+        assert!(channel.audio_thread.is_some());
+        assert!(channel.audio_producer.is_some());
+        feed(&mut channel, &[stop()]).await;
+        assert!(channel.audio_thread.is_none());
+        assert!(channel.audio_producer.is_none());
     }
 
     #[tokio::test]
