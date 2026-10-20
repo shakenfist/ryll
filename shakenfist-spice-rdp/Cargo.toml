@@ -96,7 +96,25 @@ sha2 = "0.11"
 tokio = { version = "1", features = ["test-util"] }
 
 # The input handler's tests build RDP synchronize events, whose lock
-# flags type `ironrdp-server` uses but does not re-export. Already in
-# Cargo.lock through `ironrdp-server`, so this adds an edge, not a
-# crate.
+# flags type `ironrdp-server` uses but does not re-export, and the
+# loopback test builds the client's key events and capability types
+# from it. Already in Cargo.lock through `ironrdp-server`, so this
+# adds an edge, not a crate.
 ironrdp-pdu = "0.9"
+
+# IronRDP's own client, which the loopback test (tests/loopback.rs)
+# drives against `serve` to prove the handshake without a desktop RDP
+# client: the connector runs the connection sequence, the session
+# decodes the display updates the server sends, `ironrdp-tokio` frames
+# the PDUs over a tokio socket, and `ironrdp-tls` upgrades the socket
+# to TLS without verifying the server's self-signed certificate. The
+# versions are the ones `ironrdp-server` builds on. The connector and
+# tokio crates are already in Cargo.lock through it; the session crate
+# (with `ironrdp-bulk`, its bulk decompressor) and the TLS crate are
+# new to the tree and reach only test builds. The `rustls` feature
+# selects the TLS backend with the aws-lc-rs provider the workspace
+# already carries.
+ironrdp-connector = "0.10"
+ironrdp-session = "0.11"
+ironrdp-tokio = "0.10"
+ironrdp-tls = { version = "0.2", features = ["rustls"] }
