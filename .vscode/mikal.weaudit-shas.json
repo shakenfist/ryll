@@ -25,10 +25,6 @@
       "sha": "7a223bb8c7f0875f3ecee14f61b63dee6c1338b2",
       "date": "2026-08-24"
     },
-    ".github/workflows/ci.yml": {
-      "sha": "eb597adf7af21205fc226382b7567203acf30c49",
-      "date": "2026-10-14"
-    },
     ".github/workflows/codeql-analysis.yml": {
       "sha": "975f656d8135aefe12ba2f2094d8671460ef1a8a",
       "date": "2026-10-05"
@@ -64,10 +60,6 @@
     ".github/workflows/prune-reviews.yml": {
       "sha": "91ff1783e6589e198ce5d14aab473112761b7ce2",
       "date": "2026-10-16"
-    },
-    ".github/workflows/release.yml": {
-      "sha": "a42a5b84650dcd920936a3ddb045cc50359dd35f",
-      "date": "2026-10-14"
     },
     ".github/workflows/supply-chain.yml": {
       "sha": "c855b8e116194dc365244a69aff28900f33023fe",
@@ -112,10 +104,6 @@
     "clippy.toml": {
       "sha": "154626ef4e81f6aa3e7c271ef613fe017ad658f9",
       "date": "2026-09-23"
-    },
-    "docs/ci.md": {
-      "sha": "b8c64c51e53cdc2c8b259a94d09ea68e0fb78959",
-      "date": "2026-10-16"
     },
     "docs/configuration.md": {
       "sha": "0d5077f262997629ce763111b34ef08b42570729",
@@ -525,10 +513,6 @@
       "sha": "2771fe57b2233883b2d7ae1039d90ecfa718dab5",
       "date": "2026-10-16"
     },
-    "tools/propose-release.sh": {
-      "sha": "dde857639228ffe6d88b9a2da6db8e77d6c74c71",
-      "date": "2026-10-16"
-    },
     "tools/proxmox-smoke.py": {
       "sha": "63a243a0d330982e367945942ef188ef58b4d4e3",
       "date": "2026-10-05"
@@ -551,10 +535,6 @@
     },
     "tools/run-shellcheck.sh": {
       "sha": "a070aa57d15755cd3543756bad447c58da0253d7",
-      "date": "2026-07-26"
-    },
-    "tools/sign-release-tag.sh": {
-      "sha": "835d0b4125fddd9a20a63b412db15519a1643c30",
       "date": "2026-07-26"
     },
     "tools/start-desktop-qemu.sh": {

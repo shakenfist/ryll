@@ -140,10 +140,6 @@
       "author": "mikal"
     },
     {
-      "path": "tools/sign-release-tag.sh",
-      "author": "mikal"
-    },
-    {
       "path": "tools/test_click.py",
       "author": "mikal"
     },
@@ -572,15 +568,7 @@
       "author": "mikal"
     },
     {
-      "path": ".github/workflows/ci.yml",
-      "author": "mikal"
-    },
-    {
       "path": ".github/workflows/manual-build.yml",
-      "author": "mikal"
-    },
-    {
-      "path": ".github/workflows/release.yml",
       "author": "mikal"
     },
     {
@@ -616,10 +604,6 @@
       "author": "mikal"
     },
     {
-      "path": "tools/propose-release.sh",
-      "author": "mikal"
-    },
-    {
       "path": "tools/review-tracking.sh",
       "author": "mikal"
     },
@@ -641,10 +625,6 @@
     },
     {
       "path": "STYLEGUIDE.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/ci.md",
       "author": "mikal"
     },
     {

@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "files": {
+    "tools/sign-release-tag.sh": {
+      "sha": "6eea42015fc6b25bcf30d09c22c9da0b3841ed5f",
+      "date": "2026-10-20",
+      "imported": {
+        "repo": "shakenfist/development",
+        "reviewer": "mikal",
+        "path": "templates/release-automation-rust/sign-release-tag.sh",
+        "commit": "0f000d84b07093fe65093671e32862c03e436990",
+        "verified": true
+      }
+    },
+    "tools/tag-release.sh": {
+      "sha": "509db0f79fa868fc2101da0a0a135600901ef790",
+      "date": "2026-10-20",
+      "imported": {
+        "repo": "shakenfist/development",
+        "reviewer": "mikal",
+        "path": "templates/release-automation-rust/tag-release.sh",
+        "commit": "0f000d84b07093fe65093671e32862c03e436990",
+        "verified": true
+      }
+    }
+  }
+}
