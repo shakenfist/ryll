@@ -98,8 +98,9 @@ jobs:
   # The constraints on this section, from the template:
   #
   # - every build job needs check-version, directly or through another
-  #   build job, and carries no if: of its own that would run it after a
-  #   dependency failed or was skipped;
+  #   build job, and carries an if: like build-linux's: !cancelled()
+  #   and a needs.<job>.result == 'success' clause for each job in its
+  #   needs, with no always() and nothing else;
   # - every build job is listed in sign-tag's needs, so the tag is never
   #   signed while a build is running or after one has failed;
   # - an artifact whose name starts with release- is one github-release
@@ -115,9 +116,18 @@ jobs:
   # enough from the GitHub-hosted matrix below to warrant a
   # separate job. The debian-13-docker image ships with docker.io
   # preinstalled (see supply-chain.yml).
+  #
+  # The if: is needed for the workflow_dispatch dry run. A job with no
+  # if: of its own runs only if every job upstream of it succeeded, not
+  # just the ones it names in needs, so the skipped ci-gate would skip
+  # this job even though check-version ran. Testing check-version's
+  # result alone lets it run then, and on a tag push check-version
+  # succeeds only after the gate did. A failed, skipped or cancelled
+  # dependency still stops it.
   build-linux:
     name: Build (Linux x86_64)
     needs: check-version
+    if: ${{ !cancelled() && needs.check-version.result == 'success' }}
     runs-on: [self-hosted, vm, debian-13-docker, l]
     timeout-minutes: 120
     permissions:
@@ -161,10 +171,12 @@ jobs:
 
   # These platforms stay on GitHub-hosted runners: we own no macOS,
   # Windows, or aarch64 Linux hardware, and this is a public
-  # repository so GitHub-hosted runner minutes are free.
+  # repository so GitHub-hosted runner minutes are free. See
+  # build-linux for why it carries this if:.
   build:
     name: Build (${{ matrix.name }})
     needs: check-version
+    if: ${{ !cancelled() && needs.check-version.result == 'success' }}
     permissions:
       contents: read
     strategy:
@@ -318,10 +330,12 @@ jobs:
   # QEMU), so it only needs check-version and can build in parallel
   # with the Rust jobs above. manual-build.yml carries a copy of this
   # matrix (its wheel-* platforms) so a branch can be tested before a
-  # tag; keep the two in sync.
+  # tag; keep the two in sync. See build-linux for why it carries this
+  # if:.
   build-ryll-wheels:
     name: Build ryll wheel (${{ matrix.arch }})
     needs: check-version
+    if: ${{ !cancelled() && needs.check-version.result == 'success' }}
     runs-on: ${{ matrix.runs-on }}
     timeout-minutes: 120
     permissions:
