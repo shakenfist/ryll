@@ -475,7 +475,7 @@ cursor, resize, text clipboard and audio playback. Specifically:
 
 | Phase | Plan | Status | Merged |
 |-------|------|--------|--------|
-| 1. Renderer prep: damage, pointer translation, slim build, device-free audio | [PLAN-rdp-frontend-phase-01-renderer-prep.md](PLAN-rdp-frontend-phase-01-renderer-prep.md) | In progress | |
+| 1. Renderer prep: damage, pointer translation, slim build, device-free audio | [PLAN-rdp-frontend-phase-01-renderer-prep.md](PLAN-rdp-frontend-phase-01-renderer-prep.md) | Complete | 4696a95 |
 | 2. RDP skeleton: `shakenfist-spice-rdp`, `--rdp`, display, keyboard, mouse, security | - | Not started | |
 | 3. Cursor and resize | - | Not started | |
 | 4. Clipboard and audio | - | Not started | |
