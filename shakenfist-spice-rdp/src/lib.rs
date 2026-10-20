@@ -34,6 +34,8 @@ mod input;
 mod server;
 mod tls;
 
+pub use display::MirrorDisplay;
+
 /// What the RDP adapters need from one SPICE session.
 ///
 /// Every field is `Send`, and the channels work across tokio

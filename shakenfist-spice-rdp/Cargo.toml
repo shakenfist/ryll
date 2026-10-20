@@ -82,3 +82,8 @@ rcgen = "0.14"
 # a user can match what the RDP client shows. 0.11 is the version
 # already in Cargo.lock.
 sha2 = "0.11"
+
+[dev-dependencies]
+# Paused time for the display handler's tests, which wait on its
+# damage poll interval without sleeping in real time.
+tokio = { version = "1", features = ["test-util"] }
