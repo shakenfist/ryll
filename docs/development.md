@@ -97,8 +97,8 @@ instructions.
 
 ## Cargo features
 
-ryll ships several default-on Cargo features that can be opted
-out at build time:
+ryll ships several Cargo features, most of them default-on and
+able to be opted out of at build time:
 
 - **`gui`** (default-on) — eframe, egui, arboard, rfd, and the
   whole interactive UI.  Disabling it produces a `--headless`
@@ -124,6 +124,12 @@ out at build time:
   QR-encoded visual digest and emits a `digest_updated`
   control-socket event on each frame counter change.  Built
   only for the kerbside test harness; not in production ryll.
+- **`rdp`** (default-off) — the `--rdp` mode, which serves the
+  SPICE session to stock RDP clients through the
+  shakenfist-spice-rdp crate and IronRDP.  `make lint` and
+  `make test` build it; release builds leave it out.  Running a
+  binary built without it with `--rdp` exits with a clear "this
+  ryll binary was built without the `rdp` feature" message.
 
 The slim test-harness binary is built with
 `cargo build --release --no-default-features -p ryll`.  See

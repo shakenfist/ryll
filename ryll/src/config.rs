@@ -49,6 +49,17 @@ impl ImageCompression {
     }
 }
 
+/// How an RDP client authenticates in `--rdp` mode.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum RdpSecurityMode {
+    /// TLS, with the username and password checked inside it. Every
+    /// RDP client supports this.
+    Tls,
+    /// Network Level Authentication (CredSSP inside TLS). Clients
+    /// that offer only TLS are refused.
+    Nla,
+}
+
 /// Ryll - A Rust SPICE VDI client
 #[derive(Parser, Debug)]
 #[command(author, version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("RYLL_GIT_SHA"), ")"), about, long_about = None)]
@@ -257,6 +268,58 @@ pub struct Args {
     #[arg(long = "web-ice-server", value_name = "URL")]
     pub web_ice_server: Vec<String>,
 
+    /// Serve the SPICE session to stock RDP clients (mstsc,
+    /// FreeRDP and the platform RDP apps). Listens on port 3389,
+    /// or an ephemeral port if 3389 is in use, and prints the
+    /// address, the username, a per-launch random password and the
+    /// fingerprint of a per-launch self-signed certificate.
+    /// Clients authenticate with TLS unless --rdp-security says
+    /// otherwise. A reachability fallback for users with no SPICE
+    /// client, which loses SPICE features such as USB redirection
+    /// and folder sharing. Mutually exclusive with --web, --headless
+    /// and the GUI default. Needs a ryll built with the `rdp`
+    /// feature.
+    #[arg(long, conflicts_with_all = ["web", "headless"])]
+    pub rdp: bool,
+
+    /// Bind address for --rdp mode (default 127.0.0.1).
+    #[arg(long, default_value = "127.0.0.1")]
+    pub rdp_host: IpAddr,
+
+    /// Listen port for --rdp mode (default 3389, or an ephemeral
+    /// port if 3389 is in use). A port given here is used or the
+    /// launch fails; 0 asks for an ephemeral port.
+    #[arg(long)]
+    pub rdp_port: Option<u16>,
+
+    /// Username RDP clients log in with in --rdp mode (default
+    /// ryll).
+    #[arg(long, default_value = "ryll")]
+    pub rdp_user: String,
+
+    /// Password RDP clients log in with in --rdp mode. Defaults to
+    /// a random password generated and printed at each launch.
+    /// Visible to other users of this host in the process list, so
+    /// prefer the generated one on a shared machine.
+    #[arg(long)]
+    pub rdp_password: Option<String>,
+
+    /// How RDP clients authenticate in --rdp mode (default tls).
+    #[arg(long, value_enum, default_value_t = RdpSecurityMode::Tls)]
+    pub rdp_security: RdpSecurityMode,
+
+    /// PEM-encoded TLS certificate chain for --rdp mode. If
+    /// supplied, --rdp-tls-key is also required and clients are
+    /// shown this certificate instead of a self-signed one
+    /// generated at launch.
+    #[arg(long, requires = "rdp_tls_key")]
+    pub rdp_tls_cert: Option<PathBuf>,
+
+    /// PEM-encoded TLS private key for --rdp mode. Required if
+    /// --rdp-tls-cert is supplied.
+    #[arg(long, requires = "rdp_tls_cert")]
+    pub rdp_tls_key: Option<PathBuf>,
+
     /// Maximum total bytes for the SPICE display image cache,
     /// in MiB. Defaults to 256. The cache holds decoded RGBA
     /// for images the server flagged with CACHE_ME; without a
@@ -359,21 +422,21 @@ pub fn web_media_bind_policy(args: &Args) -> Result<UdpBindPolicy> {
 
 /// Reject `--control-socket` in GUI mode.
 ///
-/// The socket is valid with `--headless` or `--web`, both of which
-/// run a session with no host window and can host the server. The
-/// GUI cannot: it owns input and the surface itself, and a second
+/// The socket is valid with `--headless`, `--web` or `--rdp`, all of
+/// which run a session with no host window and can host the server.
+/// The GUI cannot: it owns input and the surface itself, and a second
 /// driver injecting events behind its back has no defined meaning.
 ///
 /// Expressed here rather than as a clap `requires`, because clap
-/// cannot say "one of these two flags" and the error it produces for
-/// a single `requires` names the wrong flag.
+/// cannot say "one of these flags" and the error it produces for a
+/// single `requires` names the wrong flag.
 #[cfg(unix)]
 pub fn validate_control_socket(args: &Args) -> Result<()> {
-    if args.control_socket.is_some() && !args.headless && !args.web {
+    if args.control_socket.is_some() && !args.headless && !args.web && !args.rdp {
         bail!(
-            "--control-socket needs a session with no host window: pass --headless or \
-             --web as well. It is not available in GUI mode, where the window owns input \
-             and the surface."
+            "--control-socket needs a session with no host window: pass --headless, \
+             --web or --rdp as well. It is not available in GUI mode, where the window \
+             owns input and the surface."
         );
     }
     Ok(())
@@ -1182,13 +1245,28 @@ delete-this-file=1\n";
         validate_control_socket(&args).expect("headless should still accept a control socket");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_control_socket_is_allowed_alongside_rdp() {
+        let args = Args::try_parse_from([
+            "ryll",
+            "--rdp",
+            "--file",
+            "x.vv",
+            "--control-socket",
+            "/tmp/ryll-test.sock",
+        ])
+        .expect("args parse");
+        validate_control_socket(&args).expect("rdp mode should accept a control socket");
+    }
+
     /// The GUI still refuses one, and says which flag to add.
     ///
     /// The window owns input and the surface, so a second driver
     /// injecting events behind its back has no defined meaning.
     #[cfg(unix)]
     #[test]
-    fn a_control_socket_without_headless_or_web_is_refused() {
+    fn a_control_socket_without_headless_web_or_rdp_is_refused() {
         let args = Args::try_parse_from([
             "ryll",
             "--file",
@@ -1206,6 +1284,86 @@ delete-this-file=1\n";
             err
         );
         assert!(err.contains("--web"), "error should name --web: {}", err);
+        assert!(err.contains("--rdp"), "error should name --rdp: {}", err);
+    }
+
+    fn rdp_args(extra: &[&str]) -> Args {
+        let mut argv = vec!["ryll", "--rdp", "--file", "x.vv"];
+        argv.extend_from_slice(extra);
+        Args::try_parse_from(argv).expect("args parse")
+    }
+
+    #[test]
+    fn rdp_flags_default_to_loopback_tls_and_a_generated_password() {
+        let args = rdp_args(&[]);
+        assert!(args.rdp);
+        assert_eq!(args.rdp_host, IpAddr::from([127, 0, 0, 1]));
+        assert_eq!(args.rdp_port, None);
+        assert_eq!(args.rdp_user, "ryll");
+        assert_eq!(args.rdp_password, None);
+        assert_eq!(args.rdp_security, RdpSecurityMode::Tls);
+        assert_eq!(args.rdp_tls_cert, None);
+        assert_eq!(args.rdp_tls_key, None);
+    }
+
+    #[test]
+    fn rdp_flags_parse() {
+        let args = rdp_args(&[
+            "--rdp-host",
+            "::1",
+            "--rdp-port",
+            "0",
+            "--rdp-user",
+            "alice",
+            "--rdp-password",
+            "s3cret",
+            "--rdp-security",
+            "nla",
+            "--rdp-tls-cert",
+            "cert.pem",
+            "--rdp-tls-key",
+            "key.pem",
+        ]);
+        assert_eq!(args.rdp_host, "::1".parse::<IpAddr>().expect("address"));
+        assert_eq!(args.rdp_port, Some(0));
+        assert_eq!(args.rdp_user, "alice");
+        assert_eq!(args.rdp_password.as_deref(), Some("s3cret"));
+        assert_eq!(args.rdp_security, RdpSecurityMode::Nla);
+        assert_eq!(args.rdp_tls_cert, Some(PathBuf::from("cert.pem")));
+        assert_eq!(args.rdp_tls_key, Some(PathBuf::from("key.pem")));
+    }
+
+    #[test]
+    fn rdp_conflicts_with_web_and_headless() {
+        for other in ["--web", "--headless"] {
+            let err = Args::try_parse_from(["ryll", "--rdp", other, "--file", "x.vv"])
+                .expect_err("--rdp should conflict");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{other}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn rdp_tls_cert_and_key_need_each_other() {
+        for (flag, value) in [("--rdp-tls-cert", "cert.pem"), ("--rdp-tls-key", "key.pem")] {
+            let err = Args::try_parse_from(["ryll", "--rdp", "--file", "x.vv", flag, value])
+                .expect_err("one of the pair alone should be refused");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "{flag}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn rdp_host_must_be_an_address() {
+        let err = Args::try_parse_from(["ryll", "--rdp", "--file", "x.vv", "--rdp-host", "nope"])
+            .expect_err("a host name is not an address");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]

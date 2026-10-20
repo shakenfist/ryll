@@ -6993,6 +6993,7 @@ dependencies = [
  "sha1 0.10.7",
  "shakenfist-spice-compression",
  "shakenfist-spice-protocol",
+ "shakenfist-spice-rdp",
  "shakenfist-spice-renderer",
  "shakenfist-spice-usbredir",
  "shakenfist-spice-webrtc",

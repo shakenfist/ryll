@@ -208,7 +208,8 @@ build-tokio-console: fetch
 		$(RYLL_IMAGE) \
 		cargo build --frozen -p ryll --features tokio-console
 
-# Build release version
+# Build release version. Without ryll's default-off `rdp` feature:
+# the --rdp mode is not in release builds yet.
 release: fetch
 	$(DOCKER_RUN_OFFLINE) \
 		-e RYLL_GIT_SHA="$(RYLL_GIT_SHA)" \
@@ -222,8 +223,8 @@ release: fetch
 # toolchain to compile its vendored BoringSSL C sources -- but the
 # gnu triple shares the cfg(windows)/windows-sys surface with msvc,
 # so it catches the common case cheaply. The feature set matches the
-# Windows matrix legs: everything but `capture`. See
-# docs/plans/PLAN-two-stage-ci.md.
+# Windows matrix legs: the default features but `capture`, and not
+# the default-off `rdp`. See docs/plans/PLAN-two-stage-ci.md.
 check-windows: fetch
 	$(DOCKER_RUN_OFFLINE) \
 		$(RYLL_IMAGE) \
@@ -267,21 +268,25 @@ $(RELEASE_VERSION):
 	@:
 endif
 
-# Run tests
+# Run tests. ryll's default-off `rdp` feature is turned on so the
+# --rdp mode is compiled and its tests run; release builds leave it
+# off.
 test: fetch
 	$(DOCKER_RUN_OFFLINE) \
 		$(RYLL_IMAGE) \
-		cargo test --frozen --workspace --features shakenfist-spice-compression/encode
+		cargo test --frozen --workspace --features shakenfist-spice-compression/encode,ryll/rdp
 
-# Run linting checks (rustfmt + clippy). The second clippy builds the
-# encoders the way a server-role consumer does, with no decoders. The
-# final step (tools/check-slim-renderer.sh) builds shakenfist-spice-renderer
+# Run linting checks (rustfmt + clippy). The first clippy turns on
+# ryll's default-off `rdp` feature, as `test` does, so the --rdp mode
+# is linted. The second clippy builds the encoders the way a
+# server-role consumer does, with no decoders. The final step
+# (tools/check-slim-renderer.sh) builds shakenfist-spice-renderer
 # with no default features, feature by feature, and fails if a gated
 # dependency (codecs, usb, webdav, audio output) leaks into that build.
 lint: fetch
 	$(DOCKER_RUN_OFFLINE) \
 		$(RYLL_IMAGE) \
-		sh -c "cargo fmt --all --check && cargo clippy --frozen --workspace --all-targets --features shakenfist-spice-compression/encode -- -D warnings && cargo clippy --frozen -p shakenfist-spice-compression --no-default-features --features encode -- -D warnings && tools/check-slim-renderer.sh"
+		sh -c "cargo fmt --all --check && cargo clippy --frozen --workspace --all-targets --features shakenfist-spice-compression/encode,ryll/rdp -- -D warnings && cargo clippy --frozen -p shakenfist-spice-compression --no-default-features --features encode -- -D warnings && tools/check-slim-renderer.sh"
 
 # Run linting with auto-fix
 lint-fix: fetch
