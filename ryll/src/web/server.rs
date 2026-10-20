@@ -25,13 +25,6 @@ use tracing::info;
 
 use super::signalling::EncoderInfra;
 
-/// Default capacity of the broadcast channel that fan-outs
-/// `ChannelEvent`s from the renderer to web-mode consumers
-/// (surface mirror in 5b, cursor relay in 5d, audio sink in 5e).
-/// 5a installs no real subscribers; a slow / absent subscriber
-/// would simply lose old messages with `RecvError::Lagged`,
-/// which is fine because the events are stateless deltas.
-pub const EVENT_BROADCAST_CAPACITY: usize = 1024;
 /// Capacity of the `InputEvent` mpsc fed by browser
 /// keyboard/mouse messages.
 pub const INPUT_CHANNEL_CAPACITY: usize = 256;
@@ -96,7 +89,7 @@ pub struct WebState {
     pub surface_mirror: Arc<Mutex<SurfaceMirror>>,
     /// Slot holding the active bridge's audio-pump
     /// `mpsc::Sender`. The renderer-side
-    /// [`crate::web::audio::WebOpusSink`] reads from this slot
+    /// [`crate::web::audio::WebPlaybackSink`] reads from this slot
     /// on every Opus DATA packet; the signalling handler writes
     /// a fresh `Sender` into the slot at every `/offer`. `None`
     /// outside web-with-SPICE sessions (e.g. unit tests of the

@@ -23,8 +23,8 @@ workspace = true
 # builds (debian package, GUI install) keep their behaviour.
 # `cargo build --no-default-features -p ryll` is the slim
 # headless build used by the kerbside loadtest and direct-qemu
-# CI lane: no eframe, no arboard, no rfd, no cpal, no opus-
-# decoder.  See docs/control-socket-protocol.md and
+# CI lane: no eframe, no arboard, no rfd, no cpal.  See
+# docs/control-socket-protocol.md and
 # https://github.com/shakenfist/kerbside/blob/develop/docs/plans/PLAN-test-harness.md
 # for the rationale.
 default = ["capture", "gui", "audio"]
@@ -35,10 +35,13 @@ default = ["capture", "gui", "audio"]
 # `--web`) and exits with a clear error if invoked without one.
 gui = ["dep:eframe", "dep:arboard", "dep:rfd"]
 
-# `audio` enables the cpal/opus playback pipeline both here and
-# in shakenfist-spice-renderer.  Disabling it leaves the SPICE
-# main channel running normally but skips the playback channel
-# (logs "Skipping playback channel: audio feature disabled").
+# `audio` enables local audio output (the renderer's cpal
+# thread), which the GUI and `--headless` play the guest's audio
+# through.  Disabling it leaves the SPICE main channel running
+# normally, but those modes skip the playback channel (logs
+# "Skipping playback channel ... audio feature disabled at compile
+# time").  `--web` sends audio to the browser rather than a local
+# device, so it links the playback channel either way.
 audio = ["shakenfist-spice-renderer/audio"]
 
 # `digest-decode` plumbs through to
@@ -84,9 +87,9 @@ sha1 = "0.10"
 rand = "0.8"
 
 # Audio playback lives in shakenfist-spice-renderer's
-# `channels::playback` module and is gated by the `audio`
-# feature on that crate.  ryll's own `audio` feature
-# (above) toggles the dependency through to the renderer.
+# `channels::playback` module; local output is gated by the
+# `audio` feature on that crate.  ryll's own `audio` feature
+# (above) toggles it through to the renderer.
 
 # Logging
 tracing = "0.1"
@@ -115,7 +118,19 @@ lz4_flex = "0.14"
 # cargo-release; see tools/cut-release.sh.
 shakenfist-spice-compression = { path = "../shakenfist-spice-compression", version = "0.3.0" }
 shakenfist-spice-protocol = { path = "../shakenfist-spice-protocol", version = "0.3.0" }
-shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.3.0", default-features = false }
+# The renderer's features are named explicitly rather than taken from
+# its defaults, so ryll's own `--no-default-features` build controls
+# `audio` (forwarded by ryll's `audio` feature above) while keeping
+# everything else ryll uses: USB redirection, WebDAV sharing, the
+# H.264 encoder (`--web` and `--capture`), H.264 decode and the SIMD
+# JPEG decoder.
+shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.3.0", default-features = false, features = [
+    "usbredir",
+    "webdav",
+    "encoder",
+    "h264-decode",
+    "mozjpeg",
+] }
 shakenfist-spice-usbredir = { path = "../shakenfist-spice-usbredir", version = "0.3.0" }
 shakenfist-spice-webrtc = { path = "../shakenfist-spice-webrtc", version = "0.3.0" }
 

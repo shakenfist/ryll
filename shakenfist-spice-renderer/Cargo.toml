@@ -13,12 +13,48 @@ readme = "README.md"
 workspace = true
 
 [features]
-# `audio` pulls in the cpal/opus/rtrb playback stack and the
-# `channels::playback` module that depends on them.  Default-on
-# so existing builds (GUI ryll, the loadtest, CI lanes that did
-# not opt out) keep their behaviour.
-default = ["audio"]
-audio = ["dep:cpal", "dep:opus-decoder", "dep:rtrb"]
+# Everything except `digest-decode` is default-on, so a plain
+# dependency on this crate builds the full client. A consumer that
+# wants display decode alone (for example a frontend that relays the
+# guest's screen and never touches USB, shared folders or H.264) uses
+# `default-features = false` and names what it needs; that build
+# compiles none of the C codecs or device stacks the features below
+# gate. (The protocol crate's TLS stack is not among them.)
+default = ["audio", "usbredir", "webdav", "encoder", "h264-decode", "mozjpeg"]
+
+# `audio` is local audio output: the cpal thread that plays the
+# guest's audio through this host's default device, and the rtrb ring
+# that feeds it. The playback channel and its Opus decoder are always
+# built, so a `PlaybackOutput::Sink` session gets the guest's audio
+# without this feature; only `PlaybackOutput::Local` needs it.
+audio = ["dep:cpal", "dep:rtrb"]
+
+# `usbredir` is the usbredir channel (`channels::usbredir`) and the
+# USB device backends in `usb` (physical passthrough via nusb on
+# Linux, and virtual mass storage). Without it the channel is not
+# linked.
+usbredir = ["dep:nusb", "dep:shakenfist-spice-usbredir"]
+
+# `webdav` is the WebDAV folder-sharing channel (`channels::webdav`)
+# and the RFC 4918 server in `webdav`. Without it the channel is not
+# linked.
+webdav = ["dep:dav-server", "dep:hyper", "dep:hyper-util"]
+
+# `encoder` is the live H.264 encoder (`H264Encoder`, `EncoderTask`)
+# used by ryll's web frontend and capture. It builds openh264 from
+# vendored C++ source. The frame-source traits, `EncodedFrame` and
+# `EncoderControl` stay available without it.
+encoder = ["shakenfist-spice-compression/encode"]
+
+# `h264-decode` decodes H.264 video streams (openh264). Without it
+# the display channel neither advertises H.264 nor asks for it, so
+# the server sends MJPEG or plain draw commands instead.
+h264-decode = ["shakenfist-spice-compression/h264-decode"]
+
+# `mozjpeg` is the SIMD JPEG decoder (vendored libjpeg-turbo, a C
+# build). Without it JPEG and MJPEG decode through the platform
+# decoder where there is one, else the pure-Rust `jpeg-decoder`.
+mozjpeg = ["shakenfist-spice-compression/mozjpeg"]
 
 # `digest-decode` enables QR-encoded visual-digest detection on
 # the primary surface and emission of `digest_updated` events on
@@ -30,73 +66,60 @@ digest-decode = ["dep:shakenfist-visual-digest"]
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
-tokio-rustls = "0.26"
-rustls-pemfile = "2"
-webpki-roots = "1.0"
 
-# Binary protocol handling
-bytes = "1"
-byteorder = "1"
-
-# Cryptography for SPICE auth
-rsa = "0.9"
-sha1 = "0.10"
-rand = "0.8"
-
-# Audio playback. A dedicated audio thread owns the cpal stream
+# Local audio output. A dedicated audio thread owns the cpal stream
 # so it never needs to be Send. The rtrb ring buffer provides
-# lock-free sample transfer from the tokio network task. All
-# three live behind the default-on `audio` feature so a slim
-# headless build (`--no-default-features`) does not link them.
+# lock-free sample transfer from the tokio network task. Both live
+# behind the default-on `audio` feature so a slim build
+# (`--no-default-features`) does not link them (cpal pulls in ALSA).
 cpal = { version = "0.18", optional = true }
-opus-decoder = { version = "0.1", optional = true }
 rtrb = { version = "0.4", optional = true }
+
+# Opus decode for the playback channel, in every build. Pure Rust.
+opus-decoder = "0.1"
 
 # Logging
 tracing = "0.1"
 
-# LZ4 compression/decompression for general data (webdav, usbredir).
-# SPICE image LZ4 lives in shakenfist-spice-compression below.
+# LZ4 compression/decompression for general data (the webdav and
+# usbredir channels) and the display channel's tests. SPICE image
+# LZ4 lives in shakenfist-spice-compression below. Not optional: the
+# compression crate's `lz4` feature, always on here, pulls it in
+# anyway, so gating it would save nothing.
 lz4_flex = "0.14"
 
 # Extracted SPICE codecs. Path+version dual-spec: cargo uses the
 # path when building locally and the published crate when resolving
 # from crates.io. Versions are kept in lockstep via
-# cargo-release; see tools/cut-release.sh. `encode` is for the H.264
-# encoder the web frontend's pipeline and ryll's capture drive.
-shakenfist-spice-compression = { path = "../shakenfist-spice-compression", version = "0.3.0", features = ["encode"] }
+# cargo-release; see tools/cut-release.sh. Only the pure-Rust
+# decoders the display channel always needs are named here; the C
+# builds (H.264 encode and decode, mozjpeg) come in through this
+# crate's `encoder`, `h264-decode` and `mozjpeg` features.
+shakenfist-spice-compression = { path = "../shakenfist-spice-compression", version = "0.3.0", default-features = false, features = ["quic", "glz", "lz", "lz4", "jpeg"] }
 shakenfist-spice-protocol = { path = "../shakenfist-spice-protocol", version = "0.3.0" }
-shakenfist-spice-usbredir = { path = "../shakenfist-spice-usbredir", version = "0.3.0" }
+# usbredir wire protocol, for the `usbredir` feature.
+shakenfist-spice-usbredir = { path = "../shakenfist-spice-usbredir", version = "0.3.0", optional = true }
 
 # Serialisation
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Error handling
-thiserror = "2"
 anyhow = "1"
-
-# Async channels
-async-channel = "2"
 
 # CancellationToken for coordinated task shutdown (control socket)
 tokio-util = "0.7"
 
-# TCP keepalive configuration (matches spice-gtk behaviour)
+# Control socket bind (control/server.rs)
 socket2 = { version = "0.6", features = ["all"] }
-
-# USB device access (pure Rust, no libusb)
-nusb = "0.2"
 
 # Zlib decompression for SPICE ZLIB_GLZ_RGB (type 107), used in
 # the display channel
 flate2 = "1"
 
-# JPEG decoding for SPICE JPEG image type. The `jpeg-decoder` crate
-# has moved to `shakenfist-spice-compression`, where it backs
-# `JpegDecoderRsDecoder`. The `image` crate is still needed for its
-# own JPEG-adjacent uses elsewhere in the renderer, plus the `png`
-# feature for the control socket's `screenshot` verb.
+# PNG encoding for the control socket's `screenshot` verb, and JPEG
+# fixtures in the display channel's tests. SPICE JPEG decoding lives
+# in `shakenfist-spice-compression`.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 # Base64 encoding for the control socket's `screenshot` verb (3e):
@@ -112,14 +135,14 @@ base64 = "0.23"
 # https://github.com/shakenfist/kerbside/blob/develop/docs/plans/PLAN-test-harness.md.
 shakenfist-visual-digest = { version = "0.1.1", features = ["qr", "serde"], optional = true }
 
-# WebDAV server (RFC 4918 handler with LocalFs backend)
-dav-server = { version = "0.11", default-features = false, features = ["localfs"] }
+# WebDAV server (RFC 4918 handler with LocalFs backend), for the
+# `webdav` feature.
+dav-server = { version = "0.11", default-features = false, features = ["localfs"], optional = true }
 
-# HTTP framing for WebDAV byte-stream transport
-hyper = { version = "1", features = ["http1", "server"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
-http = "1"
-http-body-util = "0.1"
+# HTTP framing for WebDAV byte-stream transport, for the `webdav`
+# feature.
+hyper = { version = "1", features = ["http1", "server"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 
 # Runtime metrics (src/metrics.rs) are the only libc consumer:
 # sysconf(_SC_CLK_TCK) on Linux, and the Mach task/thread FFI on
@@ -128,7 +151,13 @@ http-body-util = "0.1"
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 libc = "0.2"
 
+# USB device access (pure Rust, no libusb), for the `usbredir`
+# feature. Physical passthrough is Linux-only; see usb/mod.rs.
+[target.'cfg(target_os = "linux")'.dependencies]
+nusb = { version = "0.2", optional = true }
+
 [dev-dependencies]
+bytes = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
 
@@ -144,3 +173,15 @@ tokio = { version = "1", features = ["test-util"] }
 # retired) eventually — see the webrtc-0.20-upgrade master plan's
 # Future work.
 rtp = "0.17"
+
+# Both drive the H.264 encoder, so they only build with `encoder`.
+# The other integration tests are discovered as usual.
+[[test]]
+name = "encoder_smoke"
+path = "tests/encoder_smoke.rs"
+required-features = ["encoder"]
+
+[[test]]
+name = "webrtc_h264_smoke"
+path = "tests/webrtc_h264_smoke.rs"
+required-features = ["encoder"]

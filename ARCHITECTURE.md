@@ -27,7 +27,7 @@ The repository is a Cargo workspace with **6 crates**:
 |-------|------|
 | `ryll` | The binary: egui GUI, headless runner, CLI, Ctrl+C, trait impls for host-side concerns (capture, notifications, clipboard, USB devices, WebDAV server) |
 | `shakenfist-spice-protocol` | Protocol constants, message framing, link handshake and auth for both the client and server/proxy roles, HTTP CONNECT tunnelling through a proxy such as Proxmox VE's spiceproxy (`proxy`), the `BoundedReader` for panic-free parsing of untrusted input, warn-once gap registry. Fuzz targets for the internet-facing parsers live in `shakenfist-spice-protocol/fuzz/` (a detached workspace, run under nightly `cargo fuzz`) |
-| `shakenfist-spice-compression` | GLZ/LZ/LZ4 + QUIC decompression, LZ4 and JPEG image encoders and the H.264 video encoder for the server role (the non-default `encode` feature, which the renderer enables for its encoder pipeline), shared (byte-bounded) GLZ dictionary (cross-channel), per-platform JPEG decoder selector (ImageIO / WIC / VA-API / libjpeg-turbo / pure-Rust fallback), MJPEG + H.264 video decoder traits |
+| `shakenfist-spice-compression` | GLZ/LZ/LZ4 + QUIC decompression, LZ4 and JPEG image encoders and the H.264 video encoder for the server role (the non-default `encode` feature, which the renderer enables for its encoder pipeline), shared (byte-bounded) GLZ dictionary (cross-channel), per-platform JPEG decoder selector (ImageIO / WIC / VA-API / libjpeg-turbo / pure-Rust fallback), MJPEG video decoder trait and the H.264 stream decoder (the default-on `h264-decode` feature) |
 | `shakenfist-spice-usbredir` | usbredir wire-format parser and message types |
 | `shakenfist-spice-renderer` | SPICE substrate shared by all frontends: channels, display surface, encoder pipeline, session orchestrator, trait surface for host-side concerns |
 | `shakenfist-spice-webrtc` | WebRTC bridge: wraps an `Arc<dyn PeerConnection>` with a video track, audio track, and control datachannel; consumes `EncodedFrame`s from the renderer's encoder |
@@ -111,7 +111,7 @@ injected at construction time rather than emitted as events:
 | `ClipboardBackend` | `shakenfist-spice-renderer` | `clipboard_arboard`; the renderer's own `MemoryClipboard` for headless and web mode's control socket | Host clipboard read/write via `arboard`, or an in-memory clipboard the control socket's `clipboard_*` verbs drive |
 | `UsbDeviceBackend` | `shakenfist-spice-renderer` | usbredir channel constructor; `RealDevice` / `VirtualMsc` concrete types live in the renderer's `usb/` directory | USB host-side device attachment |
 | `WebdavBackend` | `shakenfist-spice-renderer` | webdav channel constructor; `MuxDemuxer` + `WebdavServer` live in the renderer's `webdav/` directory | WebDAV directory share lifecycle |
-| `OpusPacketSink` | `shakenfist-spice-renderer` | `web::audio::WebOpusSink` | Pre-decode Opus tap on the playback channel for WebRTC passthrough |
+| `PlaybackSink` | `shakenfist-spice-renderer` | `web::audio::WebPlaybackSink` | Receives the playback channel's audio instead of a local device: stream start/stop with format, raw Opus packets (for WebRTC passthrough) and decoded PCM |
 
 **When to use `ChannelEvent` vs a trait**: prefer a
 `ChannelEvent` variant when the concern is event-shaped
@@ -161,7 +161,7 @@ ryll/src/
     ├── signalling.rs    # POST /offer handler, per-viewer encoder +
     │                    #   bridge lifecycle
     ├── assets.rs        # Embedded browser shell, {{TOKEN}} substitution
-    ├── audio.rs         # WebOpusSink (implements OpusPacketSink)
+    ├── audio.rs         # WebPlaybackSink (implements PlaybackSink)
     ├── control.rs       # Server → browser control messages, the
     │                    #   outbound queue the relays feed, and the
     │                    #   writer task that drains it onto the bridge
@@ -181,7 +181,7 @@ shakenfist-spice-renderer/src/
 │   ├── cursor.rs        # Cursor tracking
 │   ├── inputs.rs        # Keyboard/mouse, paste-as-keystrokes,
 │   │                    #   LogicalKey enum, scancode tables
-│   ├── playback.rs      # Audio (PCM/Opus → rtrb → cpal)
+│   ├── playback.rs      # Audio (PCM/Opus → rtrb → cpal, or a PlaybackSink)
 │   ├── usbredir.rs      # USB redirection (SpiceVMC)
 │   └── webdav.rs        # WebDAV sharing (SpiceVMC)
 ├── control/             # Control socket for headless and web (see
@@ -190,7 +190,9 @@ shakenfist-spice-renderer/src/
 │   ├── protocol.rs      # Request/Response/Event wire types
 │   └── server.rs        # Server::bind, Server::run: accept, dispatch
 ├── display/
-│   └── surface.rs       # DisplaySurface pixel buffer + draw-op API
+│   ├── surface.rs       # DisplaySurface pixel buffer + draw-op API
+│   └── damage.rs        # DamageRegion: rectangles written since a
+│                        #   consumer last took them
 ├── encoder/
 │   ├── mod.rs           # Re-exports
 │   ├── frame_source.rs  # FrameSource trait, FrameRef, SyntheticFrameSource
@@ -198,7 +200,12 @@ shakenfist-spice-renderer/src/
 │   │                    #   crate's encoder), EncodedFrame
 │   └── task.rs          # EncoderTask, EncoderControl
 ├── surface_mirror.rs    # SurfaceMirror: egui-free surface state for --web
-├── audio_sink.rs        # OpusPacketSink trait (pre-decode playback tap)
+├── playback_sink.rs     # PlaybackSink trait, PlaybackOutput (local
+│                        #   device or sink), PlaybackFormat
+├── event_bus.rs         # EventBus: ChannelEvent broadcast plus the task
+│                        #   that keeps a SurfaceMirror current
+├── pointer.rs           # PointerTranslator: pointer positions to
+│                        #   InputEvents for the negotiated mouse mode
 ├── usb/                 # USB device backends (RealDevice, VirtualMsc)
 ├── webdav/              # WebDAV mux + embedded server
 ├── session.rs           # run_connection, run_headless orchestrators

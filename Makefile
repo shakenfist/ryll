@@ -274,11 +274,14 @@ test: fetch
 		cargo test --frozen --workspace --features shakenfist-spice-compression/encode
 
 # Run linting checks (rustfmt + clippy). The second clippy builds the
-# encoders the way a server-role consumer does, with no decoders.
+# encoders the way a server-role consumer does, with no decoders. The
+# final step (tools/check-slim-renderer.sh) builds shakenfist-spice-renderer
+# with no default features, feature by feature, and fails if a gated
+# dependency (codecs, usb, webdav, audio output) leaks into that build.
 lint: fetch
 	$(DOCKER_RUN_OFFLINE) \
 		$(RYLL_IMAGE) \
-		sh -c "cargo fmt --all --check && cargo clippy --frozen --workspace --all-targets --features shakenfist-spice-compression/encode -- -D warnings && cargo clippy --frozen -p shakenfist-spice-compression --no-default-features --features encode -- -D warnings"
+		sh -c "cargo fmt --all --check && cargo clippy --frozen --workspace --all-targets --features shakenfist-spice-compression/encode -- -D warnings && cargo clippy --frozen -p shakenfist-spice-compression --no-default-features --features encode -- -D warnings && tools/check-slim-renderer.sh"
 
 # Run linting with auto-fix
 lint-fix: fetch

@@ -1,16 +1,18 @@
 use anyhow::{Context, Result};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex, MutexGuard, PoisonError, TryLockError};
+#[cfg(feature = "audio")]
+use std::sync::{mpsc, MutexGuard, TryLockError};
+use std::sync::{Arc, Mutex, PoisonError};
+#[cfg(feature = "audio")]
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 use super::volume::VolumeControl;
 use crate::opcode_counters::OpcodeCounters;
-use crate::{
-    ByteCounter, LogConfig, NotificationEntry, NotificationSource, OpusPacketSink, TrafficSink,
-};
+use crate::playback_sink::{PlaybackFormat, PlaybackOutput, PlaybackSink};
+use crate::{ByteCounter, LogConfig, NotificationEntry, NotificationSource, TrafficSink};
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
@@ -27,6 +29,7 @@ use super::{ChannelEvent, DisconnectReason, EventSink, MAX_MESSAGE_BODY};
 /// Maximum ring buffer capacity in samples. At 48kHz stereo this is
 /// ~2 seconds. Prevents unbounded memory growth if audio data
 /// arrives faster than it is consumed.
+#[cfg(feature = "audio")]
 const MAX_AUDIO_BUFFER_SAMPLES: usize = 48000 * 2 * 2;
 
 /// Cap for the recent-decode-duration ring published into the
@@ -34,6 +37,10 @@ const MAX_AUDIO_BUFFER_SAMPLES: usize = 48000 * 2 * 2;
 /// pattern: a bounded window of recent measurements so a bug
 /// report has fresh latency data without growing unbounded.
 const MAX_RECENT_PLAYBACK_DECODES: usize = 64;
+
+/// The rate Opus decodes at. The decoder is created at 48 kHz, so
+/// every decoded sample handed on is at this rate.
+const OPUS_DECODE_RATE_HZ: u32 = 48_000;
 
 /// Lock-free counters owned by the audio-thread side of the
 /// playback pipeline. The cpal callback writes to the
@@ -69,11 +76,13 @@ impl AudioCounters {
 }
 
 /// First delay before retrying a failed output stream.
+#[cfg(feature = "audio")]
 const OUTPUT_RETRY_INITIAL: Duration = Duration::from_secs(1);
 
 /// Cap on the doubling retry delay. Long enough that a machine
 /// with no output device at all is not busy-looping, short
 /// enough that plugging headphones back in is noticed promptly.
+#[cfg(feature = "audio")]
 const OUTPUT_RETRY_MAX: Duration = Duration::from_secs(30);
 
 /// How long a stream must keep playing before it counts as
@@ -82,17 +91,24 @@ const OUTPUT_RETRY_MAX: Duration = Duration::from_secs(30);
 /// straight after opening is retried quietly, at most every
 /// `OUTPUT_RETRY_MAX`, rather than rebuilt every second with a
 /// "restored" and an "unavailable" notification each time.
+#[cfg(feature = "audio")]
 const OUTPUT_STABLE_AFTER: Duration = Duration::from_secs(10);
 
 /// How often the audio thread wakes to check for shutdown while
 /// it is watching a stream or waiting to retry.
+#[cfg(feature = "audio")]
 const AUDIO_THREAD_POLL: Duration = Duration::from_millis(50);
 
 /// What the audio thread reports about the output stream. It
 /// has no async context to emit channel events from, so it
 /// sends these to the playback channel, which folds them into
 /// the snapshot and raises notifications (see [`OutputStatus`]).
+///
+/// Only the audio thread sends these, so a build without `audio`
+/// never constructs one; the type and [`OutputStatus::apply`] stay
+/// compiled so the state machine's tests run in every build.
 #[derive(Debug)]
+#[cfg_attr(not(feature = "audio"), allow(dead_code))]
 enum AudioOutputEvent {
     /// An output stream is playing.
     Started(crate::snapshots::PlaybackOutputInfo),
@@ -129,6 +145,7 @@ impl OutputStatus {
     /// the operator should see, if any: the first failure of a
     /// streak, the stable stream that ends it, and reroutes. A
     /// routine start on PLAYBACK_START is silent.
+    #[cfg_attr(not(feature = "audio"), allow(dead_code))]
     fn apply(&mut self, event: AudioOutputEvent) -> Option<NotificationEntry> {
         match event {
             AudioOutputEvent::Started(output) => {
@@ -189,12 +206,18 @@ impl OutputStatus {
     }
 }
 
+/// Linear-interpolation resampler from the stream's rate to the
+/// output device's. Only the local output thread uses it, but it
+/// holds no device state, so it stays compiled (and tested) in a
+/// build without `audio`.
+#[cfg_attr(not(feature = "audio"), allow(dead_code))]
 pub(crate) struct Resampler {
     ratio: f64,
     pos: f64,
     channels: usize,
 }
 
+#[cfg_attr(not(feature = "audio"), allow(dead_code))]
 impl Resampler {
     pub(crate) fn new(from_rate: u32, to_rate: u32, channels: u32) -> Self {
         Resampler {
@@ -241,6 +264,7 @@ impl Resampler {
 }
 
 /// Fill the output buffer with resampled i16 samples.
+#[cfg(feature = "audio")]
 fn write_samples_i16(
     data: &mut [i16],
     local_buf: &mut VecDeque<i16>,
@@ -259,6 +283,7 @@ fn write_samples_i16(
 }
 
 /// Fill the output buffer with resampled f32 samples.
+#[cfg(feature = "audio")]
 fn write_samples_f32(
     data: &mut [f32],
     local_buf: &mut VecDeque<i16>,
@@ -276,16 +301,16 @@ fn write_samples_f32(
     }
 }
 
-/// Convert a little-endian PCM byte stream to a fresh
-/// `Vec<i16>`. Used by the pre-decode tap to hand raw PCM
-/// samples to an [`OpusPacketSink`] without disturbing the
-/// existing cpal path.
-fn pcm_bytes_to_i16(bytes: &[u8]) -> Vec<i16> {
-    let mut out = Vec::with_capacity(bytes.len() / 2);
+/// Convert a little-endian PCM byte stream into `out`, replacing
+/// what it held, for raw-mode DATA. A trailing odd byte is
+/// dropped. The caller reuses `out` across packets, so the hot
+/// path does not allocate once it has grown.
+fn pcm_bytes_to_i16(bytes: &[u8], out: &mut Vec<i16>) {
+    out.clear();
+    out.reserve(bytes.len() / 2);
     for chunk in bytes.as_chunks::<2>().0 {
         out.push(i16::from_le_bytes(*chunk));
     }
-    out
 }
 
 /// Compute the number of 48 kHz samples represented by one
@@ -350,11 +375,13 @@ fn samples_per_frame_48k(toc: u8) -> usize {
 /// Consumer-side state that has to outlive any one cpal stream,
 /// so a stream rebuilt after a failure carries on from the same
 /// ring buffer.
+#[cfg(feature = "audio")]
 struct CallbackState {
     consumer: rtrb::Consumer<i16>,
     local_buf: VecDeque<i16>,
 }
 
+#[cfg(feature = "audio")]
 impl CallbackState {
     /// Drain available samples from the ring buffer into the
     /// local VecDeque so the resampler can use random access.
@@ -410,6 +437,7 @@ impl CallbackState {
 /// and then ended. Only a stream that reached `Stable` resets the
 /// backoff; one that died sooner keeps doubling it, so a device
 /// that dies straight after opening is not rebuilt every second.
+#[cfg(feature = "audio")]
 fn backoff_after_stream(backoff: Duration, stable: bool) -> Duration {
     if stable {
         OUTPUT_RETRY_INITIAL
@@ -420,6 +448,7 @@ fn backoff_after_stream(backoff: Duration, stable: bool) -> Duration {
 
 /// Human-readable name for an output device, for logs,
 /// notifications and the snapshot.
+#[cfg(feature = "audio")]
 fn device_name(device: &cpal::Device) -> String {
     use cpal::traits::DeviceTrait;
     device
@@ -429,12 +458,14 @@ fn device_name(device: &cpal::Device) -> String {
 }
 
 /// State for the dedicated audio output thread.
+#[cfg(feature = "audio")]
 struct AudioThread {
     handle: JoinHandle<()>,
     shutdown: Arc<AtomicBool>,
     events: mpsc::Receiver<AudioOutputEvent>,
 }
 
+#[cfg(feature = "audio")]
 impl AudioThread {
     /// Spawn a dedicated OS thread that owns the cpal stream.
     /// Samples are read from `consumer` via a lock-free ring buffer.
@@ -793,19 +824,24 @@ pub struct PlaybackChannel {
     audio_mode: u16,
     sample_rate: u32,
     channels: u32,
+    /// Producer end of the ring feeding the local output thread.
+    /// Some only while a `Local` session's thread is running.
+    #[cfg(feature = "audio")]
     audio_producer: Option<rtrb::Producer<i16>>,
+    #[cfg(feature = "audio")]
     audio_thread: Option<AudioThread>,
+    /// How many times this channel has tried to start the local
+    /// output thread, so tests can check a `Sink` session never does.
+    #[cfg(test)]
+    audio_thread_starts: u32,
     opus_decoder: Option<opus_decoder::OpusDecoder>,
+    #[cfg(feature = "audio")]
     volume_control: Arc<VolumeControl>,
-    /// Optional pre-decode tap. When set, every Opus DATA
-    /// packet is forwarded to the sink before the decode-to-
-    /// cpal path runs. The web frontend uses this to forward
-    /// Opus packets straight to a WebRTC audio track without
-    /// re-encoding; GUI / headless modes pass `None` and see
-    /// the existing decode path unchanged. It doubles as the
-    /// web-mode signal: `drain_output_events` suppresses local
-    /// output notifications while it is set.
-    opus_sink: Option<Arc<dyn OpusPacketSink>>,
+    /// Where the audio goes. `Local` plays it on the cpal thread
+    /// (only in a build with `audio`); `Sink` hands it to the sink
+    /// and never starts that thread. Both decode Opus, so the
+    /// decode counters mean the same either way.
+    output: PlaybackOutput,
     /// Per-connection cancel flag. The 100 ms select branch in
     /// the read loop polls this so the channel exits cleanly when
     /// the orchestrator's cancel flag flips (Ctrl+C bridge in
@@ -822,6 +858,9 @@ pub struct PlaybackChannel {
     /// Per-session metadata for the currently-active audio
     /// session (Some between START and STOP).
     current_session: Option<crate::snapshots::PlaybackSessionInfo>,
+    /// Raw-mode DATA converted to samples, kept between packets so
+    /// the conversion does not allocate per packet.
+    raw_samples: Vec<i16>,
     /// Cumulative START message count.
     start_count: u64,
     /// Cumulative STOP message count.
@@ -869,8 +908,11 @@ impl PlaybackChannel {
         volume_control: Arc<VolumeControl>,
         log_config: LogConfig,
         cancel: Arc<AtomicBool>,
-        opus_sink: Option<Arc<dyn OpusPacketSink>>,
+        output: PlaybackOutput,
     ) -> Self {
+        // Only the local output thread applies the volume.
+        #[cfg(not(feature = "audio"))]
+        let _ = volume_control;
         PlaybackChannel {
             stream,
             events,
@@ -893,11 +935,16 @@ impl PlaybackChannel {
             audio_mode: 0,
             sample_rate: 0,
             channels: 0,
+            #[cfg(feature = "audio")]
             audio_producer: None,
+            #[cfg(feature = "audio")]
             audio_thread: None,
+            #[cfg(test)]
+            audio_thread_starts: 0,
             opus_decoder: None,
+            #[cfg(feature = "audio")]
             volume_control,
-            opus_sink,
+            output,
             cancel,
             audio_counters: AudioCounters::new(),
             opcodes: OpcodeCounters::new(
@@ -905,6 +952,7 @@ impl PlaybackChannel {
                 message_names::playback_client,
             ),
             current_session: None,
+            raw_samples: Vec::new(),
             start_count: 0,
             stop_count: 0,
             data_packets_received: 0,
@@ -1121,23 +1169,28 @@ impl PlaybackChannel {
                             started_at_secs: self.traffic.elapsed().as_secs_f64(),
                             mm_time_at_start: time,
                             sample_rate_hz: self.sample_rate,
-                            channels: self.channels.min(u8::MAX as u32) as u8,
+                            channels: self.channels_u8(),
                             codec: codec_from_mode(self.audio_mode),
                         });
                         self.start_audio_output();
                         // Opus always operates at 48kHz internally; the
                         // channel count comes from the SPICE START message.
-                        self.opus_decoder =
-                            match opus_decoder::OpusDecoder::new(48000, self.channels as usize) {
-                                Ok(d) => {
-                                    info!("playback: Opus decoder initialized");
-                                    Some(d)
-                                }
-                                Err(e) => {
-                                    warn!("playback: failed to create Opus decoder: {}", e);
-                                    None
-                                }
-                            };
+                        self.opus_decoder = match opus_decoder::OpusDecoder::new(
+                            OPUS_DECODE_RATE_HZ,
+                            self.channels as usize,
+                        ) {
+                            Ok(d) => {
+                                info!("playback: Opus decoder initialized");
+                                Some(d)
+                            }
+                            Err(e) => {
+                                warn!("playback: failed to create Opus decoder: {}", e);
+                                None
+                            }
+                        };
+                        if let Some(sink) = self.sink() {
+                            sink.on_start(self.format());
+                        }
                     }
                 }
                 playback_server::MODE => {
@@ -1150,6 +1203,11 @@ impl PlaybackChannel {
                         // change codec mid-session in principle.
                         if let Some(ref mut session) = self.current_session {
                             session.codec = codec_from_mode(self.audio_mode);
+                            // A sink hears of the change as a fresh
+                            // start, before any data in the new mode.
+                            if let Some(sink) = self.sink() {
+                                sink.on_start(self.format());
+                            }
                         }
                     }
                 }
@@ -1162,35 +1220,45 @@ impl PlaybackChannel {
                         self.data_bytes_received = self
                             .data_bytes_received
                             .saturating_add(audio_data.len() as u64);
+                        // The sink is called outside the timed spans, so
+                        // a slow sink does not read as slow decode.
                         if self.audio_mode == audio_data_mode::RAW {
-                            // Pre-decode tap: forward to the optional
-                            // sink before the decode-to-cpal path.
-                            // Web mode uses this; GUI / headless pass
-                            // None and the call is a no-op.
-                            if let Some(ref sink) = self.opus_sink {
-                                sink.on_pcm_samples(
-                                    &pcm_bytes_to_i16(audio_data),
-                                    self.sample_rate,
-                                    self.channels as u8,
-                                );
-                            }
                             let start = Instant::now();
-                            self.push_samples_raw(audio_data);
+                            let mut samples = std::mem::take(&mut self.raw_samples);
+                            pcm_bytes_to_i16(audio_data, &mut samples);
+                            self.push_local_output(&samples);
                             let dur_us = start.elapsed().as_micros().min(u32::MAX as u128) as u32;
                             self.record_decode_success(dur_us, audio_data.len() as u64);
+                            if let Some(sink) = self.sink() {
+                                sink.on_pcm_samples(&samples, self.sample_rate, self.channels_u8());
+                            }
+                            self.raw_samples = samples;
                         } else if self.audio_mode == audio_data_mode::OPUS {
-                            // Pre-decode tap: forward the raw Opus
-                            // packet to the optional sink before the
-                            // libopus decode + cpal path runs.
-                            if let Some(ref sink) = self.opus_sink {
+                            // Pre-decode tap: the sink gets the packet
+                            // as it arrived, then what it decodes to.
+                            if let Some(sink) = self.sink() {
                                 let samples = opus_packet_samples_48k(audio_data);
                                 sink.on_opus_packet(audio_data, samples);
                             }
                             let start = Instant::now();
-                            let pcm_bytes = self.push_samples_opus(audio_data);
+                            let decoded = self.decode_opus(audio_data);
+                            if let Some(ref pcm) = decoded {
+                                self.push_local_output(pcm);
+                            }
                             let dur_us = start.elapsed().as_micros().min(u32::MAX as u128) as u32;
-                            match pcm_bytes {
-                                Some(bytes) => self.record_decode_success(dur_us, bytes),
+                            match decoded {
+                                Some(pcm) => {
+                                    // Each i16 sample is 2 bytes of PCM.
+                                    let bytes = (pcm.len() as u64).saturating_mul(2);
+                                    self.record_decode_success(dur_us, bytes);
+                                    if let Some(sink) = self.sink() {
+                                        sink.on_decoded_pcm(
+                                            &pcm,
+                                            OPUS_DECODE_RATE_HZ,
+                                            self.channels_u8(),
+                                        );
+                                    }
+                                }
                                 None => {
                                     self.data_packets_decode_failed =
                                         self.data_packets_decode_failed.saturating_add(1);
@@ -1222,9 +1290,17 @@ impl PlaybackChannel {
                 playback_server::STOP => {
                     info!("playback: STOP");
                     self.stop_count = self.stop_count.saturating_add(1);
-                    self.current_session = None;
+                    let was_running = self.current_session.take().is_some();
                     self.stop_audio();
                     self.opus_decoder = None;
+                    // A STOP with no stream running (a repeat, or one
+                    // before any START) is not passed on, so a sink
+                    // always sees on_start before on_stop.
+                    if was_running {
+                        if let Some(sink) = self.sink() {
+                            sink.on_stop();
+                        }
+                    }
                 }
                 playback_server::VOLUME => {
                     // Recorded for bug reports; ryll does not apply the
@@ -1256,46 +1332,37 @@ impl PlaybackChannel {
         Ok(())
     }
 
-    /// Push raw PCM samples into the ring buffer. Bumps the
-    /// `ring_overflow_count` atomic on each sample that the
-    /// producer fails to enqueue. Always treated as a successful
-    /// "decode" (raw mode skips decoding).
-    fn push_samples_raw(&mut self, audio_data: &[u8]) {
+    /// Push samples into the local output thread's ring, if one is
+    /// running. Bumps the `ring_overflow_count` atomic on each
+    /// sample that the producer fails to enqueue. Without the
+    /// `audio` feature there is no local output and this does
+    /// nothing.
+    fn push_local_output(&mut self, samples: &[i16]) {
+        #[cfg(feature = "audio")]
         if let Some(ref mut producer) = self.audio_producer {
-            for chunk in audio_data.as_chunks::<2>().0 {
-                let sample = i16::from_le_bytes(*chunk);
-                if producer.push(sample).is_err() {
+            for &s in samples {
+                if producer.push(s).is_err() {
                     self.audio_counters
                         .ring_overflow_count
                         .fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
+        #[cfg(not(feature = "audio"))]
+        let _ = samples;
     }
 
-    /// Decode Opus audio and push PCM samples into the ring buffer.
-    /// Returns `Some(byte_count)` of decoded PCM bytes produced
-    /// on success, `None` if the decoder errored or no decoder
-    /// is active. Bumps `ring_overflow_count` on each sample the
-    /// producer fails to enqueue.
-    fn push_samples_opus(&mut self, audio_data: &[u8]) -> Option<u64> {
+    /// Decode one Opus packet. Returns the interleaved PCM, at
+    /// [`OPUS_DECODE_RATE_HZ`], or `None` if the decoder errored or
+    /// no decoder is active.
+    fn decode_opus(&mut self, audio_data: &[u8]) -> Option<Vec<i16>> {
         let decoder = self.opus_decoder.as_mut()?;
         let ch = self.channels as usize;
         let mut pcm = vec![0i16; opus_decoder::OpusDecoder::MAX_FRAME_SIZE_48K * ch];
         match decoder.decode(audio_data, &mut pcm, false) {
             Ok(samples) => {
-                let total = samples * ch;
-                if let Some(ref mut producer) = self.audio_producer {
-                    for &s in &pcm[..total] {
-                        if producer.push(s).is_err() {
-                            self.audio_counters
-                                .ring_overflow_count
-                                .fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
-                }
-                // Each i16 sample is 2 bytes of PCM.
-                Some((total as u64).saturating_mul(2))
+                pcm.truncate(samples * ch);
+                Some(pcm)
             }
             Err(e) => {
                 if self.decode_failure_logged {
@@ -1326,10 +1393,48 @@ impl PlaybackChannel {
         self.recent_decode_durations_us.push_back(dur_us);
     }
 
-    /// Create the ring buffer and spawn the audio thread.
+    /// The sink, in a `Sink` session.
+    fn sink(&self) -> Option<&Arc<dyn PlaybackSink>> {
+        match &self.output {
+            PlaybackOutput::Local => None,
+            PlaybackOutput::Sink(sink) => Some(sink),
+        }
+    }
+
+    /// The channel count from START, saturated rather than
+    /// truncated into a `u8`.
+    fn channels_u8(&self) -> u8 {
+        u8::try_from(self.channels).unwrap_or(u8::MAX)
+    }
+
+    /// The current stream's shape, for [`PlaybackSink::on_start`].
+    fn format(&self) -> PlaybackFormat {
+        PlaybackFormat {
+            mode: self.audio_mode,
+            sample_rate_hz: self.sample_rate,
+            channels: self.channels_u8(),
+        }
+    }
+
+    /// Start local output for a new audio session, stopping any
+    /// previous one first. A `Sink` session plays nothing on this
+    /// host, and a build without `audio` has no local output, so
+    /// neither starts the thread.
     fn start_audio_output(&mut self) {
-        // Stop any existing audio thread first.
         self.stop_audio();
+        if let PlaybackOutput::Local = self.output {
+            #[cfg(feature = "audio")]
+            self.spawn_audio_thread();
+        }
+    }
+
+    /// Create the ring buffer and spawn the audio thread.
+    #[cfg(feature = "audio")]
+    fn spawn_audio_thread(&mut self) {
+        #[cfg(test)]
+        {
+            self.audio_thread_starts += 1;
+        }
 
         let (producer, consumer) = rtrb::RingBuffer::new(MAX_AUDIO_BUFFER_SAMPLES);
         self.audio_producer = Some(producer);
@@ -1353,38 +1458,47 @@ impl PlaybackChannel {
 
     /// Stop the audio thread and drop the producer.
     fn stop_audio(&mut self) {
-        self.audio_producer = None;
-        if let Some(thread) = self.audio_thread.take() {
-            // Fold in whatever the thread reported since the last
-            // drain so the snapshot keeps the final error. The
-            // session is over, so nothing is worth notifying.
-            for event in thread.stop() {
-                let _ = self.output_status.apply(event);
+        #[cfg(feature = "audio")]
+        {
+            self.audio_producer = None;
+            if let Some(thread) = self.audio_thread.take() {
+                // Fold in whatever the thread reported since the last
+                // drain so the snapshot keeps the final error. The
+                // session is over, so nothing is worth notifying.
+                for event in thread.stop() {
+                    let _ = self.output_status.apply(event);
+                }
             }
         }
         self.output_status.session_ended();
     }
 
     /// Fold output-stream events from the audio thread into the
-    /// status and raise the notifications they call for.
+    /// status and raise the notifications they call for. Without
+    /// the `audio` feature there is no thread and nothing to fold.
     async fn drain_output_events(&mut self) {
-        let Some(thread) = self.audio_thread.as_ref() else {
-            return;
-        };
-        let events: Vec<AudioOutputEvent> = thread.events.try_iter().collect();
-        if events.is_empty() {
-            return;
-        }
-        for event in events {
-            let note = self.output_status.apply(event);
-            // In web mode the operator hears audio through the
-            // browser, not this host's speakers, so local output
-            // trouble is diagnostic detail, not news.
-            if let (Some(note), None) = (note, self.opus_sink.as_ref()) {
-                self.events.emit(ChannelEvent::Notification(note)).await;
+        #[cfg(feature = "audio")]
+        {
+            let Some(thread) = self.audio_thread.as_ref() else {
+                return;
+            };
+            let events: Vec<AudioOutputEvent> = thread.events.try_iter().collect();
+            if events.is_empty() {
+                return;
             }
+            for event in events {
+                let note = self.output_status.apply(event);
+                // A sink session's audio goes elsewhere (the browser,
+                // in web mode), not to this host's speakers, so local
+                // output trouble would be diagnostic detail, not news.
+                // Such a session never starts the thread, so this is
+                // only a guard.
+                if let (Some(note), None) = (note, self.sink()) {
+                    self.events.emit(ChannelEvent::Notification(note)).await;
+                }
+            }
+            self.update_snapshot();
         }
-        self.update_snapshot();
     }
 
     async fn send_with_log(&mut self, msg_type: u16, data: &[u8]) -> Result<()> {
@@ -1520,20 +1634,347 @@ fn codec_from_mode(mode: u16) -> crate::snapshots::PlaybackCodec {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "audio")]
     use super::{
-        backoff_after_stream, opus_packet_samples_48k, pcm_bytes_to_i16, samples_per_frame_48k,
-        AudioCounters, AudioOutputEvent, AudioThread, CallbackState, OutputStatus, Resampler,
-        UnlinkOnDrop, OUTPUT_RETRY_INITIAL,
+        backoff_after_stream, AudioCounters, AudioThread, CallbackState, OUTPUT_RETRY_INITIAL,
     };
-    use crate::snapshots::PlaybackOutputInfo;
-    use shakenfist_spice_protocol::NotifySeverity;
+    use super::{
+        opus_packet_samples_48k, pcm_bytes_to_i16, samples_per_frame_48k, AudioOutputEvent,
+        OutputStatus, PlaybackChannel, Resampler, UnlinkOnDrop,
+    };
+    use crate::channels::test_support::{loopback, NullTraffic, TestChannelPeers};
+    use crate::channels::VolumeControl;
+    use crate::playback_sink::{PlaybackFormat, PlaybackOutput, PlaybackSink};
+    use crate::snapshots::{PlaybackOutputInfo, PlaybackSnapshot};
+    use crate::{ByteCounter, LogConfig};
+    use shakenfist_spice_protocol::messages::{
+        make_message, PlaybackMode, PlaybackPacket, PlaybackStart, WireType,
+    };
+    use shakenfist_spice_protocol::{audio_data_mode, audio_fmt, playback_server, NotifySeverity};
     use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::AtomicBool;
+    #[cfg(feature = "audio")]
+    use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
+    #[cfg(feature = "audio")]
     use std::time::{Duration, Instant};
+
+    // --- Channel dispatch to a sink ---
+
+    /// One call a [`RecordingSink`] saw. Decoded PCM is recorded by
+    /// length only: the samples are whatever the decoder makes of
+    /// the packet.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum SinkCall {
+        Start(PlaybackFormat),
+        Opus {
+            packet: Vec<u8>,
+            samples_in_packet: u32,
+        },
+        Pcm {
+            samples: Vec<i16>,
+            sample_rate_hz: u32,
+            channels: u8,
+        },
+        Decoded {
+            len: usize,
+            sample_rate_hz: u32,
+            channels: u8,
+        },
+        Stop,
+    }
+
+    /// A sink that records every call, in order.
+    #[derive(Default)]
+    struct RecordingSink {
+        calls: Mutex<Vec<SinkCall>>,
+    }
+
+    impl RecordingSink {
+        fn record(&self, call: SinkCall) {
+            self.calls.lock().expect("sink lock").push(call);
+        }
+
+        fn calls(&self) -> Vec<SinkCall> {
+            self.calls.lock().expect("sink lock").clone()
+        }
+    }
+
+    impl PlaybackSink for RecordingSink {
+        fn on_start(&self, format: PlaybackFormat) {
+            self.record(SinkCall::Start(format));
+        }
+
+        fn on_opus_packet(&self, packet: &[u8], samples_in_packet: u32) {
+            self.record(SinkCall::Opus {
+                packet: packet.to_vec(),
+                samples_in_packet,
+            });
+        }
+
+        fn on_pcm_samples(&self, samples: &[i16], sample_rate_hz: u32, channels: u8) {
+            self.record(SinkCall::Pcm {
+                samples: samples.to_vec(),
+                sample_rate_hz,
+                channels,
+            });
+        }
+
+        fn on_decoded_pcm(&self, samples: &[i16], sample_rate_hz: u32, channels: u8) {
+            self.record(SinkCall::Decoded {
+                len: samples.len(),
+                sample_rate_hz,
+                channels,
+            });
+        }
+
+        fn on_stop(&self) {
+            self.record(SinkCall::Stop);
+        }
+    }
+
+    /// A real Opus packet, made without an encoder. TOC byte 0xFC is
+    /// configuration 31 (CELT-only, fullband, 20 ms), stereo,
+    /// frame-count code 0, so the rest of the packet is its one
+    /// frame, here zero bytes long. RFC 6716 allows a zero-length
+    /// frame (it is how DTX sends nothing), and a decoder still
+    /// outputs a whole frame for it: opus-decoder takes the CELT
+    /// silence flag as set when no bits remain, and libopus conceals
+    /// it as a lost frame. Either way that is 960 samples per channel.
+    const SILENT_STEREO_OPUS: [u8; 1] = [0xFC];
+
+    async fn channel_with(output: PlaybackOutput) -> (PlaybackChannel, TestChannelPeers) {
+        let (stream, events, peers) = loopback().await;
+        let channel = PlaybackChannel::new(
+            stream,
+            events,
+            Arc::new(ByteCounter::new()),
+            Arc::new(NullTraffic::new()),
+            Arc::new(Mutex::new(PlaybackSnapshot::default())),
+            VolumeControl::new(),
+            LogConfig::default(),
+            Arc::new(AtomicBool::new(false)),
+            output,
+        );
+        (channel, peers)
+    }
+
+    async fn sink_channel() -> (PlaybackChannel, Arc<RecordingSink>, TestChannelPeers) {
+        let sink = Arc::new(RecordingSink::default());
+        let (channel, peers) = channel_with(PlaybackOutput::Sink(sink.clone())).await;
+        (channel, sink, peers)
+    }
+
+    fn message<T: WireType>(msg_type: u16, body: &T) -> Vec<u8> {
+        let mut payload = Vec::new();
+        body.write(&mut payload);
+        make_message(msg_type, &payload)
+    }
+
+    fn start(channels: u32, frequency: u32) -> Vec<u8> {
+        let body = PlaybackStart {
+            channels,
+            format: audio_fmt::S16,
+            frequency,
+            time: 0,
+        };
+        message(playback_server::START, &body)
+    }
+
+    fn mode(mode: u16) -> Vec<u8> {
+        message(playback_server::MODE, &PlaybackMode { time: 0, mode })
+    }
+
+    fn data(bytes: &[u8]) -> Vec<u8> {
+        let body = PlaybackPacket {
+            time: 0,
+            data: bytes.to_vec(),
+        };
+        message(playback_server::DATA, &body)
+    }
+
+    fn stop() -> Vec<u8> {
+        make_message(playback_server::STOP, &[])
+    }
+
+    async fn feed(channel: &mut PlaybackChannel, messages: &[Vec<u8>]) {
+        for m in messages {
+            channel.buffer.extend_from_slice(m);
+        }
+        channel
+            .process_messages()
+            .await
+            .expect("the channel accepts the messages");
+    }
+
+    /// The channel never started the local output thread.
+    fn assert_no_audio_thread(channel: &PlaybackChannel) {
+        assert_eq!(
+            channel.audio_thread_starts, 0,
+            "a sink session started the audio thread"
+        );
+        #[cfg(feature = "audio")]
+        {
+            assert!(channel.audio_thread.is_none());
+            assert!(channel.audio_producer.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_sink_session_sees_start_packets_decoded_pcm_and_stop() {
+        let (mut channel, sink, _peers) = sink_channel().await;
+        feed(
+            &mut channel,
+            &[
+                start(2, 48_000),
+                mode(audio_data_mode::OPUS),
+                data(&SILENT_STEREO_OPUS),
+            ],
+        )
+        .await;
+        assert_no_audio_thread(&channel);
+        feed(&mut channel, &[stop()]).await;
+
+        let format = |mode| PlaybackFormat {
+            mode,
+            sample_rate_hz: 48_000,
+            channels: 2,
+        };
+        assert_eq!(
+            sink.calls(),
+            vec![
+                // START, before any MODE: the mode is not known yet.
+                SinkCall::Start(format(audio_data_mode::INVALID)),
+                // MODE during the stream restarts it in the new mode,
+                // before any data.
+                SinkCall::Start(format(audio_data_mode::OPUS)),
+                SinkCall::Opus {
+                    packet: SILENT_STEREO_OPUS.to_vec(),
+                    samples_in_packet: 960,
+                },
+                SinkCall::Decoded {
+                    len: 960 * 2,
+                    sample_rate_hz: 48_000,
+                    channels: 2,
+                },
+                SinkCall::Stop,
+            ]
+        );
+        // Decode ran with no device behind it, so the counters the
+        // control socket reports still move.
+        assert_eq!(channel.data_packets_received, 1);
+        assert_eq!(channel.data_packets_decoded, 1);
+        assert_eq!(channel.pcm_bytes_produced, 960 * 2 * 2);
+        assert_no_audio_thread(&channel);
+    }
+
+    #[tokio::test]
+    async fn a_sink_session_in_raw_mode_sees_pcm_samples() {
+        let (mut channel, sink, _peers) = sink_channel().await;
+        // spice-server's own order: MODE, then START.
+        let pcm = [0x01, 0x00, 0xff, 0xff, 0x00, 0x80, 0x10, 0x00];
+        feed(
+            &mut channel,
+            &[
+                mode(audio_data_mode::RAW),
+                start(2, 44_100),
+                data(&pcm),
+                stop(),
+            ],
+        )
+        .await;
+
+        assert_eq!(
+            sink.calls(),
+            vec![
+                SinkCall::Start(PlaybackFormat {
+                    mode: audio_data_mode::RAW,
+                    sample_rate_hz: 44_100,
+                    channels: 2,
+                }),
+                SinkCall::Pcm {
+                    samples: vec![1, -1, i16::MIN, 16],
+                    sample_rate_hz: 44_100,
+                    channels: 2,
+                },
+                SinkCall::Stop,
+            ]
+        );
+        assert_eq!(channel.data_packets_decoded, 1);
+        assert_no_audio_thread(&channel);
+    }
+
+    #[cfg(feature = "audio")]
+    #[tokio::test]
+    async fn a_local_session_starts_and_stops_the_audio_thread() {
+        // The thread retries a missing output device rather than
+        // failing, so this holds on a host with no sound card.
+        let (mut channel, _peers) = channel_with(PlaybackOutput::Local).await;
+        feed(
+            &mut channel,
+            &[mode(audio_data_mode::RAW), start(2, 48_000)],
+        )
+        .await;
+        assert_eq!(channel.audio_thread_starts, 1);
+        assert!(channel.audio_thread.is_some());
+        assert!(channel.audio_producer.is_some());
+        feed(&mut channel, &[stop()]).await;
+        assert!(channel.audio_thread.is_none());
+        assert!(channel.audio_producer.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_stop_with_no_stream_running_is_not_passed_on() {
+        let (mut channel, sink, _peers) = sink_channel().await;
+        // A STOP before any START, then a stream, then a repeated STOP.
+        feed(
+            &mut channel,
+            &[
+                stop(),
+                mode(audio_data_mode::RAW),
+                start(2, 48_000),
+                stop(),
+                stop(),
+            ],
+        )
+        .await;
+        assert_eq!(
+            sink.calls(),
+            vec![
+                SinkCall::Start(PlaybackFormat {
+                    mode: audio_data_mode::RAW,
+                    sample_rate_hz: 48_000,
+                    channels: 2,
+                }),
+                SinkCall::Stop,
+            ]
+        );
+        // Every STOP still counts, for the control socket.
+        assert_eq!(channel.stop_count, 3);
+    }
+
+    #[tokio::test]
+    async fn the_channel_count_saturates_rather_than_truncates() {
+        let (mut channel, sink, _peers) = sink_channel().await;
+        // 300 truncated to a u8 would be 44.
+        feed(
+            &mut channel,
+            &[mode(audio_data_mode::RAW), start(300, 48_000)],
+        )
+        .await;
+        assert_eq!(
+            sink.calls(),
+            vec![SinkCall::Start(PlaybackFormat {
+                mode: audio_data_mode::RAW,
+                sample_rate_hz: 48_000,
+                channels: u8::MAX,
+            })]
+        );
+    }
 
     // --- CallbackState and audio-thread helper tests ---
 
+    #[cfg(feature = "audio")]
     fn callback_state(queued: &[i16], buffered: &[i16]) -> CallbackState {
         let (mut producer, consumer) = rtrb::RingBuffer::new(64);
         for &sample in queued {
@@ -1545,6 +1986,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "audio")]
     #[test]
     fn callback_state_discard_empties_ring_and_local_buf() {
         let mut st = callback_state(&[1, 2, 3, 4], &[5, 6]);
@@ -1553,6 +1995,7 @@ mod tests {
         assert!(st.local_buf.is_empty(), "local buffer must be cleared");
     }
 
+    #[cfg(feature = "audio")]
     #[test]
     fn callback_state_drain_ring_appends_in_order() {
         let mut st = callback_state(&[3, 4], &[1, 2]);
@@ -1561,6 +2004,7 @@ mod tests {
         assert_eq!(st.local_buf, VecDeque::from(vec![1, 2, 3, 4]));
     }
 
+    #[cfg(feature = "audio")]
     #[test]
     fn lock_for_callback_recovers_a_poisoned_lock() {
         let state = Arc::new(Mutex::new(callback_state(&[7], &[])));
@@ -1579,6 +2023,7 @@ mod tests {
         assert_eq!(counters.device_underrun_count.load(Ordering::Relaxed), 0);
     }
 
+    #[cfg(feature = "audio")]
     #[test]
     fn lock_for_callback_counts_contention_as_underrun() {
         let state = Mutex::new(callback_state(&[], &[]));
@@ -1601,6 +2046,7 @@ mod tests {
         assert_eq!(snap.start_count, 3);
     }
 
+    #[cfg(feature = "audio")]
     #[test]
     fn sleep_unless_shutdown_returns_promptly_on_shutdown() {
         let shutdown = AtomicBool::new(true);
@@ -1609,6 +2055,7 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(1));
     }
 
+    #[cfg(feature = "audio")]
     #[test]
     fn sleep_unless_shutdown_sleeps_for_the_delay() {
         let shutdown = AtomicBool::new(false);
@@ -1702,6 +2149,7 @@ mod tests {
         assert!(status.output.is_none());
     }
 
+    #[cfg(feature = "audio")]
     #[test]
     fn backoff_resets_only_after_a_stable_stream() {
         let backoff = Duration::from_secs(8);
@@ -1803,7 +2251,9 @@ mod tests {
     #[test]
     fn pcm_bytes_to_i16_decodes_little_endian() {
         let bytes = [0x01, 0x00, 0xff, 0xff, 0x00, 0x80];
-        let samples = pcm_bytes_to_i16(&bytes);
+        // Whatever the buffer held before is replaced.
+        let mut samples = vec![7i16; 5];
+        pcm_bytes_to_i16(&bytes, &mut samples);
         assert_eq!(samples, vec![1i16, -1, i16::MIN]);
     }
 
@@ -1811,7 +2261,8 @@ mod tests {
     fn pcm_bytes_to_i16_drops_trailing_odd_byte() {
         // The chunks_exact(2) loop ignores the trailing single byte.
         let bytes = [0x01, 0x00, 0x42];
-        let samples = pcm_bytes_to_i16(&bytes);
+        let mut samples = Vec::new();
+        pcm_bytes_to_i16(&bytes, &mut samples);
         assert_eq!(samples, vec![1i16]);
     }
 

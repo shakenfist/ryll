@@ -1,12 +1,15 @@
-//! [`OpusPacketSink`] implementation for `--web` mode.
+//! [`PlaybackSink`] implementation for `--web` mode.
 //!
 //! Plumbing summary:
 //!
-//! - The renderer's `PlaybackChannel` calls into this sink from
-//!   its async task on every Opus DATA packet, before its
-//!   existing decode-to-cpal path. The cpal path is left alone
-//!   — its output goes to a (probably nonexistent) audio device
-//!   in `--web` mode but does not break anything.
+//! - `run_web` hands this sink to `run_connection` as
+//!   `PlaybackOutput::Sink`, so the renderer's `PlaybackChannel`
+//!   opens no audio device on the server: the guest's audio
+//!   reaches the operator only through the browser. The channel
+//!   calls into the sink from its async task on every Opus DATA
+//!   packet, before it decodes the packet. (It still decodes, to
+//!   keep the control socket's playback counters meaningful; this
+//!   sink ignores the decoded PCM.)
 //! - The sink holds an `Arc<Mutex<Option<mpsc::Sender<...>>>>`.
 //!   The active `WebrtcBridge`'s audio pump owns the matching
 //!   `Receiver`, which is plugged in at `/offer` time by the
@@ -24,7 +27,7 @@
 
 use std::sync::{Arc, Mutex, Once};
 
-use shakenfist_spice_renderer::OpusPacketSink;
+use shakenfist_spice_renderer::PlaybackSink;
 use tokio::sync::mpsc;
 use tracing::warn;
 
@@ -48,14 +51,14 @@ pub type OpusSender = mpsc::Sender<(Vec<u8>, u32)>;
 /// (one writer per `/offer`, one reader per Opus packet).
 pub type ActiveSenderSlot = Arc<Mutex<Option<OpusSender>>>;
 
-/// `OpusPacketSink` implementation that forwards Opus packets to
-/// whichever bridge is currently active. PCM is logged once and
+/// `PlaybackSink` implementation that forwards Opus packets to
+/// whichever bridge is currently active. Raw PCM is logged once and
 /// discarded.
-pub struct WebOpusSink {
+pub struct WebPlaybackSink {
     inner: ActiveSenderSlot,
 }
 
-impl WebOpusSink {
+impl WebPlaybackSink {
     /// Build a new sink and return both the sink itself (for
     /// passing to `run_connection`) and the matching slot
     /// handle (for the signalling handler to plug each
@@ -69,7 +72,7 @@ impl WebOpusSink {
     }
 }
 
-impl OpusPacketSink for WebOpusSink {
+impl PlaybackSink for WebPlaybackSink {
     fn on_opus_packet(&self, packet: &[u8], samples_in_packet: u32) {
         // Snapshot the active sender out of the slot so we don't
         // hold the lock across the try_send (which is non-blocking
@@ -120,7 +123,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn forwards_opus_packet_when_sender_registered() {
-        let (sink, slot) = WebOpusSink::new();
+        let (sink, slot) = WebPlaybackSink::new();
         let (tx, mut rx) = mpsc::channel::<(Vec<u8>, u32)>(8);
         *slot.lock().unwrap() = Some(tx);
 
@@ -133,14 +136,14 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn drops_silently_when_no_sender_registered() {
-        let (sink, _slot) = WebOpusSink::new();
+        let (sink, _slot) = WebPlaybackSink::new();
         // No panic, no error, just a no-op.
         sink.on_opus_packet(b"orphan", 960);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn drops_silently_when_sender_full() {
-        let (sink, slot) = WebOpusSink::new();
+        let (sink, slot) = WebPlaybackSink::new();
         // Capacity 1 + an unconsumed message means the next
         // try_send fails Full; the sink must not panic.
         let (tx, _rx) = mpsc::channel::<(Vec<u8>, u32)>(1);
@@ -153,7 +156,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn drops_silently_when_sender_closed() {
-        let (sink, slot) = WebOpusSink::new();
+        let (sink, slot) = WebPlaybackSink::new();
         let (tx, rx) = mpsc::channel::<(Vec<u8>, u32)>(8);
         *slot.lock().unwrap() = Some(tx);
         drop(rx); // receiver gone -> any send fails Closed.
@@ -167,7 +170,7 @@ mod tests {
         // tracing subscriber dependency in tests; the assertion
         // here is "no panic, no UB". The warn-once invariant
         // holds by construction (std::sync::Once).
-        let (sink, _slot) = WebOpusSink::new();
+        let (sink, _slot) = WebPlaybackSink::new();
         sink.on_pcm_samples(&[0i16, 0i16], 48_000, 2);
         sink.on_pcm_samples(&[0i16, 0i16], 48_000, 2);
     }

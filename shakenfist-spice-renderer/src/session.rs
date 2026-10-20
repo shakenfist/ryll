@@ -34,21 +34,25 @@ use shakenfist_spice_protocol::{
     ChannelType, ConnectionConfig, NotifySeverity, SpiceClient, CA_ALONE_WARNING,
 };
 
-use crate::audio_sink::OpusPacketSink;
 use crate::byte_counter::ByteCounter;
 use crate::capture_sink::CaptureSink;
-#[cfg(feature = "audio")]
-use crate::channels::PlaybackChannel;
+use crate::channels::display::supported_h264_offer;
+#[cfg(feature = "usbredir")]
+use crate::channels::UsbredirChannel;
+#[cfg(feature = "webdav")]
+use crate::channels::WebdavChannel;
 use crate::channels::{
     ChannelEvent, CursorChannel, DisplayChannel, EventSink, InputEvent, InputsChannel, MainChannel,
-    UsbCommand, UsbredirChannel, VolumeControl, WebdavChannel, WebdavCommand,
+    PlaybackChannel, UsbCommand, VolumeControl, WebdavCommand,
 };
 use crate::clipboard::ClipboardBackend;
 use crate::device_config::{ShareDirConfig, VirtualDiskConfig};
+use crate::event_bus::EventBus;
 use crate::log_config::LogConfig;
 use crate::mm_clock::MmClock;
 use crate::notification::{NotificationEntry, NotificationSource};
 use crate::notification_sink::NotificationSink;
+use crate::playback_sink::PlaybackOutput;
 use crate::session_state::SessionState;
 use crate::snapshots::ChannelSnapshots;
 use crate::surface_mirror::SurfaceMirror;
@@ -188,7 +192,21 @@ impl crate::control::StatusProvider for SessionStatus {
 /// `h264` is how each display channel offers H.264: by default it
 /// advertises `DISPLAY_CODEC_H264` and asks for H.264 after MJPEG;
 /// `--experimental-h264` asks for it first and `--no-h264` offers it
-/// not at all. See [`H264Offer`].
+/// not at all. See [`H264Offer`]. A renderer built without the
+/// `h264-decode` feature has no H.264 decoder, so it offers H.264 not
+/// at all whatever `h264` asks for.
+///
+/// `playback` is where the guest's audio goes. `PlaybackOutput::Local`
+/// plays it on this host's default output device, which needs the
+/// `audio` feature: without it the playback channel is not linked.
+/// `PlaybackOutput::Sink` hands it to the sink, opens no device, and
+/// links the playback channel in every build.
+///
+/// The parameter list is the same in every feature configuration. A
+/// channel whose feature is compiled out is not linked, and the
+/// arguments only it would use (the usbredir receiver and virtual
+/// disks, the webdav receiver and share) are accepted and ignored, as
+/// is the volume control in a build without local audio output.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_connection(
     config: ConnectionConfig,
@@ -211,20 +229,33 @@ pub async fn run_connection(
     log_config: LogConfig,
     cancel: Arc<AtomicBool>,
     clipboard: Option<Arc<dyn ClipboardBackend>>,
-    opus_sink: Option<Arc<dyn OpusPacketSink>>,
+    playback: PlaybackOutput,
     h264: H264Offer,
     image_cache_cap_bytes: usize,
     glz_dictionary_cap_bytes: usize,
     preferred_compression: u8,
 ) -> Result<()> {
-    // When the `audio` feature is off, `volume_control` and
-    // `opus_sink` are never read (the playback channel arm is
-    // gated out below).  Keep the function's public signature
-    // stable across feature configurations so host callers do
-    // not have to know which features the renderer was built
-    // with; suppress the resulting unused-variable lints here.
-    #[cfg(not(feature = "audio"))]
-    let _ = (&volume_control, &opus_sink);
+    // Keep the function's public signature stable across feature
+    // configurations so host callers do not have to know which
+    // features the renderer was built with. When the usbredir or
+    // webdav channel is compiled out, the arguments only it reads go
+    // unused; suppress the resulting lints here.
+    #[cfg(not(feature = "usbredir"))]
+    let _ = (&usb_rx, &virtual_disks);
+    #[cfg(not(feature = "webdav"))]
+    let _ = (&webdav_rx, &share_dir);
+
+    // A build without an H.264 decoder must not let the server pick
+    // H.264, or every stream it sends would be dropped. This has to
+    // happen before the display channel's link caps are built below.
+    let requested_h264 = h264;
+    let h264 = supported_h264_offer(requested_h264);
+    if h264 != requested_h264 {
+        info!(
+            "H.264 decode not compiled in (h264-decode feature disabled): \
+             not offering H.264 to the server"
+        );
+    }
 
     let client = SpiceClient::new(config)?;
 
@@ -305,7 +336,9 @@ pub async fn run_connection(
         tokio::task::JoinHandle<Result<(), anyhow::Error>>,
     )> = vec![(ChannelType::Main, main_handle)];
     let mut input_rx = Some(input_rx);
+    #[cfg(feature = "usbredir")]
     let mut usb_rx = Some(usb_rx);
+    #[cfg(feature = "webdav")]
     let mut webdav_rx = Some(webdav_rx);
     let shared_glz_dictionary = DisplayChannel::new_shared_glz_dictionary(glz_dictionary_cap_bytes);
 
@@ -314,7 +347,7 @@ pub async fn run_connection(
         info!("RYLL_K1_MAIN_ONLY set — skipping all secondary channels (main only)");
     }
 
-    for (channel_type, channel_id, link) in plan_channel_links(&channels) {
+    for (channel_type, channel_id, link) in plan_channel_links(&channels, &playback) {
         if main_only {
             continue;
         }
@@ -407,6 +440,7 @@ pub async fn run_connection(
                 }
             }
 
+            #[cfg(feature = "usbredir")]
             ChannelType::Usbredir => {
                 if let Some(usb_rx) = usb_rx.take() {
                     let stream = client
@@ -430,6 +464,7 @@ pub async fn run_connection(
                 }
             }
 
+            #[cfg(feature = "webdav")]
             ChannelType::Webdav => {
                 if let Some(webdav_rx) = webdav_rx.take() {
                     let stream = client
@@ -453,7 +488,6 @@ pub async fn run_connection(
                 }
             }
 
-            #[cfg(feature = "audio")]
             ChannelType::Playback => {
                 let stream = client
                     .connect_channel(session_id, channel_type, channel_id)
@@ -467,15 +501,16 @@ pub async fn run_connection(
                     volume_control.clone(),
                     log_config,
                     cancel.clone(),
-                    opus_sink.clone(),
+                    playback.clone(),
                 );
                 handles.push((
                     ChannelType::Playback,
                     tokio::spawn(async move { channel.run().await }),
                 ));
             }
-            // plan_channel_links() skips every other type, and playback
-            // too when the `audio` feature is off.
+            // plan_channel_links() skips every other type, usbredir and
+            // webdav too when their features are off, and local playback
+            // without the audio feature.
             _ => {}
         }
     }
@@ -679,7 +714,7 @@ pub async fn run_headless(
         })
         .transpose()?;
 
-    let (event_tx, mut event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
+    let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
     let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
     let (_usb_tx, usb_rx) = mpsc::channel(16);
     let (_webdav_tx, webdav_rx) = mpsc::channel(16);
@@ -717,7 +752,8 @@ pub async fn run_headless(
     // drains the renderer's mpsc and republishes each event onto
     // this bus, so SPICE channel producers are never back-pressured
     // by any single consumer (e.g. a slow control-socket client).
-    let (event_broadcast_tx, _) = broadcast::channel::<ChannelEvent>(EVENT_BROADCAST_CAPACITY);
+    let event_bus = EventBus::new(EVENT_BROADCAST_CAPACITY);
+    let event_broadcast_tx = event_bus.sender();
 
     // Headless mode does not paint anything, but the channel handlers still
     // call notify_one().  Give them a Notify whose notifications nobody
@@ -737,16 +773,12 @@ pub async fn run_headless(
     let session_state = SessionState::new();
     let session_state_rx = session_state.subscribe();
 
-    // Live pixel store rebuilt from the broadcast bus.  Constructed
-    // unconditionally so the control socket's `screenshot` verb and
-    // `status` surface list always have a coherent source; the apply
-    // task below subscribes to the broadcast bus and pipes every
-    // display-bearing `ChannelEvent` through `SurfaceMirror::apply_event`.
-    // This is the same wrap pattern `run_web` uses in `ryll/src/main.rs`
-    // — both code paths call the same `apply_event` helper directly on
-    // the mirror, so the apply logic itself is shared without an extra
-    // indirection.
-    let surface_mirror = Arc::new(tokio::sync::Mutex::new(SurfaceMirror::new()));
+    // Live pixel store the event bus keeps up to date, for the control
+    // socket's `screenshot` verb and `status` surface list and for the
+    // digest poller.  Both are Unix- or feature-only, so the handle is
+    // too; the bus applies events to the mirror regardless.
+    #[cfg(any(unix, feature = "digest-decode"))]
+    let surface_mirror = event_bus.mirror();
 
     // Watch the primary surface for a QR-encoded visual digest.  See
     // `spawn_digest_poller`, which `run_web` calls too — the scenario
@@ -789,7 +821,9 @@ pub async fn run_headless(
             log_config,
             cancel_for_conn,
             clipboard_for_conn,
-            None, // headless mode: no opus sink (cpal output only)
+            // Headless plays the guest's audio on this host, as it always
+            // has.
+            PlaybackOutput::Local,
             h264,
             image_cache_cap_bytes,
             glz_dictionary_cap_bytes,
@@ -880,62 +914,17 @@ pub async fn run_headless(
         }
     }
 
-    // Event fan-out task: drains the renderer's mpsc and republishes
-    // each `ChannelEvent` onto the broadcast bus.  This is the
+    // Event fan-out and surface-mirror apply tasks.  The fan-out is the
     // architectural pivot that lets multiple consumers (the headless
     // stats drain below, control-socket clients, future digest
     // consumers) tap the same stream without back-pressuring the
-    // SPICE channel producers.  The web-mode equivalent in
-    // `ryll/src/main.rs::run_web` follows the same shape; we keep
-    // both paths separate rather than abstracting because each is
-    // five lines and the surrounding wiring differs.
-    let stats_event_rx = event_broadcast_tx.subscribe();
-    let fanout_broadcast_tx = event_broadcast_tx.clone();
-    let _fanout_handle = tokio::spawn(async move {
-        while let Some(event) = event_rx.recv().await {
-            // `broadcast::Sender::send` is non-blocking.  An error
-            // means there are no current receivers, which is fine
-            // for events the headless stats drain does not care
-            // about (everything proceeds normally — the broadcast
-            // sender re-arms automatically when subscribers appear).
-            let _ = fanout_broadcast_tx.send(event);
-        }
-    });
-    // Surface-mirror apply task: subscribes to the broadcast bus and
-    // pipes every `ChannelEvent` through `SurfaceMirror::apply_event`.
-    // Mirrors `ryll/src/main.rs::run_web`'s identically-shaped task —
-    // both code paths call the same `SurfaceMirror::apply_event`
-    // helper directly on the shared mirror, so the apply dispatch is
-    // single-sourced inside `surface_mirror.rs` itself.  A `Lagged`
-    // error means a slow consumer missed N events; for the mirror
-    // that's bad because surface state diverges from what SPICE sent,
-    // but the same trade-off `run_web` already makes — log and continue.
-    let mirror_for_apply = surface_mirror.clone();
-    let mut mirror_event_rx = event_broadcast_tx.subscribe();
-    let _mirror_apply_handle = tokio::spawn(async move {
-        loop {
-            match mirror_event_rx.recv().await {
-                Ok(event) => {
-                    let mut m = mirror_for_apply.lock().await;
-                    m.apply_event(&event);
-                }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!(
-                        "headless: surface mirror lagged by {} events; \
-                         surface state may briefly diverge",
-                        n
-                    );
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    info!("headless: surface mirror task exiting (broadcast closed)");
-                    break;
-                }
-            }
-        }
-    });
+    // SPICE channel producers; see `EventBus`.  Subscribe the stats
+    // drain before starting it so it cannot miss an early event.
+    let stats_event_rx = event_bus.subscribe();
+    let _event_bus_handles = event_bus.start(event_rx, "headless");
 
     // Drop our extra reference to the broadcast sender so that, once
-    // the fan-out task exits (on `event_rx` closing), the remaining
+    // the fan-out task exits (on the event mpsc closing), the remaining
     // receivers see `RecvError::Closed` and tear themselves down.
     drop(event_broadcast_tx);
 
@@ -1147,17 +1136,33 @@ enum ChannelLink {
 /// still considered. Inputs, usbredir and webdav are each served by the
 /// one receiver the host hands in, so the first of each kind is linked
 /// and any later one is skipped. The main channel is already linked by
-/// the time the list arrives.
-fn plan_channel_links(channels: &[(ChannelType, u8)]) -> Vec<(ChannelType, u8, ChannelLink)> {
+/// the time the list arrives. A channel whose handler is compiled out
+/// (usbredir without `usbredir`, webdav without `webdav`) is skipped
+/// with a reason saying so, as is playback to a `Local` output in a
+/// build without `audio`. Playback to a `Sink` is linked in every
+/// build.
+fn plan_channel_links(
+    channels: &[(ChannelType, u8)],
+    playback: &PlaybackOutput,
+) -> Vec<(ChannelType, u8, ChannelLink)> {
     let mut seen_single = Vec::new();
     channels
         .iter()
         .map(|&(channel_type, channel_id)| {
             let link = match channel_type {
                 ChannelType::Display | ChannelType::Cursor => ChannelLink::Open,
-                ChannelType::Playback if cfg!(feature = "audio") => ChannelLink::Open,
-                ChannelType::Playback => {
-                    ChannelLink::Skip("audio feature disabled at compile time")
+                ChannelType::Playback => match playback {
+                    PlaybackOutput::Sink(_) => ChannelLink::Open,
+                    PlaybackOutput::Local if cfg!(feature = "audio") => ChannelLink::Open,
+                    PlaybackOutput::Local => {
+                        ChannelLink::Skip("audio feature disabled at compile time")
+                    }
+                },
+                ChannelType::Usbredir if !cfg!(feature = "usbredir") => {
+                    ChannelLink::Skip("usbredir feature disabled at compile time")
+                }
+                ChannelType::Webdav if !cfg!(feature = "webdav") => {
+                    ChannelLink::Skip("webdav feature disabled at compile time")
                 }
                 ChannelType::Inputs | ChannelType::Usbredir | ChannelType::Webdav => {
                     if seen_single.contains(&channel_type) {
@@ -1226,6 +1231,27 @@ mod tests {
             .collect()
     }
 
+    /// Whether this build has a handler for `channel_type`, for the
+    /// feature-gated channel types these tests list.
+    fn compiled_in(channel_type: ChannelType) -> bool {
+        let features = [
+            (ChannelType::Usbredir, cfg!(feature = "usbredir")),
+            (ChannelType::Webdav, cfg!(feature = "webdav")),
+        ];
+        features
+            .iter()
+            .all(|&(gated, enabled)| gated != channel_type || enabled)
+    }
+
+    /// `channels` without the entries this build cannot link.
+    fn linkable(channels: &[(ChannelType, u8)]) -> Vec<(ChannelType, u8)> {
+        channels
+            .iter()
+            .copied()
+            .filter(|&(channel_type, _)| compiled_in(channel_type))
+            .collect()
+    }
+
     #[test]
     fn channels_listed_after_inputs_are_still_linked() {
         // andris's order: inputs before cursor (shakenfist/ryll#509).
@@ -1236,8 +1262,8 @@ mod tests {
             (ChannelType::Usbredir, 0),
             (ChannelType::Webdav, 0),
         ];
-        let plan = plan_channel_links(&list);
-        assert_eq!(opened(&plan), list.to_vec());
+        let plan = plan_channel_links(&list, &PlaybackOutput::Local);
+        assert_eq!(opened(&plan), linkable(&list));
     }
 
     #[test]
@@ -1252,22 +1278,22 @@ mod tests {
             (ChannelType::Cursor, 0),
             (ChannelType::Display, 0),
         ];
-        let plan = plan_channel_links(&list);
+        let plan = plan_channel_links(&list, &PlaybackOutput::Local);
         assert_eq!(
             opened(&plan),
-            vec![
+            linkable(&[
                 (ChannelType::Inputs, 0),
                 (ChannelType::Usbredir, 0),
                 (ChannelType::Webdav, 0),
                 (ChannelType::Cursor, 0),
                 (ChannelType::Display, 0),
-            ]
+            ])
         );
-        for duplicate in [
+        for duplicate in linkable(&[
             (ChannelType::Inputs, 1),
             (ChannelType::Usbredir, 1),
             (ChannelType::Webdav, 1),
-        ] {
+        ]) {
             assert!(
                 plan.contains(&(
                     duplicate.0,
@@ -1289,7 +1315,10 @@ mod tests {
             (ChannelType::Cursor, 0),
             (ChannelType::Cursor, 1),
         ];
-        assert_eq!(opened(&plan_channel_links(&list)), list.to_vec());
+        assert_eq!(
+            opened(&plan_channel_links(&list, &PlaybackOutput::Local)),
+            list.to_vec()
+        );
     }
 
     #[test]
@@ -1302,7 +1331,7 @@ mod tests {
             (ChannelType::Tunnel, 0),
             (ChannelType::Cursor, 0),
         ];
-        let plan = plan_channel_links(&list);
+        let plan = plan_channel_links(&list, &PlaybackOutput::Local);
         assert_eq!(opened(&plan), vec![(ChannelType::Cursor, 0)]);
         assert_eq!(plan[0].2, ChannelLink::Skip("already linked"));
         assert!(plan[1..5]
@@ -1310,13 +1339,59 @@ mod tests {
             .all(|(_, _, link)| *link == ChannelLink::Skip("not supported")));
     }
 
+    /// A sink that ignores everything, for tests that only need a
+    /// `PlaybackOutput::Sink`.
+    struct NullPlaybackSink;
+
+    impl crate::playback_sink::PlaybackSink for NullPlaybackSink {
+        fn on_opus_packet(&self, _packet: &[u8], _samples_in_packet: u32) {}
+    }
+
     #[test]
     fn playback_follows_the_audio_feature() {
-        let plan = plan_channel_links(&[(ChannelType::Playback, 0), (ChannelType::Cursor, 0)]);
+        let list = [(ChannelType::Playback, 0), (ChannelType::Cursor, 0)];
+
+        // Local output needs cpal, so it links only with `audio`.
+        let plan = plan_channel_links(&list, &PlaybackOutput::Local);
         let expected = if cfg!(feature = "audio") {
             ChannelLink::Open
         } else {
             ChannelLink::Skip("audio feature disabled at compile time")
+        };
+        assert_eq!(plan[0].2, expected);
+        assert_eq!(plan[1].2, ChannelLink::Open);
+
+        // A sink needs no device, so it links in every build.
+        let plan = plan_channel_links(&list, &PlaybackOutput::Sink(Arc::new(NullPlaybackSink)));
+        assert_eq!(plan[0].2, ChannelLink::Open);
+        assert_eq!(plan[1].2, ChannelLink::Open);
+    }
+
+    #[test]
+    fn usbredir_follows_the_usbredir_feature() {
+        let plan = plan_channel_links(
+            &[(ChannelType::Usbredir, 0), (ChannelType::Cursor, 0)],
+            &PlaybackOutput::Local,
+        );
+        let expected = if cfg!(feature = "usbredir") {
+            ChannelLink::Open
+        } else {
+            ChannelLink::Skip("usbredir feature disabled at compile time")
+        };
+        assert_eq!(plan[0].2, expected);
+        assert_eq!(plan[1].2, ChannelLink::Open);
+    }
+
+    #[test]
+    fn webdav_follows_the_webdav_feature() {
+        let plan = plan_channel_links(
+            &[(ChannelType::Webdav, 0), (ChannelType::Cursor, 0)],
+            &PlaybackOutput::Local,
+        );
+        let expected = if cfg!(feature = "webdav") {
+            ChannelLink::Open
+        } else {
+            ChannelLink::Skip("webdav feature disabled at compile time")
         };
         assert_eq!(plan[0].2, expected);
         assert_eq!(plan[1].2, ChannelLink::Open);

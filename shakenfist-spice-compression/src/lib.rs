@@ -20,6 +20,8 @@
 
 pub mod byte_bounded_lru;
 
+mod dimensions;
+
 pub mod limits;
 
 #[cfg(feature = "encode")]
@@ -51,12 +53,13 @@ pub mod video;
 
 pub use byte_bounded_lru::{ByteBoundedLru, InsertOutcome, RefusedReason};
 
+pub use dimensions::even_dimensions;
 pub use limits::{rgba_len, MAX_IMAGE_DIMENSION, MAX_IMAGE_PIXELS};
 
 #[cfg(feature = "encode")]
 pub use encode::{
-    encode_spice_jpeg, encode_spice_lz4, even_dimensions, target_bitrate_bps, Bgrx, H264Config,
-    H264Content, H264Encoder, H264Frame, H264RateControl, Rgbx,
+    encode_spice_jpeg, encode_spice_lz4, target_bitrate_bps, Bgrx, H264Config, H264Content,
+    H264Encoder, H264Frame, H264RateControl, Rgbx,
 };
 
 #[cfg(feature = "glz")]

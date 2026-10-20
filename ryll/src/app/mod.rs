@@ -38,13 +38,13 @@ use crate::notifications::{
 use crate::settings;
 use crate::streaming_state::{self, StreamingState};
 use shakenfist_spice_protocol::link::H264Offer;
-use shakenfist_spice_protocol::{mouse_buttons, ChannelType, NotifySeverity, MOUSE_MODE_SERVER};
+use shakenfist_spice_protocol::{ChannelType, NotifySeverity, MOUSE_MODE_SERVER};
 use shakenfist_spice_renderer::channels::{DisplaySize, VolumeControl};
 use shakenfist_spice_renderer::metrics::RuntimeMetrics;
 use shakenfist_spice_renderer::usb::{self, DeviceSource, UsbDeviceInfo};
 use shakenfist_spice_renderer::{
-    ChannelEvent, ClipboardBackend, CursorImage, DrawOutcome, InputEvent, SessionState,
-    SessionStateRx, SurfaceMirror, UsbCommand, WebdavCommand, MOUSE_MODE_UNKNOWN,
+    ChannelEvent, ClipboardBackend, CursorImage, DrawOutcome, InputEvent, PointerTranslator,
+    SessionState, SessionStateRx, SurfaceMirror, UsbCommand, WebdavCommand, MOUSE_MODE_UNKNOWN,
 };
 
 use crate::clipboard_arboard::ArboardClipboard;
@@ -370,8 +370,9 @@ pub struct RyllApp {
     /// stream of duplicates as the deadline approaches.
     ticket_expiry_warned: bool,
 
-    // Last mouse position sent (to avoid flooding with duplicates)
-    last_mouse_pos: Option<(u32, u32)>,
+    // Last mouse position sent (to avoid flooding with duplicates,
+    // and to derive server-mode deltas)
+    pointer: PointerTranslator,
     last_modifiers: Option<egui::Modifiers>,
 
     // Keys forwarded to the inputs channel as pressed. Used to tell
@@ -933,7 +934,7 @@ impl RyllApp {
                     log_config_clone,
                     cancel_for_conn,
                     clipboard,
-                    /* opus_sink */ None,
+                    shakenfist_spice_renderer::PlaybackOutput::Local,
                     h264,
                     image_cache_cap_bytes,
                     glz_dictionary_cap_bytes,
@@ -979,7 +980,7 @@ impl RyllApp {
             last_modal_at: None,
             auto_reconnect_count: 0,
             ticket_expiry_warned: false,
-            last_mouse_pos: None,
+            pointer: PointerTranslator::new(),
             last_modifiers: None,
             held_keys: HeldKeys::new(traffic.session_start()),
             ui_state: UiStateTracker::new(traffic.session_start()),
@@ -1157,7 +1158,7 @@ impl RyllApp {
         if let Ok(mut snap) = self.channel_snapshots.main.lock() {
             snap.keepalive_timeout_fired = false;
         }
-        self.last_mouse_pos = None;
+        self.pointer.reset();
         self.last_modifiers = None;
         self.held_keys = HeldKeys::new(traffic.session_start());
         self.ui_state = UiStateTracker::new(traffic.session_start());
@@ -1266,7 +1267,7 @@ impl RyllApp {
                     log_config_clone,
                     cancel_for_conn,
                     clipboard,
-                    /* opus_sink */ None,
+                    shakenfist_spice_renderer::PlaybackOutput::Local,
                     h264,
                     image_cache_cap_bytes,
                     glz_dictionary_cap_bytes,
@@ -4537,19 +4538,11 @@ impl eframe::App for RyllApp {
                                 if let Some(pos) = response.hover_pos() {
                                     let x = (pos.x - response.rect.min.x).max(0.0) as u32;
                                     let y = (pos.y - response.rect.min.y).max(0.0) as u32;
-                                    if self.last_mouse_pos != Some((x, y)) {
-                                        if self.mouse_mode == MOUSE_MODE_SERVER {
-                                            // Server mode: send relative deltas.
-                                            let (prev_x, prev_y) =
-                                                self.last_mouse_pos.unwrap_or((x, y));
-                                            let dx = x as i32 - prev_x as i32;
-                                            let dy = y as i32 - prev_y as i32;
-                                            let _ = tx.try_send(InputEvent::MouseMotion { dx, dy });
-                                        } else {
-                                            // Client mode: send absolute position.
-                                            let _ = tx.try_send(InputEvent::MouseMove { x, y });
-                                        }
-                                        self.last_mouse_pos = Some((x, y));
+                                    // Relative deltas in server mode, absolute
+                                    // positions in client mode.
+                                    if let Some(event) = self.pointer.motion(self.mouse_mode, x, y)
+                                    {
+                                        let _ = tx.try_send(event);
                                     }
                                 }
 
@@ -4557,8 +4550,8 @@ impl eframe::App for RyllApp {
                                 // whether the pointer is over the SPICE surface,
                                 // so clicks on the status-bar widgets (volume,
                                 // mute, reconnect indicator, etc.) do not leak
-                                // phantom clicks into the guest at
-                                // `last_mouse_pos`. Button-release is forwarded
+                                // phantom clicks into the guest at the last
+                                // pointer position. Button-release is forwarded
                                 // unconditionally when the corresponding bit is
                                 // set in `forwarded_buttons`, so a press inside
                                 // the image followed by a release outside it
@@ -4566,7 +4559,7 @@ impl eframe::App for RyllApp {
                                 // (symmetric with the `input_suppressed` path
                                 // below).
                                 ctx.input(|i| {
-                                    let pos = self.last_mouse_pos.unwrap_or((0, 0));
+                                    let mode = self.mouse_mode;
                                     for button in [
                                         egui::PointerButton::Primary,
                                         egui::PointerButton::Secondary,
@@ -4575,43 +4568,29 @@ impl eframe::App for RyllApp {
                                         let spice_btn = mouse_button_to_spice(button);
                                         if pointer_on_surface && i.pointer.button_pressed(button) {
                                             self.forwarded_buttons |= spice_btn;
-                                            let _ = tx.try_send(InputEvent::MouseDown {
-                                                button: spice_btn,
-                                                x: pos.0,
-                                                y: pos.1,
-                                            });
+                                            for event in
+                                                self.pointer.button(mode, spice_btn, true, None)
+                                            {
+                                                let _ = tx.try_send(event);
+                                            }
                                         }
                                         if i.pointer.button_released(button)
                                             && self.forwarded_buttons & spice_btn != 0
                                         {
                                             self.forwarded_buttons &= !spice_btn;
-                                            let _ = tx.try_send(InputEvent::MouseUp {
-                                                button: spice_btn,
-                                                x: pos.0,
-                                                y: pos.1,
-                                            });
+                                            for event in
+                                                self.pointer.button(mode, spice_btn, false, None)
+                                            {
+                                                let _ = tx.try_send(event);
+                                            }
                                         }
                                     }
 
                                     if pointer_on_surface {
                                         let clicks =
                                             self.wheel.clicks(&i.events, response.rect.height());
-                                        let btn = if clicks > 0 {
-                                            mouse_buttons::UP
-                                        } else {
-                                            mouse_buttons::DOWN
-                                        };
-                                        for _ in 0..clicks.unsigned_abs() {
-                                            let _ = tx.try_send(InputEvent::MouseDown {
-                                                button: btn,
-                                                x: pos.0,
-                                                y: pos.1,
-                                            });
-                                            let _ = tx.try_send(InputEvent::MouseUp {
-                                                button: btn,
-                                                x: pos.0,
-                                                y: pos.1,
-                                            });
+                                        for event in self.pointer.wheel(clicks) {
+                                            let _ = tx.try_send(event);
                                         }
                                     } else {
                                         self.wheel.reset();
@@ -4620,7 +4599,7 @@ impl eframe::App for RyllApp {
                             }
                         } else if self.forwarded_buttons != 0 {
                             if let Some(tx) = &self.input_tx {
-                                let pos = self.last_mouse_pos.unwrap_or((0, 0));
+                                let pos = self.pointer.last_pos().unwrap_or((0, 0));
                                 for bit in 0..5u32 {
                                     let mask = 1 << bit;
                                     if self.forwarded_buttons & mask != 0 {
@@ -4944,16 +4923,18 @@ impl eframe::App for RyllApp {
         {
             if let (Some(ref tex), Some(ref img)) = (&self.cursor_texture, &self.cursor_image) {
                 // In client mode (2) the host controls cursor position, so
-                // use last_mouse_pos for immediate feedback.  In server mode
-                // (1) the guest is the authority — use cursor_pos reported by
-                // the cursor channel to stay in sync with the guest.
+                // use the last pointer position for immediate feedback.  In
+                // server mode (1) the guest is the authority — use cursor_pos
+                // reported by the cursor channel to stay in sync with the
+                // guest.
                 let mode = self.mouse_mode;
                 let (cx, cy) = if mode == 1 {
                     // Server mode: guest-reported position is authoritative
                     (self.cursor_pos.0 as f32, self.cursor_pos.1 as f32)
                 } else {
                     // Client mode: use host-tracked position for responsiveness
-                    self.last_mouse_pos
+                    self.pointer
+                        .last_pos()
                         .map(|(x, y)| (x as f32, y as f32))
                         .unwrap_or((self.cursor_pos.0 as f32, self.cursor_pos.1 as f32))
                 };

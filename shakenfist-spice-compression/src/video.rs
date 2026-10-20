@@ -11,13 +11,17 @@
 //! [`JpegDecoder`] backend and absorbs the DHT extract/inject
 //! state that used to live on `StreamState`. H.264
 //! (`H264VideoDecoder`) wraps `openh264::decoder::Decoder` for
-//! software decode of SPICE H.264 streams.
+//! software decode of SPICE H.264 streams; it exists only with the
+//! `h264-decode` feature, and without it [`for_stream`] refuses
+//! H.264 as an unsupported codec.
 //!
 //! The codec-type constants here mirror the wire values in the
 //! SPICE protocol (`SPICE_VIDEO_CODEC_TYPE_*`).
 
 use std::sync::Arc;
 
+// Only the H.264 decoder logs; MJPEG reports through its errors.
+#[cfg(feature = "h264-decode")]
 use tracing::{info, warn};
 
 use crate::jpeg::{DecodedJpeg, JpegDecoder};
@@ -32,7 +36,10 @@ pub const SPICE_VIDEO_CODEC_TYPE_MJPEG: u8 = 1;
 
 /// SPICE wire codec type for H.264 streams
 /// (`SpiceMsgDisplayStreamCreate::codec_type == 3`).
-/// Decoded via [`H264VideoDecoder`] (openh264 software backend).
+/// Decoded via `H264VideoDecoder` (openh264 software backend) when
+/// the `h264-decode` feature is on. The constant stays available
+/// without it, so a consumer can still recognise the codec it is
+/// refusing.
 pub const SPICE_VIDEO_CODEC_TYPE_H264: u8 = 3;
 
 // ---------------------------------------------------------------------------
@@ -163,14 +170,17 @@ pub trait VideoDecoder: Send {
 /// # Errors
 ///
 /// Returns [`VideoDecoderError::UnsupportedCodec`] for any
-/// `codec_type` this build does not handle. The display channel
-/// logs a warning and skips the stream rather than crashing.
+/// `codec_type` this build does not handle, which includes H.264
+/// in a build without the `h264-decode` feature. The display
+/// channel logs a warning and skips the stream rather than
+/// crashing.
 pub fn for_stream(
     codec_type: u8,
     jpeg_decoder: Arc<dyn JpegDecoder>,
 ) -> Result<Box<dyn VideoDecoder>, VideoDecoderError> {
     match codec_type {
         SPICE_VIDEO_CODEC_TYPE_MJPEG => Ok(Box::new(MJpegVideoDecoder::new(jpeg_decoder))),
+        #[cfg(feature = "h264-decode")]
         SPICE_VIDEO_CODEC_TYPE_H264 => Ok(Box::new(H264VideoDecoder::new()?)),
         other => Err(VideoDecoderError::UnsupportedCodec(other)),
     }
@@ -283,6 +293,7 @@ impl VideoDecoder for MJpegVideoDecoder {
 /// off entirely (see `terminal`). The counter resets on any
 /// successful decode (including `Ok(None)`, which is a normal
 /// "need more data" outcome — not an error).
+#[cfg(feature = "h264-decode")]
 pub struct H264VideoDecoder {
     decoder: openh264::decoder::Decoder,
     /// Caller-owned RGBA scratch buffer reused across frames to
@@ -316,6 +327,7 @@ pub struct H264VideoDecoder {
 /// Number of consecutive H.264 decode errors before we escalate
 /// the log level from `debug!` to `warn!`. Chosen to avoid noise
 /// from single-packet glitches but surface persistent corruption.
+#[cfg(feature = "h264-decode")]
 const H264_WARN_AFTER_CONSECUTIVE_FAILURES: u32 = 3;
 
 /// Number of consecutive H.264 decode errors after which the
@@ -332,8 +344,10 @@ const H264_WARN_AFTER_CONSECUTIVE_FAILURES: u32 = 3;
 /// counts `frames_decode_failed` and keeps feeding packets in.
 /// The latch is the decoder's own half of that policy; deciding to
 /// destroy the stream is the display channel's call to make.
+#[cfg(feature = "h264-decode")]
 const H264_TERMINAL_CONSECUTIVE_FAILURES: u32 = 60;
 
+#[cfg(feature = "h264-decode")]
 impl H264VideoDecoder {
     /// Construct a new openh264-backed decoder.
     ///
@@ -380,6 +394,7 @@ impl H264VideoDecoder {
     }
 }
 
+#[cfg(feature = "h264-decode")]
 impl VideoDecoder for H264VideoDecoder {
     fn decode(&mut self, packet: &[u8]) -> Result<Option<DecodedFrame>, VideoDecoderError> {
         // The stream has already failed for long enough to be
@@ -570,6 +585,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "h264-decode")]
     #[test]
     fn for_stream_h264_returns_h264_decoder() {
         let jpeg_dec: Arc<dyn JpegDecoder> = Arc::new(JpegDecoderRsDecoder::new());
@@ -585,6 +601,21 @@ mod tests {
             "H264 (openh264)",
             "H264VideoDecoder name should identify the openh264 backend"
         );
+    }
+
+    /// A build without H.264 decode must refuse the codec the same
+    /// way as an unknown one, so the display channel skips the stream.
+    #[cfg(not(feature = "h264-decode"))]
+    #[test]
+    fn for_stream_h264_is_unsupported_without_h264_decode() {
+        let jpeg_dec: Arc<dyn JpegDecoder> = Arc::new(JpegDecoderRsDecoder::new());
+        match for_stream(SPICE_VIDEO_CODEC_TYPE_H264, jpeg_dec) {
+            Err(VideoDecoderError::UnsupportedCodec(c)) => {
+                assert_eq!(c, SPICE_VIDEO_CODEC_TYPE_H264);
+            }
+            Err(e) => panic!("expected UnsupportedCodec, got Err({e})"),
+            Ok(_) => panic!("expected Err(UnsupportedCodec), got Ok"),
+        }
     }
 
     #[test]
@@ -714,6 +745,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "h264-decode")]
     #[test]
     fn h264_zero_length_packet_is_rejected_without_panic() {
         let mut dec = H264VideoDecoder::new().expect("H264VideoDecoder::new failed");
@@ -764,6 +796,7 @@ mod tests {
     // H.264 terminal-failure latch (S1-6)
     // ------------------------------------------------------------------
 
+    #[cfg(feature = "h264-decode")]
     #[test]
     fn h264_latches_terminal_after_threshold_failures() {
         let mut dec = H264VideoDecoder::new().expect("H264VideoDecoder::new failed");
@@ -1019,7 +1052,7 @@ mod mjpeg_round_trip_tests {
 // up to 50, mean up to 15. H.264 with no rate control hint at
 // 64x64 is unusually lossy compared to 1080p video — these
 // numbers are calibrated to the worst case, not the typical one.
-#[cfg(test)]
+#[cfg(all(test, feature = "h264-decode"))]
 mod h264_round_trip_tests {
     use super::*;
 

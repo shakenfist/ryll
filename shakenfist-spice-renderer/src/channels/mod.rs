@@ -3,13 +3,14 @@ pub mod cursor;
 pub mod display;
 pub mod inputs;
 pub mod main_channel;
-#[cfg(feature = "audio")]
 pub mod playback;
 #[cfg(test)]
 pub(crate) mod test_support;
+#[cfg(feature = "usbredir")]
 pub mod usbredir;
 pub mod volume;
 mod watchdog;
+#[cfg(feature = "webdav")]
 pub mod webdav;
 
 pub use cursor::CursorChannel;
@@ -17,10 +18,11 @@ pub use display::DisplayChannel;
 #[allow(unused_imports)] // PasteKey is part of translate_paste's public return type
 pub use inputs::{translate_paste, InputsChannel, PasteError, PasteKey};
 pub use main_channel::{align_monitor_dimension, DisplaySize, MainChannel};
-#[cfg(feature = "audio")]
 pub use playback::PlaybackChannel;
+#[cfg(feature = "usbredir")]
 pub use usbredir::UsbredirChannel;
 pub use volume::VolumeControl;
+#[cfg(feature = "webdav")]
 pub use webdav::WebdavChannel;
 
 use std::collections::BTreeMap;
@@ -33,7 +35,6 @@ use tokio::sync::{mpsc, Notify};
 use tracing::{info, warn};
 
 use crate::notification::NotificationEntry;
-use crate::usb::UsbDeviceInfo;
 use shakenfist_spice_protocol::ChannelType;
 
 /// A caller-chosen correlation token carried in every control-socket
@@ -447,10 +448,6 @@ pub enum ChannelEvent {
     /// A USB device connection attempt failed
     UsbConnectFailed(String),
 
-    /// Available USB devices changed (enumeration result)
-    #[allow(dead_code)]
-    UsbDevicesChanged(Vec<UsbDeviceInfo>),
-
     /// A WebDAV channel connected successfully
     WebdavChannelReady,
 
@@ -598,7 +595,6 @@ impl ChannelEvent {
             ChannelEvent::UsbDeviceConnected { .. } => "UsbDeviceConnected",
             ChannelEvent::UsbDeviceDisconnected => "UsbDeviceDisconnected",
             ChannelEvent::UsbConnectFailed { .. } => "UsbConnectFailed",
-            ChannelEvent::UsbDevicesChanged { .. } => "UsbDevicesChanged",
             ChannelEvent::WebdavChannelReady => "WebdavChannelReady",
             ChannelEvent::WebdavSharingStarted { .. } => "WebdavSharingStarted",
             ChannelEvent::WebdavSharingStopped => "WebdavSharingStopped",

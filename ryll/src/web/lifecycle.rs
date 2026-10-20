@@ -206,7 +206,7 @@ pub async fn run_bridge_reaper(state: Arc<WebState>) {
         }
 
         // Clear the audio pump sender so the renderer-side
-        // WebOpusSink drops packets rather than building up
+        // WebPlaybackSink drops packets rather than building up
         // a backlog while no viewer is attached.
         {
             match state.active_opus_tx.lock() {

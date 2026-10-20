@@ -7,23 +7,9 @@
 //! with a timestamp the encoder task fills in.
 
 use anyhow::Result;
-use shakenfist_spice_compression::{H264Config, H264RateControl, Rgbx};
+use shakenfist_spice_compression::{even_dimensions, H264Config, H264RateControl, Rgbx};
 
-pub use shakenfist_spice_compression::even_dimensions;
-
-/// One encoded frame's NAL units in Annex-B framing.
-#[derive(Debug, Clone)]
-pub struct EncodedFrame {
-    /// Annex-B-framed NAL units. Each NAL is prefixed with the
-    /// 4-byte start code `00 00 00 01`. Empty when the encoder
-    /// skipped the frame to hold its bitrate.
-    pub nal_units: Vec<Vec<u8>>,
-    /// Wall-clock timestamp in microseconds (origin chosen by
-    /// the producer; monotonically increasing).
-    pub timestamp_us: u64,
-    /// Whether this frame is an IDR keyframe.
-    pub keyframe: bool,
-}
+use super::types::EncodedFrame;
 
 /// Split an Annex-B byte stream into individual NAL bodies (start
 /// codes stripped). Recognises both 3-byte (`00 00 01`) and 4-byte

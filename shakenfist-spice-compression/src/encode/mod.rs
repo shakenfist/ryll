@@ -10,8 +10,7 @@ use crate::limits;
 mod h264;
 
 pub use h264::{
-    even_dimensions, target_bitrate_bps, H264Config, H264Content, H264Encoder, H264Frame,
-    H264RateControl,
+    target_bitrate_bps, H264Config, H264Content, H264Encoder, H264Frame, H264RateControl,
 };
 
 /// A borrowed BGRX image: 32 bits a pixel, bytes B, G, R and an
@@ -337,6 +336,9 @@ mod jpeg_tests {
 
     /// Every decoder built, each with a name for failure messages.
     fn decoders() -> Vec<(&'static str, Box<dyn JpegDecoder>)> {
+        // Only pushed to when mozjpeg is built, which a renderer
+        // consumer without its `mozjpeg` feature leaves out.
+        #[cfg_attr(not(feature = "mozjpeg"), allow(unused_mut))]
         let mut decoders: Vec<(&'static str, Box<dyn JpegDecoder>)> =
             vec![("jpeg-decoder", Box::new(JpegDecoderRsDecoder::new()))];
         #[cfg(feature = "mozjpeg")]

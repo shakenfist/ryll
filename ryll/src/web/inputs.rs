@@ -34,8 +34,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serde::Deserialize;
-use shakenfist_spice_protocol::MOUSE_MODE_SERVER;
-use shakenfist_spice_renderer::{even_dimensions, make_scancode, InputEvent, SurfaceMirror};
+use shakenfist_spice_renderer::{
+    even_dimensions, make_scancode, InputEvent, PointerTranslator, SurfaceMirror,
+};
 use tokio::sync::{mpsc, watch, Mutex};
 use tracing::{debug, info, warn};
 
@@ -138,9 +139,9 @@ pub async fn run_input_relay(
     control_tx: ControlSink,
     no_video_codec: Arc<AtomicBool>,
 ) {
-    // Last pointer position in surface pixels, for deriving
-    // relative deltas in server mouse mode.
-    let mut last_pos: Option<(u32, u32)> = None;
+    // Remembers the last pointer position in surface pixels, for
+    // deriving relative deltas in server mouse mode.
+    let mut pointer = PointerTranslator::new();
 
     while let Some(payload) = control_rx.recv().await {
         let msg: BrowserMsg = match serde_json::from_slice(&payload) {
@@ -191,45 +192,18 @@ pub async fn run_input_relay(
 
                 // Which message the server will actually act on
                 // depends on the mouse mode, and it ignores the
-                // wrong one without complaint — see
-                // `ryll/src/app/`, which makes the same choice
-                // for the GUI.
+                // wrong one without complaint; the translator makes
+                // that choice, the same way for the GUI. Sending
+                // absolute positions to a server-mode session moves
+                // nothing at all, which is what made this worth
+                // fixing rather than documenting.
                 //
-                // Client mode means the guest has a vdagent and
-                // therefore an absolute pointing device, so
-                // `MOUSE_POSITION` lands. Server mode means it
-                // does not, and only relative `MOUSE_MOTION` is
-                // consumed: sending absolute positions to a
-                // server-mode session moves nothing at all, which
-                // is what made this worth fixing rather than
-                // documenting.
                 // Copied out rather than matched on the borrow, which
                 // holds the watch's read lock.
-                let server_mode = *mouse_mode.borrow() == MOUSE_MODE_SERVER;
-                let event = if server_mode {
-                    // First move after connect has no reference
-                    // point; treat it as a zero delta rather than
-                    // as a jump from the origin.
-                    let (prev_x, prev_y) = last_pos.unwrap_or((x, y));
-                    let dx = x as i32 - prev_x as i32;
-                    let dy = y as i32 - prev_y as i32;
-                    if dx == 0 && dy == 0 {
-                        // Nothing to tell the guest, and sending it
-                        // anyway is not free: every MOUSE_MOTION
-                        // takes a slot in the ack window, which only
-                        // drains on MOUSE_MOTION_ACK. The browser
-                        // reports sub-pixel movement that denormalises
-                        // to the same pixel, and the very first move
-                        // is a deliberate zero, so this is a steady
-                        // trickle rather than a rarity.
-                        last_pos = Some((x, y));
-                        continue;
-                    }
-                    InputEvent::MouseMotion { dx, dy }
-                } else {
-                    InputEvent::MouseMove { x, y }
+                let mode = *mouse_mode.borrow();
+                let Some(event) = pointer.motion(mode, x, y) else {
+                    continue;
                 };
-                last_pos = Some((x, y));
 
                 if input_tx.send(event).await.is_err() {
                     warn!("web inputs: input_tx receiver dropped; relay exiting");
@@ -249,19 +223,15 @@ pub async fn run_input_relay(
                 };
                 let Some((w, h)) = size else { continue };
                 let (x, y) = denormalise(x_norm, y_norm, w, h);
-                // Buttons carry coordinates too, so record them:
-                // a click that arrives without a preceding move
-                // would otherwise leave the next delta measured
-                // from a stale position.
-                last_pos = Some((x, y));
-                let event = if down {
-                    InputEvent::MouseDown { button, x, y }
-                } else {
-                    InputEvent::MouseUp { button, x, y }
-                };
-                if input_tx.send(event).await.is_err() {
-                    warn!("web inputs: input_tx receiver dropped; relay exiting");
-                    return;
+                // Buttons carry coordinates too. In server mode a
+                // click away from the last move is preceded by the
+                // delta to it, since a press carries no position.
+                let mode = *mouse_mode.borrow();
+                for event in pointer.button(mode, button, down, Some((x, y))) {
+                    if input_tx.send(event).await.is_err() {
+                        warn!("web inputs: input_tx receiver dropped; relay exiting");
+                        return;
+                    }
                 }
             }
 
@@ -329,7 +299,7 @@ fn denormalise(x_norm: f32, y_norm: f32, w: u32, h: u32) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shakenfist_spice_protocol::MOUSE_MODE_CLIENT;
+    use shakenfist_spice_protocol::{MOUSE_MODE_CLIENT, MOUSE_MODE_SERVER};
     use shakenfist_spice_renderer::ChannelEvent;
     use std::time::Duration;
 
@@ -625,18 +595,29 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_button_position_becomes_the_next_delta_reference() {
-        // A click carries coordinates. If it did not update the
-        // reference point, a move after a click-without-move
-        // would be measured from wherever the pointer last was.
+        // A click carries coordinates. In server mode a press carries
+        // no position on the wire, so a click away from the last move
+        // must first tell the guest the pointer moved there. And if
+        // the click did not update the reference point, a move after
+        // a click-without-move would be measured from wherever the
+        // pointer last was.
         let mirror = primary_mirror(1000, 800).await;
         let (tx, mut input_rx, _resize_rx, _h) = spawn_relay_in_mode(mirror, MOUSE_MODE_SERVER);
 
+        // Reference point; sends nothing.
+        tx.send(br#"{"type":"pointer-move","x_norm":0.4,"y_norm":0.5}"#.to_vec())
+            .await
+            .expect("send");
         tx.send(
             br#"{"type":"pointer-button","button":1,"down":true,"x_norm":0.5,"y_norm":0.5}"#
                 .to_vec(),
         )
         .await
         .expect("send");
+        match next_event(&mut input_rx).await {
+            InputEvent::MouseMotion { dx, dy } => assert_eq!((dx, dy), (100, 0)),
+            other => panic!("expected the catch-up MouseMotion, got {:?}", other),
+        }
         assert!(matches!(
             next_event(&mut input_rx).await,
             InputEvent::MouseDown { .. }
@@ -648,6 +629,37 @@ mod tests {
         match next_event(&mut input_rx).await {
             InputEvent::MouseMotion { dx, dy } => assert_eq!((dx, dy), (100, 0)),
             other => panic!("expected MouseMotion, got {:?}", other),
+        }
+    }
+
+    /// The guest ignores a repeated absolute position, so it is not
+    /// sent in client mode either.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_repeated_position_is_not_sent_in_client_mode() {
+        let mirror = primary_mirror(1000, 800).await;
+        let (tx, mut input_rx, _resize_rx, _h) = spawn_relay(mirror);
+
+        for payload in [
+            br#"{"type":"pointer-move","x_norm":0.5,"y_norm":0.5}"#.to_vec(),
+            br#"{"type":"pointer-move","x_norm":0.5001,"y_norm":0.5001}"#.to_vec(),
+            br#"{"type":"pointer-move","x_norm":0.6,"y_norm":0.5}"#.to_vec(),
+        ] {
+            tx.send(payload).await.expect("send");
+        }
+
+        match next_event(&mut input_rx).await {
+            InputEvent::MouseMove { x, y } => assert_eq!((x, y), (500, 400)),
+            other => panic!("expected MouseMove, got {:?}", other),
+        }
+        // The second move landed on the same pixel: the next thing to
+        // arrive must be the third.
+        match next_event(&mut input_rx).await {
+            InputEvent::MouseMove { x, y } => assert_eq!(
+                (x, y),
+                (600, 400),
+                "a repeated position was forwarded ahead of the real move"
+            ),
+            other => panic!("expected MouseMove, got {:?}", other),
         }
     }
 

@@ -130,8 +130,9 @@ pub mod capabilities {
     // The word every channel without its own default advertises: the main
     // channel's caps as they were before AGENT_CONNECTED_TOKENS. Capability
     // bits are per channel type, so on those channels these bits mean
-    // something else (bit 0 is KEY_SCANCODE on inputs, CELT_0_5_1 on
-    // playback; bit 3 is OPUS on playback) and are kept unchanged here.
+    // something else (bit 0 is KEY_SCANCODE on inputs) and are kept
+    // unchanged here. Playback used to take this word too, which offered
+    // CELT_0_5_1 and OPUS by accident; it has DEFAULT_PLAYBACK now.
     pub const DEFAULT_OTHER: u32 = MAIN_SEMI_SEAMLESS_MIGRATE | MAIN_SEAMLESS_MIGRATE;
 
     // Display channel capabilities (SPICE_DISPLAY_CAP_*)
@@ -219,9 +220,8 @@ pub mod capabilities {
     ];
 
     // Playback channel capabilities (SPICE_PLAYBACK_CAP_*,
-    // protocol.h:117-122). Ryll does not advertise these by name: its
-    // playback word is DEFAULT_OTHER, whose bits 0 and 3 are CELT_0_5_1
-    // and OPUS here. A server role advertises them to say what it sends.
+    // protocol.h:117-122). Ryll advertises DEFAULT_PLAYBACK; a server
+    // role advertises them to say what it sends.
     /// The deprecated CELT 0.5.1 codec (SPICE_PLAYBACK_CAP_CELT_0_5_1).
     pub const PLAYBACK_CELT_0_5_1: u32 = 1 << 0;
     /// `PLAYBACK_VOLUME` and `PLAYBACK_MUTE` are understood
@@ -232,6 +232,12 @@ pub mod capabilities {
     pub const PLAYBACK_LATENCY: u32 = 1 << 2;
     /// Opus data mode (SPICE_PLAYBACK_CAP_OPUS).
     pub const PLAYBACK_OPUS: u32 = 1 << 3;
+
+    /// The playback word ryll advertises: Opus, which it decodes. Not
+    /// CELT 0.5.1, which it cannot. A server offered neither codec
+    /// falls back to raw PCM, which needs no cap. VOLUME and LATENCY
+    /// are left out because ryll does not act on either message.
+    pub const DEFAULT_PLAYBACK: u32 = PLAYBACK_OPUS;
 
     // SpiceVMC channel capabilities (SPICE_SPICEVMC_CAP_*)
     pub const SPICEVMC_LZ4: u32 = 1 << 0;

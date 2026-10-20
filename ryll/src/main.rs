@@ -636,7 +636,7 @@ fn run_web(
         // and resize channels so 5c can drive them from browser
         // messages; usb and webdav stay closed (web mode does
         // not implement these in MVP).
-        let (event_tx_mpsc, mut event_rx_mpsc) =
+        let (event_tx_mpsc, event_rx_mpsc) =
             tokio::sync::mpsc::channel::<shakenfist_spice_renderer::ChannelEvent>(
                 shakenfist_spice_renderer::session::EVENT_CHANNEL_SIZE,
             );
@@ -686,28 +686,27 @@ fn run_web(
         drop(usb_tx);
         drop(webdav_tx);
 
-        // Broadcaster the 5b/5d/5e relays subscribe to. The
-        // forwarder task below pulls from the renderer's mpsc
-        // and re-broadcasts so multiple consumers can observe
-        // each event. 5b adds the surface-mirror subscriber
-        // below; 5d/5e add cursor and audio subscribers.
-        let (event_broadcast_tx, _) = tokio::sync::broadcast::channel::<
-            shakenfist_spice_renderer::ChannelEvent,
-        >(crate::web::server::EVENT_BROADCAST_CAPACITY);
-
-        // Live pixel store that turns ChannelEvents into surface
-        // mutations. The encoder reads from this via
-        // `RealFrameSource` (constructed in `EncoderInfra::restart`).
-        let surface_mirror = Arc::new(tokio::sync::Mutex::new(
-            shakenfist_spice_renderer::SurfaceMirror::new(),
-        ));
+        // Event bus the 5b/5d/5e relays subscribe to. Its forwarder
+        // pulls from the renderer's mpsc and re-broadcasts so multiple
+        // consumers can observe each event, and its mirror task turns
+        // those events into surface mutations on the live pixel store
+        // the encoder reads via `RealFrameSource` (constructed in
+        // `EncoderInfra::restart`). Both tasks start below, once the
+        // long-lived subscribers exist.
+        let event_bus = shakenfist_spice_renderer::EventBus::new(
+            shakenfist_spice_renderer::session::EVENT_BROADCAST_CAPACITY,
+        );
+        let event_broadcast_tx = event_bus.sender();
+        let surface_mirror = event_bus.mirror();
 
         // Build the Opus passthrough sink. The sink is handed to
-        // `run_connection` so the playback channel taps every Opus packet
-        // into it; the matching slot is stashed in `WebState` so each
-        // `/offer` can plug a fresh Sender in for its audio pump.
-        let (opus_sink, active_opus_tx) = crate::web::audio::WebOpusSink::new();
-        let opus_sink_dyn: Arc<dyn shakenfist_spice_renderer::OpusPacketSink> = opus_sink;
+        // `run_connection` as the session's playback output, so the
+        // playback channel taps every Opus packet into it and opens no
+        // audio device on this host; the matching slot is stashed in
+        // `WebState` so each `/offer` can plug a fresh Sender in for its
+        // audio pump.
+        let (playback_sink, active_opus_tx) = crate::web::audio::WebPlaybackSink::new();
+        let playback = shakenfist_spice_renderer::PlaybackOutput::Sink(playback_sink);
 
         // Cancel flag bridged from the process-global
         // `SHUTDOWN_REQUESTED`. Same shape as the headless path.
@@ -724,16 +723,16 @@ fn run_web(
 
         // Subscribe every long-lived consumer of the event bus
         // *before* the session that produces the events is spawned.
+        // The bus subscribed its own surface mirror when it was built.
         //
         // A `broadcast::Receiver` only sees what is sent after it was
-        // created, and the events these two care about — the first
+        // created, and the events these care about — the first
         // surface and the first cursor shape — arrive during
         // session-init. Subscribing after the spawn means the ordering
         // is decided by how long a TCP connect, link handshake and
         // auth take, which is a race that happens to be won by a wide
         // margin rather than one that cannot be lost.
-        let mut event_rx_for_mirror = event_broadcast_tx.subscribe();
-        let cursor_event_rx = event_broadcast_tx.subscribe();
+        let cursor_event_rx = event_bus.subscribe();
 
         // Mouse mode and vdagent state are not on the bus at all. The
         // main channel publishes them through `SessionState`'s watch
@@ -782,7 +781,7 @@ fn run_web(
                 log_config,
                 connection_cancel,
                 clipboard_for_conn,
-                /* opus_sink */ Some(opus_sink_dyn),
+                playback,
                 h264,
                 image_cache_cap_bytes,
                 glz_dictionary_cap_bytes,
@@ -800,48 +799,13 @@ fn run_web(
             res
         });
 
-        // Forwarder: drain the renderer's mpsc into the broadcast
-        // bus so multiple subscribers (5b surface mirror, 5d
-        // cursor relay, 5e audio sink) can each see every event.
-        // The forwarder exits when the renderer drops its sender
-        // on session shutdown.
-        let event_broadcast_for_forwarder = event_broadcast_tx.clone();
-        let forwarder_handle = tokio::spawn(async move {
-            while let Some(event) = event_rx_mpsc.recv().await {
-                let _ = event_broadcast_for_forwarder.send(event);
-            }
-        });
-
-        // Surface-mirror apply-event task. Subscribes to the broadcast
-        // bus and pipes every ChannelEvent through
-        // `SurfaceMirror::apply_event`. `Lagged` means a slow subscriber
-        // missed N events; for the mirror that's bad because surface
-        // state diverges from what SPICE sent — log a warning but
-        // continue rather than tearing the session down. If lag becomes
-        // a real operational problem, revisit it with a larger broadcast
-        // capacity or a backpressure scheme.
-        let mirror_for_task = surface_mirror.clone();
-        let mirror_handle = tokio::spawn(async move {
-            loop {
-                match event_rx_for_mirror.recv().await {
-                    Ok(event) => {
-                        let mut m = mirror_for_task.lock().await;
-                        m.apply_event(&event);
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(
-                            "web: surface mirror lagged by {} events; \
-                             surface state may briefly diverge",
-                            n
-                        );
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        tracing::info!("web: surface mirror task exiting (broadcast closed)");
-                        break;
-                    }
-                }
-            }
-        });
+        // The forwarder exits when the renderer drops its sender on
+        // session shutdown. `Lagged` means a slow subscriber missed N
+        // events; the mirror task marks every surface fully damaged
+        // and continues rather than tearing the session down. If lag
+        // becomes a real operational problem, revisit it with a larger
+        // broadcast capacity or a backpressure scheme.
+        let event_bus_handles = event_bus.start(event_rx_mpsc, "web");
 
         // Build state with the channel handles populated and
         // run the HTTP server. When the server exits (Ctrl+C
@@ -1005,8 +969,8 @@ fn run_web(
             let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
         }
 
-        forwarder_handle.abort();
-        mirror_handle.abort();
+        event_bus_handles.forwarder.abort();
+        event_bus_handles.mirror.abort();
         cursor_handle.abort();
         mouse_mode_handle.abort();
         control_writer_handle.abort();
