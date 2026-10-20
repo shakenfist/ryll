@@ -35,6 +35,7 @@ mod server;
 mod tls;
 
 pub use display::MirrorDisplay;
+pub use input::SpiceInputHandler;
 
 /// What the RDP adapters need from one SPICE session.
 ///

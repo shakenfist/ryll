@@ -7292,6 +7292,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
+ "ironrdp-pdu",
  "ironrdp-server",
  "rand 0.9.5",
  "rcgen",

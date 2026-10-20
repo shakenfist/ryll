@@ -87,3 +87,9 @@ sha2 = "0.11"
 # Paused time for the display handler's tests, which wait on its
 # damage poll interval without sleeping in real time.
 tokio = { version = "1", features = ["test-util"] }
+
+# The input handler's tests build RDP synchronize events, whose lock
+# flags type `ironrdp-server` uses but does not re-export. Already in
+# Cargo.lock through `ironrdp-server`, so this adds an edge, not a
+# crate.
+ironrdp-pdu = "0.9"
