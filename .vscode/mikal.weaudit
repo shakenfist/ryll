@@ -68,10 +68,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/channels/volume.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/src/webdav/mod.rs",
       "author": "mikal"
     },
@@ -176,10 +172,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/README.md",
-      "author": "mikal"
-    },
-    {
       "path": "scripts/replay_draw_copy.py",
       "author": "mikal"
     },
@@ -272,14 +264,6 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/web/audio.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/web/lifecycle.rs",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/notifications.rs",
       "author": "mikal"
     },
@@ -297,10 +281,6 @@
     },
     {
       "path": "shakenfist-spice-renderer/src/encoder/frame_source.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/audio_sink.rs",
       "author": "mikal"
     },
     {
@@ -496,10 +476,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/display/surface.rs",
-      "author": "mikal"
-    },
-    {
       "path": "MERGE-TEMPLATE.md",
       "author": "mikal"
     },
@@ -612,10 +588,6 @@
       "author": "mikal"
     },
     {
-      "path": "ARCHITECTURE.md",
-      "author": "mikal"
-    },
-    {
       "path": "PLAN-TEMPLATE.md",
       "author": "mikal"
     },
@@ -629,10 +601,6 @@
     },
     {
       "path": "docs/configuration.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/development.md",
       "author": "mikal"
     },
     {
@@ -652,19 +620,11 @@
       "author": "mikal"
     },
     {
-      "path": "docs/rendering-pipeline.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/session-lifecycle.md",
       "author": "mikal"
     },
     {
       "path": "docs/web-frontend.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/web-mode-internals.md",
       "author": "mikal"
     },
     {
@@ -696,18 +656,6 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/web/inputs.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/web/server.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/web/signalling.rs",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/clipboard_arboard.rs",
       "author": "mikal"
     },
@@ -728,35 +676,7 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-compression/src/encode/h264.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-compression/src/encode/mod.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-compression/src/encode",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-compression/src/lib.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-compression/src/lz4.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-compression/src/video.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-compression/src",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-compression/Cargo.toml",
       "author": "mikal"
     },
     {
@@ -836,15 +756,7 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-protocol/src/constants.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-protocol/src/lib.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-protocol/src/link.rs",
       "author": "mikal"
     },
     {
@@ -853,10 +765,6 @@
     },
     {
       "path": "shakenfist-spice-protocol/src/reader.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-protocol/src",
       "author": "mikal"
     },
     {

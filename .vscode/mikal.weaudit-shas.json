@@ -77,10 +77,6 @@
       "sha": "4f075c1b65ff62c072d9ed7a09fc5a20be23eb8a",
       "date": "2026-10-05"
     },
-    "ARCHITECTURE.md": {
-      "sha": "223895f1003e1a88f1a5b8b430a752cd575ac0b4",
-      "date": "2026-10-16"
-    },
     "MERGE-TEMPLATE.md": {
       "sha": "da51f6b87f9a89d7ab7cdd19cac6a741bc04cd43",
       "date": "2026-10-05"
@@ -117,10 +113,6 @@
       "sha": "9fef25179d5ec56bb52e4a5b5edeecadcff74097",
       "date": "2026-09-17"
     },
-    "docs/development.md": {
-      "sha": "b113febd0a3dde08b8d05337c0e6c38fa719c8ff",
-      "date": "2026-10-16"
-    },
     "docs/device-redirection.md": {
       "sha": "851b7981637d7a0d7c9175b02c891cf0e73db7ce",
       "date": "2026-10-16"
@@ -145,10 +137,6 @@
       "sha": "dc06c44e9d9a0e7fe4888d35adb50908ab37fc7d",
       "date": "2026-10-16"
     },
-    "docs/rendering-pipeline.md": {
-      "sha": "13236637e784e8469aaf876e5584e1b7ac0aaf53",
-      "date": "2026-10-16"
-    },
     "docs/session-lifecycle.md": {
       "sha": "23ff3796f6fa89602535c7708fdfface65e69594",
       "date": "2026-10-16"
@@ -156,10 +144,6 @@
     "docs/web-frontend.md": {
       "sha": "25445d1d9682af06818915b0ec4b115bbdb9cd70",
       "date": "2026-10-16"
-    },
-    "docs/web-mode-internals.md": {
-      "sha": "fa062fb0e86fb7e3746b4a545461f7090fa80462",
-      "date": "2026-10-17"
     },
     "examples/control-socket-demo.py": {
       "sha": "1e39ea70aaa51526508b15997706449a378ce09a",
@@ -233,10 +217,6 @@
       "sha": "b8619914ce82816fb3f9f8897d472d6e1e32be7b",
       "date": "2026-09-23"
     },
-    "ryll/src/web/audio.rs": {
-      "sha": "a8862ff70dcfa6aad31e68dd4a40370f4eb93e6c",
-      "date": "2026-09-18"
-    },
     "ryll/src/web/control.rs": {
       "sha": "3af3da761d733c9511595a43c84e5d140dea0291",
       "date": "2026-10-17"
@@ -245,25 +225,9 @@
       "sha": "d90e2349477fd7aabd3e8f299acb6b09821fb867",
       "date": "2026-08-18"
     },
-    "ryll/src/web/inputs.rs": {
-      "sha": "bbcc0cc3affc07cbe70e4eda705ee1b8acfb7012",
-      "date": "2026-10-17"
-    },
-    "ryll/src/web/lifecycle.rs": {
-      "sha": "edc8d98358c50af750f3c134e6adacbf63628a03",
-      "date": "2026-09-18"
-    },
     "ryll/src/web/mod.rs": {
       "sha": "b97b31c030126cfaf504fb20d972734c30d88b79",
       "date": "2026-08-18"
-    },
-    "ryll/src/web/server.rs": {
-      "sha": "0b90afff390bf578d357a07717ef4e92b8b63431",
-      "date": "2026-10-17"
-    },
-    "ryll/src/web/signalling.rs": {
-      "sha": "05919a0798565e73fffabf1c7fdebf28209bb8e3",
-      "date": "2026-10-17"
     },
     "scripts/check-rust.sh": {
       "sha": "6b134226743b654c751c04352cc9072f20476bb9",
@@ -273,10 +237,6 @@
       "sha": "ed18e13bae620b5e684caf735f361982d52b32fb",
       "date": "2026-08-02"
     },
-    "shakenfist-spice-compression/Cargo.toml": {
-      "sha": "9f50988fec3c05f197daa34657de2bc7c9a14b2b",
-      "date": "2026-10-20"
-    },
     "shakenfist-spice-compression/README.md": {
       "sha": "f828973815758b0ed7903ba16898962dfd73a45e",
       "date": "2026-10-20"
@@ -285,14 +245,6 @@
       "sha": "7a7323cc6153643991583fd44ba6ab04cdb5cded",
       "date": "2026-09-18"
     },
-    "shakenfist-spice-compression/src/encode/h264.rs": {
-      "sha": "a2a517269b0a483715f591a2b1682e36351334b0",
-      "date": "2026-10-20"
-    },
-    "shakenfist-spice-compression/src/encode/mod.rs": {
-      "sha": "368087ad84eb7d9c827701b5d96ee1fab3e6878c",
-      "date": "2026-10-20"
-    },
     "shakenfist-spice-compression/src/glz.rs": {
       "sha": "91ebe6b0ed7bfd1be42bbf4f246cd6eec63bc886",
       "date": "2026-10-05"
@@ -300,10 +252,6 @@
     "shakenfist-spice-compression/src/jpeg.rs": {
       "sha": "f2362f5376b1bf702f63d65e5d6490d4b16bf29a",
       "date": "2026-10-05"
-    },
-    "shakenfist-spice-compression/src/lib.rs": {
-      "sha": "1da3b187eb8b136d577323375a681ad41ff784f0",
-      "date": "2026-10-20"
     },
     "shakenfist-spice-compression/src/limits.rs": {
       "sha": "03bb2f6465215504529f969ded79f6139baeb0c4",
@@ -320,10 +268,6 @@
     "shakenfist-spice-compression/src/quic.rs": {
       "sha": "a2a4138fe277b72f992cb3c1dafd3bc5b6b4db8e",
       "date": "2026-10-05"
-    },
-    "shakenfist-spice-compression/src/video.rs": {
-      "sha": "4b0b1fe83a8f76cf29c2a0f3e155d18adfa96569",
-      "date": "2026-10-20"
     },
     "shakenfist-spice-protocol/Cargo.toml": {
       "sha": "ef204bdaf9034303aefbb5757a375ba6e86ba247",
@@ -389,20 +333,12 @@
       "sha": "4b3bd11c6946c6f9f27f4c5ff7aaf5008331b202",
       "date": "2026-10-20"
     },
-    "shakenfist-spice-protocol/src/constants.rs": {
-      "sha": "ac1065d8134ed45449c875ec6c565c83b4a2735a",
-      "date": "2026-10-20"
-    },
     "shakenfist-spice-protocol/src/host_subject.rs": {
       "sha": "af96836e04851d493d60e8aabe229ca3163dbd7d",
       "date": "2026-07-18"
     },
     "shakenfist-spice-protocol/src/lib.rs": {
       "sha": "2ddf9749c75f25bd8cf0d5a9e4a833c57835a6c3",
-      "date": "2026-10-20"
-    },
-    "shakenfist-spice-protocol/src/link.rs": {
-      "sha": "71f01b3e97b13859facde155b1d7fee7f6c579f2",
       "date": "2026-10-20"
     },
     "shakenfist-spice-protocol/src/logging.rs": {
@@ -457,14 +393,6 @@
       "sha": "7a54174573c7ff672b5099de4de0e7e60ce00aaf",
       "date": "2026-10-20"
     },
-    "shakenfist-spice-renderer/README.md": {
-      "sha": "f26f1d8b76c389c4b6711d7ae1b482fa234326f6",
-      "date": "2026-08-02"
-    },
-    "shakenfist-spice-renderer/src/audio_sink.rs": {
-      "sha": "36d095bf941d85ffaf00477d51ba8afa0f6af156",
-      "date": "2026-09-19"
-    },
     "shakenfist-spice-renderer/src/byte_counter.rs": {
       "sha": "d9b32a0b373832330a33bbff2e950273eac1e34e",
       "date": "2026-07-21"
@@ -472,10 +400,6 @@
     "shakenfist-spice-renderer/src/channels/agent_queue.rs": {
       "sha": "00b3a1a61efee562e224e750312b38ff23cc12f6",
       "date": "2026-10-05"
-    },
-    "shakenfist-spice-renderer/src/channels/volume.rs": {
-      "sha": "7bdfcb6c3add013748b3df150f799b169c7c65c8",
-      "date": "2026-07-19"
     },
     "shakenfist-spice-renderer/src/channels/watchdog.rs": {
       "sha": "f5a71924c175312fc6ee96cd5e23f99703596048",
@@ -488,10 +412,6 @@
     "shakenfist-spice-renderer/src/digest.rs": {
       "sha": "11f9647ca7f5957b6df3583b9a5065884e650e5c",
       "date": "2026-09-19"
-    },
-    "shakenfist-spice-renderer/src/display/surface.rs": {
-      "sha": "7b5b437c638f3d5fff6576f1ceeed5d47fdcf9c0",
-      "date": "2026-10-05"
     },
     "shakenfist-spice-renderer/src/encoder/frame_source.rs": {
       "sha": "793e763c867f67031b21226d94b9784cd848584e",
