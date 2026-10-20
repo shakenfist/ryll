@@ -1018,7 +1018,23 @@ Filled in by the management session as steps land.
 
 ## Execution notes
 
-Filled in by the management session as the run proceeds.
+- **Back brief, 2026-10-21 08:54 AEDT.** Mikal answered the five
+  gates: install FreeRDP 3.15.0 on this host (`freerdp3-x11`,
+  `freerdp3-sdl`; the install needs a password, so Mikal runs
+  it); a Windows machine with mstsc is available and Mikal
+  drives it himself for step 8; decision 2 (TLS-only default)
+  is confirmed; the desktop guest runs on SPICE port 5910; and
+  this session may push and open the pull request when the
+  definition of done is checked.
+- **Ordering.** Steps 1 and 2 run in sequence in the phase
+  worktree, because both run `make` there. Steps 3 and 4 run in
+  parallel in their own worktrees once both have landed (4 needs
+  2's `KeyModifiers`). Step 5 follows; 6 and 7 run in parallel
+  in worktrees after 5; 8 follows 7; the manual test and *Results*
+  come before 9.
+- The `ryll-dev` image, absent at planning time, was present when
+  implementation began (another session built it), so no rebuild
+  was needed.
 
 ## Future work
 
