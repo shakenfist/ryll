@@ -112,6 +112,9 @@ impl EventBus {
         // have diverged from what SPICE sent: mark every surface
         // fully damaged so downstream consumers resend whole
         // surfaces, and carry on rather than tearing the session down.
+        // That stops a consumer trusting a partial damage region; it
+        // does not restore the missed draws, or a missed surface
+        // create or destroy, which recover only as the guest redraws.
         let mirror_task = tokio::spawn(async move {
             loop {
                 match mirror_rx.recv().await {

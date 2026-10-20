@@ -9,8 +9,10 @@
 #
 # Three checks, all with --frozen:
 #   1. clippy with no default features, warnings denied.
-#   2. cargo check with each feature on its own, so no feature silently
-#      depends on another.
+#   2. clippy with each feature on its own, warnings denied, so no
+#      feature silently depends on another and no gating mistake hides
+#      as a warning (an unused import, say) in a combination nothing
+#      else builds.
 #   3. the normal+build dependency tree of the slim build must not contain
 #      any banned package.
 #
@@ -37,8 +39,8 @@ echo "==> clippy: ${PKG} --no-default-features"
 cargo clippy --frozen -p "${PKG}" --no-default-features --all-targets -- -D warnings
 
 for f in "${FEATURES[@]}"; do
-    echo "==> check: ${PKG} --no-default-features --features ${f}"
-    cargo check --frozen -p "${PKG}" --no-default-features --features "${f}" --all-targets
+    echo "==> clippy: ${PKG} --no-default-features --features ${f}"
+    cargo clippy --frozen -p "${PKG}" --no-default-features --features "${f}" --all-targets -- -D warnings
 done
 
 echo "==> dependency tree: ${PKG} --no-default-features"

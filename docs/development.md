@@ -152,8 +152,9 @@ The slim renderer is built with
 `cargo build -p shakenfist-spice-renderer --no-default-features`,
 optionally naming the features needed.  `tools/check-slim-renderer.sh`
 guards it, and `make lint` runs it: clippy with no default features,
-`cargo check` of each feature on its own, and a check that the slim
-dependency tree contains none of the crates the features gate.
+clippy with each feature on its own (both with warnings denied), and a
+check that the slim dependency tree contains none of the crates the
+features gate.
 
 ## Workspace dependency convention
 

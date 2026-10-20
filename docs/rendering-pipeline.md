@@ -104,6 +104,9 @@ holds the rectangles written since the consumer last called
   share a surface.
 - If the `EventBus` mirror lags and misses events, it marks every
   surface fully damaged so damage consumers resend whole surfaces.
+  That keeps a consumer from trusting a partial damage region, but it
+  does not restore the missed pixels or a missed surface create or
+  destroy: the picture recovers only as the guest redraws.
 
 ## Multi-Monitor Support
 

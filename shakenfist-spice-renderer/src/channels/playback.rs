@@ -301,15 +301,16 @@ fn write_samples_f32(
     }
 }
 
-/// Convert a little-endian PCM byte stream to a fresh
-/// `Vec<i16>`, for raw-mode DATA. A trailing odd byte is
-/// dropped.
-fn pcm_bytes_to_i16(bytes: &[u8]) -> Vec<i16> {
-    let mut out = Vec::with_capacity(bytes.len() / 2);
+/// Convert a little-endian PCM byte stream into `out`, replacing
+/// what it held, for raw-mode DATA. A trailing odd byte is
+/// dropped. The caller reuses `out` across packets, so the hot
+/// path does not allocate once it has grown.
+fn pcm_bytes_to_i16(bytes: &[u8], out: &mut Vec<i16>) {
+    out.clear();
+    out.reserve(bytes.len() / 2);
     for chunk in bytes.as_chunks::<2>().0 {
         out.push(i16::from_le_bytes(*chunk));
     }
-    out
 }
 
 /// Compute the number of 48 kHz samples represented by one
@@ -857,6 +858,9 @@ pub struct PlaybackChannel {
     /// Per-session metadata for the currently-active audio
     /// session (Some between START and STOP).
     current_session: Option<crate::snapshots::PlaybackSessionInfo>,
+    /// Raw-mode DATA converted to samples, kept between packets so
+    /// the conversion does not allocate per packet.
+    raw_samples: Vec<i16>,
     /// Cumulative START message count.
     start_count: u64,
     /// Cumulative STOP message count.
@@ -948,6 +952,7 @@ impl PlaybackChannel {
                 message_names::playback_client,
             ),
             current_session: None,
+            raw_samples: Vec::new(),
             start_count: 0,
             stop_count: 0,
             data_packets_received: 0,
@@ -1219,13 +1224,15 @@ impl PlaybackChannel {
                         // a slow sink does not read as slow decode.
                         if self.audio_mode == audio_data_mode::RAW {
                             let start = Instant::now();
-                            let samples = pcm_bytes_to_i16(audio_data);
+                            let mut samples = std::mem::take(&mut self.raw_samples);
+                            pcm_bytes_to_i16(audio_data, &mut samples);
                             self.push_local_output(&samples);
                             let dur_us = start.elapsed().as_micros().min(u32::MAX as u128) as u32;
                             self.record_decode_success(dur_us, audio_data.len() as u64);
                             if let Some(sink) = self.sink() {
                                 sink.on_pcm_samples(&samples, self.sample_rate, self.channels_u8());
                             }
+                            self.raw_samples = samples;
                         } else if self.audio_mode == audio_data_mode::OPUS {
                             // Pre-decode tap: the sink gets the packet
                             // as it arrived, then what it decodes to.
@@ -1283,11 +1290,16 @@ impl PlaybackChannel {
                 playback_server::STOP => {
                     info!("playback: STOP");
                     self.stop_count = self.stop_count.saturating_add(1);
-                    self.current_session = None;
+                    let was_running = self.current_session.take().is_some();
                     self.stop_audio();
                     self.opus_decoder = None;
-                    if let Some(sink) = self.sink() {
-                        sink.on_stop();
+                    // A STOP with no stream running (a repeat, or one
+                    // before any START) is not passed on, so a sink
+                    // always sees on_start before on_stop.
+                    if was_running {
+                        if let Some(sink) = self.sink() {
+                            sink.on_stop();
+                        }
                     }
                 }
                 playback_server::VOLUME => {
@@ -1888,6 +1900,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_stop_with_no_stream_running_is_not_passed_on() {
+        let (mut channel, sink, _peers) = sink_channel().await;
+        // A STOP before any START, then a stream, then a repeated STOP.
+        feed(
+            &mut channel,
+            &[
+                stop(),
+                mode(audio_data_mode::RAW),
+                start(2, 48_000),
+                stop(),
+                stop(),
+            ],
+        )
+        .await;
+        assert_eq!(
+            sink.calls(),
+            vec![
+                SinkCall::Start(PlaybackFormat {
+                    mode: audio_data_mode::RAW,
+                    sample_rate_hz: 48_000,
+                    channels: 2,
+                }),
+                SinkCall::Stop,
+            ]
+        );
+        // Every STOP still counts, for the control socket.
+        assert_eq!(channel.stop_count, 3);
+    }
+
+    #[tokio::test]
     async fn the_channel_count_saturates_rather_than_truncates() {
         let (mut channel, sink, _peers) = sink_channel().await;
         // 300 truncated to a u8 would be 44.
@@ -1905,8 +1947,6 @@ mod tests {
             })]
         );
     }
-
-    // --- CallbackState and audio-thread helper tests ---
 
     // --- CallbackState and audio-thread helper tests ---
 
@@ -2187,7 +2227,9 @@ mod tests {
     #[test]
     fn pcm_bytes_to_i16_decodes_little_endian() {
         let bytes = [0x01, 0x00, 0xff, 0xff, 0x00, 0x80];
-        let samples = pcm_bytes_to_i16(&bytes);
+        // Whatever the buffer held before is replaced.
+        let mut samples = vec![7i16; 5];
+        pcm_bytes_to_i16(&bytes, &mut samples);
         assert_eq!(samples, vec![1i16, -1, i16::MIN]);
     }
 
@@ -2195,7 +2237,8 @@ mod tests {
     fn pcm_bytes_to_i16_drops_trailing_odd_byte() {
         // The chunks_exact(2) loop ignores the trailing single byte.
         let bytes = [0x01, 0x00, 0x42];
-        let samples = pcm_bytes_to_i16(&bytes);
+        let mut samples = Vec::new();
+        pcm_bytes_to_i16(&bytes, &mut samples);
         assert_eq!(samples, vec![1i16]);
     }
 

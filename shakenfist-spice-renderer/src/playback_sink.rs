@@ -72,7 +72,9 @@ pub trait PlaybackSink: Send + Sync {
     /// implementation is a no-op.
     fn on_decoded_pcm(&self, _samples: &[i16], _sample_rate_hz: u32, _channels: u8) {}
 
-    /// The audio stream stopped (`PLAYBACK_STOP`). The default
+    /// The audio stream stopped (`PLAYBACK_STOP`). Only a STOP that
+    /// ends a started stream is passed on, so this always follows an
+    /// [`on_start`](PlaybackSink::on_start). The default
     /// implementation is a no-op.
     fn on_stop(&self) {}
 }

@@ -2,13 +2,14 @@
 
 Master plan: [PLAN-rdp-frontend.md](PLAN-rdp-frontend.md).
 
-**Planning effort:** high, as the master plan requires. This
-phase changes renderer internals that every mode depends on
-(the display surface, the playback channel, the crate's feature
-set and public API) and has to coordinate with Kerbside's
-transcoding spike. No review effort is set by the master plan;
-review at high effort, because steps 5 and 6 change the
-published crate's API.
+**Planning effort:** low. The master plan asks for high, and
+the Execution notes record the choice to proceed anyway. It
+asks for high because this phase changes renderer internals
+that every mode depends on (the display surface, the playback
+channel, the crate's feature set and public API) and has to
+coordinate with Kerbside's transcoding spike. No review effort
+is set by the master plan; review at high effort, because steps
+5 and 6 change the published crate's API.
 
 ## Prompt
 
@@ -930,6 +931,12 @@ Filled in by the management session as steps land.
   - Step 8: added the GUI's server-mode drift to the parity
     matrix.
   Each commit message says what review changed.
+- The PR's first automated review changed decision 11: the
+  per-feature builds in `tools/check-slim-renderer.sh` now run
+  clippy with warnings denied rather than `cargo check`, so a
+  gating mistake that only warns in one feature's build fails
+  lint. It also made a sink's `on_stop` follow an `on_start`
+  only, and made raw PCM conversion reuse one buffer.
 
 ## Future work
 
