@@ -1073,6 +1073,33 @@ packages to `Cargo.lock` and removed none:
 - The `ryll-dev` image, absent at planning time, was present when
   implementation began (another session built it), so no rebuild
   was needed.
+- **FreeRDP** was installed by Mikal from another window
+  (`sudo` is not available to this session); `xfreerdp3` and
+  `sdl-freerdp3` 3.15.0 are on the path.
+- **Step worktrees were made by hand**, with `git worktree add`
+  from the phase branch's head, rather than with the agent tool's
+  own worktree isolation, which branches from the primary clone's
+  checked-out `develop` and so would not have had steps 1 and 2.
+  Each step's diff was applied to the phase branch with `git
+  apply --index` after review, and the step worktree removed.
+  Steps 3 and 4 both added a `[dev-dependencies]` section to the
+  crate manifest and a `pub use` to `lib.rs`; the management
+  session merged those by hand and re-ran `make lock`.
+- **Step 3 departed from decision 5 in two ways**, both because
+  IronRDP's server loop demanded it (`server.rs:1290` and
+  `:1482-1483` of the pinned tree): a `next_update` that returns
+  `None` disconnects the client, so the stream waits instead of
+  returning nothing when there is no session or no damage; and a
+  resize deactivates and reactivates the connection, which calls
+  `size()` and `updates()` again and drops the old stream, so
+  `MirrorDisplay` remembers the size it last reported and each new
+  stream starts unseeded. `sent_size` is a plain `DesktopSize`,
+  not an `Option`.
+- **Step 4 filed #604** for the middle button and added four
+  behaviours the brief did not name: a wheel reversal starts a
+  fresh notch, a zero relative move in server mode sends nothing,
+  a different session in the slot resets the pointer state, and a
+  missing primary surface counts as a dropped event. All kept.
 
 ## Future work
 
