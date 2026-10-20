@@ -333,9 +333,25 @@
       "sha": "ef204bdaf9034303aefbb5757a375ba6e86ba247",
       "date": "2026-09-27"
     },
+    "shakenfist-spice-protocol/README.md": {
+      "sha": "67aba90edcf0f5cf08fee8eb44a3c51316e604e7",
+      "date": "2026-10-20"
+    },
     "shakenfist-spice-protocol/fuzz/.gitignore": {
       "sha": "fe68c971b7971971a920ec01e21f0154c6041be4",
       "date": "2026-07-10"
+    },
+    "shakenfist-spice-protocol/fuzz/Cargo.toml": {
+      "sha": "55b4989f375e221e4bd1ed1c5b670875b309774a",
+      "date": "2026-10-20"
+    },
+    "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_agent_reassembly.rs": {
+      "sha": "1264d8b105bd3544b672c2385416ca44b6c42dd2",
+      "date": "2026-10-20"
+    },
+    "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_client_bound.rs": {
+      "sha": "5ce63194a2709d3af4601907a6a984d7c1203035",
+      "date": "2026-10-20"
     },
     "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_decrypt_password.rs": {
       "sha": "efceaf469aa9a2032b534aa404334275ac657cab",
@@ -349,6 +365,10 @@
       "sha": "7c3d8a6e5effde04a9e5875cb2d9fca33bbce1cd",
       "date": "2026-07-10"
     },
+    "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_lz4_decode.rs": {
+      "sha": "9c76fd045bf6bea8bb0ddeb7f94b08cb45772970",
+      "date": "2026-10-20"
+    },
     "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_parse_connect_response.rs": {
       "sha": "47fbc11c4f1e5cd4a83ae5d3f0adf222afc55d45",
       "date": "2026-09-27"
@@ -361,9 +381,73 @@
       "sha": "4fe7778cc81abf246495fb0aa741089f99d66238",
       "date": "2026-09-27"
     },
+    "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_receive_buffer.rs": {
+      "sha": "2222a7dafab15a824e979031f0e3105fdf4f6b74",
+      "date": "2026-10-20"
+    },
+    "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_server_bound.rs": {
+      "sha": "348016c69ea63832c1a17d8d7e8964974e4892a3",
+      "date": "2026-10-20"
+    },
+    "shakenfist-spice-protocol/src/client.rs": {
+      "sha": "4b3bd11c6946c6f9f27f4c5ff7aaf5008331b202",
+      "date": "2026-10-20"
+    },
+    "shakenfist-spice-protocol/src/constants.rs": {
+      "sha": "ac1065d8134ed45449c875ec6c565c83b4a2735a",
+      "date": "2026-10-20"
+    },
     "shakenfist-spice-protocol/src/host_subject.rs": {
       "sha": "af96836e04851d493d60e8aabe229ca3163dbd7d",
       "date": "2026-07-18"
+    },
+    "shakenfist-spice-protocol/src/lib.rs": {
+      "sha": "2ddf9749c75f25bd8cf0d5a9e4a833c57835a6c3",
+      "date": "2026-10-20"
+    },
+    "shakenfist-spice-protocol/src/link.rs": {
+      "sha": "71f01b3e97b13859facde155b1d7fee7f6c579f2",
+      "date": "2026-10-20"
+    },
+    "shakenfist-spice-protocol/src/logging.rs": {
+      "sha": "8a17865618c7565047b907cc9cfe530a9014c0f7",
+      "date": "2026-10-20"
+    },
+    "shakenfist-spice-protocol/src/messages/agent_stream.rs": {
+      "sha": "df3ccacd5fd3c6361b874811c85215b577f76164",
+      "date": "2026-10-20"
+    },
+    "shakenfist-spice-protocol/src/messages/common.rs": {
+      "sha": "33bf4fb1b93f2fbc2d7f557e786161453a3013c7",
+      "date": "2026-10-20"
+    },
+    "shakenfist-spice-protocol/src/messages/cursor.rs": {
+      "sha": "45d1f18f24848a9d0bfad02de1db24b3fced8d5c",
+      "date": "2026-10-20"
+    },
+    "shakenfist-spice-protocol/src/messages/display.rs": {
+      "sha": "23b2229e820e7a50b8aaa2e6aa9e52fa3764dc39",
+      "date": "2026-10-20"
+    },
+    "shakenfist-spice-protocol/src/messages/inputs.rs": {
+      "sha": "746c744b03500278b1af4425e2fbfb9c1dd3ffaa",
+      "date": "2026-10-20"
+    },
+    "shakenfist-spice-protocol/src/messages/main.rs": {
+      "sha": "e386521e432f93f8d651c2aaabdb8b5cf28eb815",
+      "date": "2026-10-20"
+    },
+    "shakenfist-spice-protocol/src/messages/mod.rs": {
+      "sha": "21434becb900bd6cc3e51f4a8dc84d58bba9273e",
+      "date": "2026-10-20"
+    },
+    "shakenfist-spice-protocol/src/messages/playback.rs": {
+      "sha": "aec46b5472ebad27a24184cc6ab89bc0756ae07f",
+      "date": "2026-10-20"
+    },
+    "shakenfist-spice-protocol/src/messages/vd_agent.rs": {
+      "sha": "36a840462e2a0775ecb7a6a2accbb8aa10763a62",
+      "date": "2026-10-20"
     },
     "shakenfist-spice-protocol/src/parse.rs": {
       "sha": "d203d9a6b371d431247c0037edd3851936369a61",
@@ -372,6 +456,10 @@
     "shakenfist-spice-protocol/src/proxy.rs": {
       "sha": "63b200ecab9a52acf13c4a04af959f6264845292",
       "date": "2026-09-29"
+    },
+    "shakenfist-spice-protocol/src/reader.rs": {
+      "sha": "7a54174573c7ff672b5099de4de0e7e60ce00aaf",
+      "date": "2026-10-20"
     },
     "shakenfist-spice-renderer/README.md": {
       "sha": "f26f1d8b76c389c4b6711d7ae1b482fa234326f6",
