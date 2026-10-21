@@ -1054,6 +1054,91 @@ packages to `Cargo.lock` and removed none:
 - `make test`: 1507 passed, 0 failed (the new crate has no tests
   yet).
 
+### Manual test: FreeRDP against the desktop guest
+
+2026-10-21, 10:45 to 11:25 AEDT, on the Kasm host (16 cores, 28
+GiB). Guest: `debian-xfce:13` under `tools/start-desktop-qemu.sh`
+(q35, 2 vCPUs, 2 GiB, QXL, vdagent) on SPICE port 5910, in client
+mouse mode. Server: `ryll --rdp --rdp-host 0.0.0.0 --direct
+127.0.0.1:5910`, bound to an ephemeral port because the host's
+xrdp holds 3389. Client: `xfreerdp3` (FreeRDP 3.15.0, Debian 13
+`freerdp3-x11`) on the same host, `/cert:tofu`, default options,
+window 1024x768, which is the guest's resolution.
+
+- **Security negotiated:** the client requested `SSL | HYBRID`
+  and the server selected `SSL` (TLS with the username and
+  password in the Client Info PDU; the validator accepted
+  `ryll` with an empty domain). FreeRDP printed its
+  trust-on-first-use certificate warning with the fingerprint
+  ryll printed at launch, and connected.
+- **Codec negotiated:** RemoteFX (the client offered RLGR1 and
+  RLGR3 with `SET_SURFACE_BITS`), so IronRDP's RemoteFX encoder
+  carried every bitmap. Colours were right: no channel swap on
+  this path. The uncompressed path (survey item 7 and the step 6
+  side finding) was not exercised by this client.
+- **Input, client mouse mode:** keyboard (a terminal command typed
+  and run), left click (opening a terminal from the panel), right
+  click (the terminal's context menu), wheel (three lines per
+  notch in the terminal, as the GUI does), and middle click (sent
+  by FreeRDP through its Advanced Input channel, which IronRDP
+  0.13 maps fully) all drove XFCE. The first run found the wheel
+  defect fixed in `1d797c2`: FreeRDP's Advanced Input channel
+  sends wheel units in the high 16 bits, and ten notches had
+  become about 44,000 SPICE clicks.
+- **Workloads**, measured with `tools/rdp-measure.sh` over 30 s
+  (idle over 20 s) on the ryll process, release build with the
+  `rdp` feature. CPU is of the ryll process, 100 percent being
+  one core; it includes SPICE decoding and RemoteFX encoding.
+
+  | Workload | Avg CPU | Peak CPU | Bytes sent | Avg rate |
+  |---|---|---|---|---|
+  | Idle, article page shown, no input | 0.3% | 1.0% | 1.6 kB | 0.6 kbit/s |
+  | Typing in a terminal (11 lines in 30 s) | 8.5% | 12.8% | 1.1 MB | 294 kbit/s |
+  | Scrolling a Wikipedia article (48 notches in 30 s) | 84.6% | 131.1% | 4.3 MB | 1.12 Mbit/s |
+  | Video (Big Buck Bunny 480p VP9, local file, Firefox, 853x480 region) | 248.2% | 298.8% | 417 MB | 109 Mbit/s |
+
+  The same workloads on a debug build, for scale: typing 42.7%
+  and 157 kbit/s, scrolling 64.5% (peak 210.7%) and 256 kbit/s.
+  IronRDP logged "Encoding bitmap took N ms" warnings (12 to 22
+  ms) 53 times during the video. The video rate is the cost of
+  RemoteFX on a region that changes entirely about 28 times a
+  second; H.264 through EGFX (master plan, open question 7) is
+  the answer if video matters.
+- **mstsc: not tested.** Mikal has no Windows machine, so the
+  mstsc cells of this phase are empty and open question 2's
+  answer rests on FreeRDP. Two further FreeRDP runs stand in
+  for the security questions mstsc would have answered:
+  `--rdp-security nla` with `xfreerdp3 /sec:nla` negotiated
+  `HYBRID`, completed CredSSP against the configured pair and
+  showed the desktop; and in TLS mode a wrong password was
+  logged as "presented wrong credentials" and the client was
+  disconnected.
+- **Server mouse mode:** the guest was restarted with
+  `-machine q35,vmport=off`, `-vga virtio` and `agent-mouse=off`
+  (phase 1's recipe; the launcher script has no flag for it), so
+  SPICE offered server mode only. The guest came up at 1280x800
+  and FreeRDP's window followed, which exercised the Resize path
+  on a real client. A scripted sweep of the pointer to the
+  top-left corner (28 relative motion messages) followed by a
+  click opened the Applications menu, so relative motion and
+  buttons work in server mode. FreeRDP's `/mouse:relative:on`,
+  with and without `grab:on`, kept sending absolute moves under
+  the scripted X pointer; the server never saw the relative-mouse
+  PDU (the handler now logs once when it does, `b8f78bd`), so
+  that half of open question 3 is unobserved rather than
+  answered. A physical mouse under a pointer grab may behave
+  differently.
+- **Other observations.** Seven of about 980 key events typed
+  while Firefox was starting in the guest did not appear (one
+  letter in a URL, letters in a `clear`); the inputs channel
+  sent every key it was given and the handler counted no drops,
+  so the loss is between QEMU's PS/2 queue and the busy guest,
+  as it would be for any client, and was not pursued. A 480p
+  video streamed from Wikimedia through the guest's user-mode
+  network stalled for a minute at a time, which looked like a
+  display stall until the SPICE blit rate showed the guest had
+  stopped painting; the recorded run used a local copy.
+
 ## Execution notes
 
 - **Back brief, 2026-10-21 08:54 AEDT.** Mikal answered the five
@@ -1100,6 +1185,77 @@ packages to `Cargo.lock` and removed none:
   fresh notch, a zero relative move in server mode sends nothing,
   a different session in the slot resets the pointer state, and a
   missing primary surface counts as a dropped event. All kept.
+- **Step 5 found and fixed a gap in step 3's adapter.** IronRDP asks
+  the display for its size at `server.rs:813`, before the handshake,
+  and again at `:1482` for the encoder. In TLS mode the slot is
+  empty at the first ask, so the client learnt the fallback size and
+  the encoder the surface's, and the stream (built from the second
+  value) never sent the Resize that reconciles them. The display now
+  records the size the client was told, the connection handler
+  forgets it on each accept, and a TLS client's first update is a
+  Resize to the surface. The loopback test asserts this sequence.
+  Also from step 5: IronRDP reads `Quit` inside an established
+  session too, but only to disconnect that client (`server.rs:1102`),
+  so `shutdown` sets a flag the connection handler turns into
+  `PostConnectionAction::Stop`; a client stalled in the handshake
+  still delays the stop, which is why `join` is bounded. The TLS
+  acceptor is built from the process-wide rustls provider rather than
+  IronRDP's `make_acceptor`, because both ring and aws-lc-rs are
+  compiled into the workspace and rustls' default builder would
+  panic; ryll installs ring at start-up.
+- **Step 6 used TLS, not no-security** (brief 6's fallback): IronRDP
+  0.13's client refuses standard RDP security outright
+  (`ironrdp-connector/src/connection.rs:314`) and rejects a server
+  that answers an SSL request with no protocol
+  (`ironrdp-acceptor/src/connection.rs:422`). No `test-support`
+  feature or `RdpSecurity::None` was added. New dev-dependencies:
+  `ironrdp-connector` 0.10, `ironrdp-session` 0.11, `ironrdp-tokio`
+  0.10, `ironrdp-tls` 0.2 (`rustls`); `ironrdp-session`,
+  `ironrdp-tls` and `ironrdp-bulk` are new to the lockfile and reach
+  only test builds. The seed mutation in the definition of done was
+  run on the step's disposable worktree: with the whole-surface seed
+  removed, the loopback test fails with "timed out after 10s waiting
+  for the whole surface".
+- **Step 6 side finding, for the manual test:** when a client
+  supports surface commands but negotiates no codec, IronRDP's
+  uncompressed path (`encoder/mod.rs:489-499`) sends our bytes raw
+  and labelled only as 32 bpp, which RDP reads as BGRX, so such a
+  client would show red and blue swapped. RemoteFX and planar honour
+  `PixelFormat::RgbA32`. The manual test records which path each
+  client takes before deciding whether the adapter should swizzle.
+- **Step 7:** `make build` builds `-p ryll` without features, so the
+  smoke run used a debug build with `--features rdp` made with the
+  Makefile's docker line. Against `--direct 127.0.0.1:1` the process
+  exits as soon as the SPICE connect is refused (the run ends when
+  the session ends, as `--web` does), so the listener and SIGTERM
+  were shown against a silent TCP listener instead. On Ctrl+C with
+  the SPICE handshake stalled, the connection task does not stop
+  within the 2 s ceiling and a warning is logged; the renderer does
+  not check for cancellation during a stalled link handshake, which
+  predates this phase and `--web` shares. `PlaybackSink::on_opus_packet`
+  has no default, so `DiscardPlayback` implements it as a no-op.
+  `--rdp-host` parses as an `IpAddr`. The workspace tests on the
+  combined tree after steps 6 and 7: 1573 passed, 0 failed.
+- **The manual test was run by the management session**, with
+  the desktop guest on SPICE port 5910 and FreeRDP driven by a
+  python-xlib script over the client's X window (XTest clicks and
+  keys, pointer warps for motion), with screenshots of the client
+  window as the evidence. Its first run found the Advanced Input
+  wheel defect, fixed in `1d797c2` with a per-event cap added
+  as defence; the fix was re-verified against the guest before
+  the measurements. The numbers in *Results* come from a release
+  build with the `rdp` feature, made with the Makefile's docker
+  line (`make release` does not enable the feature); a debug
+  build's numbers are given beside them for scale.
+- **The back brief's mstsc answer did not hold:** no Windows
+  machine was available when the test came round, so mstsc is
+  not tested and NLA and wrong-password checks were done with
+  FreeRDP instead.
+- **The guest image was downloaded again** (`make
+  testdata/debian-xfce-13.qcow2`, 747 MiB) because phase 1's
+  worktree had taken its copy with it; the QMP socket had to
+  live directly under `/tmp/claude-1000/` because the
+  scratchpad path exceeds a Unix socket's 108-byte limit.
 
 ## Future work
 
