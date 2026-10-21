@@ -577,6 +577,39 @@ which makes it the browser to reach for when deciding whether a
 problem is ryll's — and the control to run the probe against when
 deciding whether the probe itself is telling the truth.
 
+### Verifying `--rdp`
+
+`--rdp` needs a binary built with the `rdp` feature. The Makefile's
+`lint` and `test` targets build it, but `make build` and `make release`
+do not, so run `make -n build` to see the docker line and add
+`--features rdp` to its cargo command; that leaves the binary at
+`target/debug/ryll` (or `target/release/ryll` from the `release`
+target's line). Then start the desktop guest and point ryll at it:
+
+```bash
+make test-qemu-desktop
+target/debug/ryll --rdp --direct localhost:5900
+```
+
+ryll prints the address, port, username, password and certificate
+fingerprint. If another RDP server already holds 3389 it falls back to an
+ephemeral port and prints that one. Connect with FreeRDP (3.15.0 from
+Debian 13's `freerdp3-x11` works):
+
+```bash
+xfreerdp3 /v:127.0.0.1:PORT /u:ryll /p:PASSWORD /cert:tofu
+```
+
+Use `/sec:nla` against a server started with `--rdp-security nla`. Check
+that typing, left, right and middle buttons, and the wheel all reach the
+guest. To measure what the extra hop costs, run `tools/rdp-measure.sh
+--pid PID --port PORT --seconds 30` against the ryll process while the
+guest is idle and during each of the three workloads: typing in a
+terminal, scrolling a long page and playing a video. It reports CPU and
+bytes sent. Video is expensive
+because the client receives RemoteFX bitmaps of a region that changes
+about 28 times a second.
+
 ### Inspecting a `--capture` pcap
 
 `tools/pcap-inspect.py` is a pure-Python helper (no tshark

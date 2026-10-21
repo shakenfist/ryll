@@ -431,6 +431,16 @@ cursor, resize, text clipboard and audio playback. Specifically:
      next release when it ships. Phase 2 confirms 0.13.0 is
      enough for the MVP; if it is not, it says which `main`
      feature forced the switch.
+   - **Answer (phase 2):** 0.13.0 from crates.io, with its
+     default features off (the `qoi` and `qoiz` codecs no stock
+     client negotiates) and `rayon` and `helper` on, was enough
+     for the display and input MVP, and the workspace
+     `rust-version` is 1.89. The
+     one gap met is the middle button, which IronRDP 0.13.0
+     drops on the standard mouse PDU; it is tracked in #604.
+     FreeRDP sends the middle button through its Advanced
+     Input channel, which 0.13.0 maps, so middle click worked
+     in the manual test. No `main` feature forced a switch.
 2. **Security default.**
    - Both TLS and NLA work, against one credential pair.
    - Ryll's `--web` already mints a per-launch token and
@@ -449,6 +459,16 @@ cursor, resize, text clipboard and audio playback. Specifically:
      startup (`rcgen`, today a test-only dependency of the
      binary) and prints its fingerprint. Phase 2 tests what
      mstsc does with it.
+   - **Answer (phase 2):** the default is TLS-only, because
+     IronRDP 0.13.0 cannot offer both and TLS is the mode every
+     client speaks. FreeRDP 3.15.0 requested SSL and HYBRID and
+     the server selected SSL; FreeRDP showed its trust-on-first-use
+     warning with the fingerprint ryll printed. `--rdp-security
+     nla` was tested with FreeRDP (`/sec:nla`): it negotiated
+     HYBRID, completed CredSSP and showed the desktop. A wrong
+     password was refused and logged. mstsc was not tested, as no
+     Windows machine was available, so its behaviour with the
+     self-signed certificate is still unknown.
 3. **Server mouse mode.**
    - RDP pointers are absolute. SPICE absolute input needs
      client mouse mode, which the server grants only with
@@ -462,6 +482,16 @@ cursor, resize, text clipboard and audio playback. Specifically:
      phase 1, and say so in the docs. IronRDP 0.13.0
      advertises relative-mouse input, so phase 2 tries it with
      a client that sends it (FreeRDP 3 has an option for it).
+   - **Answer (phase 2):** server mouse mode works through the
+     translator's deltas. With the guest in server mode, a
+     scripted pointer sweep to the corner followed by a click
+     opened the Applications menu. The guest-side acceleration
+     drift that phase 1 noted still applies. FreeRDP's
+     `/mouse:relative:on` (with and without `grab:on`) kept
+     sending absolute moves under a scripted pointer, so the
+     relative-mouse PDU was never observed and that half is
+     unanswered; the server logs once when a client does send
+     it, so a physical mouse under a grab can settle it.
 4. **One client at a time, or takeover?** `RdpServer::run`
    serves one connection at a time, and one SPICE session can
    only sensibly have one driver. **Recommendation:** a new
@@ -486,6 +516,22 @@ cursor, resize, text clipboard and audio playback. Specifically:
    session, a scrolling page and a video), and promote EGFX
    H.264 from Future work to a phase only if the numbers say
    users need it.
+   - **Answer (phase 2):** FreeRDP 3.15.0 negotiated RemoteFX.
+     Measured with `tools/rdp-measure.sh` on a release build
+     with the `rdp` feature, on 2026-10-21, ryll process CPU
+     (100% is one core) and bytes sent over 30 s:
+
+     | Workload | Avg CPU | Peak CPU | Avg rate |
+     |---|---|---|---|
+     | Idle (20 s) | 0.3% | 1.0% | 0.6 kbit/s |
+     | Typing in a terminal | 8.5% | 12.8% | 294 kbit/s |
+     | Scrolling a Wikipedia article | 84.6% | 131.1% | 1.12 Mbit/s |
+     | Video (480p VP9, 853x480 region) | 248.2% | 298.8% | 109 Mbit/s |
+
+     Typing and idle are cheap, and scrolling costs most of a
+     core. Video is the cost of RemoteFX on a region that
+     changes entirely about 28 times a second. H.264 through
+     EGFX remains the answer if video matters.
 8. **Packaging.** Should the `rdp` feature be on in release
    builds (deb, rpm, Homebrew, the PyPI wheel)?
    **Recommendation:** off by default until the CI lane in
