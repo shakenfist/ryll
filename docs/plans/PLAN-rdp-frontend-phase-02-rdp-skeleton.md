@@ -968,47 +968,47 @@ stated. Each step is one commit, with the subject given.
 
 ## Definition of done
 
-- [ ] `shakenfist-spice-rdp` is a workspace member; `cargo tree
+- [x] `shakenfist-spice-rdp` is a workspace member; `cargo tree
       -p shakenfist-spice-rdp -e normal,build` (recorded in
       *Results*) lists `ironrdp-server v0.13.x` and none of
       `qoicoubeh`, `openh264`, `openh264-sys2`, `cpal`, `nusb`,
       `dav-server`; every `-sys` crate in it is named in
       *Results*.
-- [ ] The workspace `rust-version` is `1.89`; `grep -n
+- [x] The workspace `rust-version` is `1.89`; `grep -n
       'rust-version' Cargo.toml` shows it.
-- [ ] `grep -n 'KeyModifiers' shakenfist-spice-renderer/src/channels/mod.rs`
+- [x] `grep -n 'KeyModifiers' shakenfist-spice-renderer/src/channels/mod.rs`
       finds the variant and `grep -n 'KeyModifiers'
       shakenfist-spice-renderer/src/channels/inputs.rs` finds
       its dispatch.
-- [ ] `make build`, `make test` (with `ryll/rdp`), `make lint`,
+- [x] `make build`, `make test` (with `ryll/rdp`), `make lint`,
       `make check-windows` and `make package-check` pass, and
       `pre-commit run --all-files` passes.
-- [ ] The loopback test in `shakenfist-spice-rdp/tests/` passes
+- [x] The loopback test in `shakenfist-spice-rdp/tests/` passes
       under `make test`, and fails when the display adapter's
       full-surface seed is removed (checked by mutation in the
       management session, not committed).
-- [ ] `ryll --rdp --direct 127.0.0.1:1` built with `--features
+- [x] `ryll --rdp --direct 127.0.0.1:1` built with `--features
       rdp` prints the address, user, password, security and
       certificate fingerprint, and exits cleanly on SIGTERM
       (step 7's report shows the output).
-- [ ] FreeRDP connects to `ryll --rdp` against the desktop
+- [x] FreeRDP connects to `ryll --rdp` against the desktop
       guest, authenticates, shows the desktop, and keyboard,
       mouse buttons and the wheel drive XFCE in client mouse
       mode; server mouse mode moves the pointer; the negotiated
       security and codec and the three workloads' numbers are in
       *Results*, with the client versions and the date.
-- [ ] Open questions 1, 2, 3 and 7 in `PLAN-rdp-frontend.md`
+- [x] Open questions 1, 2, 3 and 7 in `PLAN-rdp-frontend.md`
       each have an **Answer (phase 2)** paragraph.
-- [ ] Every `--rdp*` flag in `ryll/src/config.rs` appears in
+- [x] Every `--rdp*` flag in `ryll/src/config.rs` appears in
       `docs/configuration.md` (`grep -o -- '--rdp[a-z-]*'
       ryll/src/config.rs | sort -u` against the same grep on the
       doc); `docs/development.md` lists the `rdp` feature;
       `AGENTS.md` says five features;
       `docs/multi-mode-parity.md`'s mode table has an RDP row.
-- [ ] `git grep -n -i 'phase 2\|decision [0-9]\|survey item'
+- [x] `git grep -n -i 'phase 2\|decision [0-9]\|survey item'
       -- shakenfist-spice-rdp ryll/src shakenfist-spice-renderer/src docs ':!docs/plans'`
       finds nothing.
-- [ ] Two ryll issues exist: #601 (filed by the survey) and the
+- [x] Two ryll issues exist: #601 (filed by the survey) and the
       middle-button issue step 4 files, both linked from *Future
       work*.
 
@@ -1256,12 +1256,39 @@ window 1024x768, which is the guest's resolution.
   worktree had taken its copy with it; the QMP socket had to
   live directly under `/tmp/claude-1000/` because the
   scratchpad path exceeds a Unix socket's 108-byte limit.
+- **Definition of done, checked 2026-10-21 12:40 AEDT** on the
+  final tree (`b2db689`): `make build`, `make lint`, `make
+  check-windows` and `make package-check` all exit 0 (the
+  Windows check prints two pre-existing unused-import warnings
+  in `session.rs`, a file this phase does not touch); `make
+  test` with `ryll/rdp`: 1574 passed, 0 failed, the loopback
+  test among them; `pre-commit run --all-files` passes;
+  `rust-version = "1.89"`; `KeyModifiers` is in `channels/mod.rs`
+  and dispatched in `channels/inputs.rs`; the eight `--rdp*`
+  flags in `config.rs` are the eight in `docs/configuration.md`;
+  `docs/development.md` lists `rdp`, `AGENTS.md` says five
+  features, the parity table has an RDP row; the citation grep
+  over code and docs finds nothing; #601 and #604 are open and
+  linked from *Future work*; the seed mutation and the FreeRDP
+  items are recorded above. `origin/develop` had moved on by
+  five commits (#587, #599); the merge preview shows no
+  conflicting hunks, so the branch was not rebased.
 
 ## Future work
 
 - **Middle button and horizontal wheel** need IronRDP's next
-  release (survey item 4); re-check `From<MousePdu>` in
-  `handler.rs` when it ships and bump.
+  release (survey item 4, tracked as #604); re-check
+  `From<MousePdu>` in `handler.rs` when it ships and bump.
+- **Swizzle for the uncompressed path.** A client that supports
+  surface commands but negotiates no codec gets our RGBA bytes
+  labelled as 32 bpp, which RDP reads as BGRX (step 6's side
+  finding). No tested client took that path; if one does, the
+  display adapter should send BGRA with `PixelFormat::BgrA32`,
+  which RemoteFX and planar also honour.
+- **Relative mouse from a real client** remains unobserved:
+  FreeRDP's option produced no relative-mouse PDU under a
+  scripted pointer. Try a physical mouse under a pointer grab,
+  and look for the server's one-shot log line.
 - **Takeover and our own accept loop** (phase 5): wrap the
   accepted stream in a byte counter at the same time, so the
   control socket's `stats` can report RDP bytes the way it
