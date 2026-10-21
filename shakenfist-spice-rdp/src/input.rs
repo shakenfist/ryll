@@ -9,7 +9,7 @@ use ironrdp_server::{KeyboardEvent, MouseEvent, RdpServerInputHandler};
 use shakenfist_spice_protocol::{keyboard_modifiers, mouse_buttons, warn_once, MOUSE_MODE_SERVER};
 use shakenfist_spice_renderer::{make_scancode, InputEvent, PointerTranslator};
 use tokio::sync::mpsc::error::TrySendError;
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::{SessionHandles, SessionSlot};
 
@@ -59,6 +59,9 @@ pub struct SpiceInputHandler {
     /// Wheel rotation units received but not yet sent as a whole
     /// notch.
     wheel_remainder: i32,
+    /// Whether the client has sent relative mouse input, logged once
+    /// so an operator can tell which pointer path a client uses.
+    relative_seen: bool,
     /// The session the pointer state belongs to, so a different
     /// session starts from a clean pointer rather than inheriting a
     /// position from the last one.
@@ -74,6 +77,7 @@ impl SpiceInputHandler {
             slot,
             pointer: PointerTranslator::new(),
             wheel_remainder: 0,
+            relative_seen: false,
             session: Weak::new(),
             dropped: Arc::new(AtomicU64::new(0)),
         }
@@ -184,6 +188,10 @@ impl SpiceInputHandler {
 
     /// A relative pointer move by `(dx, dy)`.
     fn rel_move(&mut self, session: &SessionHandles, mode: u32, dx: i32, dy: i32) {
+        if !self.relative_seen {
+            self.relative_seen = true;
+            info!("RDP input: the client is sending relative mouse input");
+        }
         if mode == MOUSE_MODE_SERVER {
             // Server mode consumes deltas, so the client's delta is
             // already the message. It bypasses the translator, whose
