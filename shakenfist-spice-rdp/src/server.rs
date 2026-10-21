@@ -550,10 +550,14 @@ mod tests {
         let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
     }
 
+    /// The configured pair. The password is minted once per test run
+    /// rather than written into the source.
     fn credentials() -> Credentials {
+        static PASSWORD: std::sync::LazyLock<String> =
+            std::sync::LazyLock::new(crate::generate_password);
         Credentials {
             username: "ryll".to_string(),
-            password: "secret".to_string(),
+            password: PASSWORD.clone(),
             domain: None,
         }
     }
@@ -656,7 +660,7 @@ mod tests {
         config.provider = Arc::new(SingleSession::new(
             Credentials {
                 username: "someone-else".to_string(),
-                password: "secret".to_string(),
+                password: credentials().password,
                 domain: None,
             },
             handles(),

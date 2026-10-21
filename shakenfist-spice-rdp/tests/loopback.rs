@@ -74,7 +74,10 @@ const STEP_TIMEOUT: Duration = Duration::from_secs(10);
 const KEY_A: u8 = 0x1E;
 
 const USERNAME: &str = "ryll";
-const PASSWORD: &str = "loopback-password";
+/// The session password, minted once per run rather than written into
+/// the source; the server and the client read the same value.
+static PASSWORD: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(shakenfist_spice_rdp::generate_password);
 
 /// Await `future`, failing the test if it takes longer than
 /// [`STEP_TIMEOUT`].
@@ -144,7 +147,7 @@ fn session() -> (Arc<SessionHandles>, mpsc::Receiver<InputEvent>) {
 fn server_credentials() -> Credentials {
     Credentials {
         username: USERNAME.to_string(),
-        password: PASSWORD.to_string(),
+        password: PASSWORD.clone(),
         domain: None,
     }
 }
@@ -176,7 +179,7 @@ fn client_config() -> ironrdp_connector::Config {
         enable_credssp: false,
         credentials: ironrdp_connector::Credentials::UsernamePassword {
             username: USERNAME.to_string(),
-            password: PASSWORD.to_string(),
+            password: PASSWORD.clone(),
         },
         domain: Some("WORKGROUP".to_string()),
         client_build: 0,

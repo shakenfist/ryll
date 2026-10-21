@@ -133,8 +133,38 @@ impl CredentialValidator for ProviderValidator {
 mod tests {
     use super::*;
 
+    use std::sync::LazyLock;
+
     use shakenfist_spice_renderer::SurfaceMirror;
     use tokio::sync::{mpsc, watch};
+
+    /// The password the tests' session expects: minted once per test
+    /// run rather than written into the source, so no literal
+    /// password sits in the tree.
+    static PASSWORD: LazyLock<String> = LazyLock::new(generate_password);
+
+    /// A password of the same length as [`PASSWORD`] that differs in
+    /// its first character.
+    fn wrong_password() -> String {
+        let mut other = PASSWORD.clone();
+        let first = if other.starts_with('x') { "y" } else { "x" };
+        other.replace_range(0..1, first);
+        other
+    }
+
+    /// [`PASSWORD`] with every letter's case flipped.
+    fn case_flipped_password() -> String {
+        PASSWORD
+            .chars()
+            .map(|c| {
+                if c.is_ascii_lowercase() {
+                    c.to_ascii_uppercase()
+                } else {
+                    c.to_ascii_lowercase()
+                }
+            })
+            .collect()
+    }
 
     fn handles() -> Arc<SessionHandles> {
         let (input_tx, _) = mpsc::channel(1);
@@ -159,7 +189,7 @@ mod tests {
     }
 
     fn validator(slot: &SessionSlot) -> ProviderValidator {
-        let provider = SingleSession::new(creds("ryll", "secret", None), handles());
+        let provider = SingleSession::new(creds("ryll", &PASSWORD, None), handles());
         ProviderValidator::new(Arc::new(provider), slot.clone())
     }
 
@@ -168,7 +198,7 @@ mod tests {
         for domain in [None, Some(""), Some("WORKGROUP"), Some("client-pc")] {
             let slot = SessionSlot::new();
             let decision = validator(&slot)
-                .validate(&creds("ryll", "secret", domain))
+                .validate(&creds("ryll", &PASSWORD, domain))
                 .await
                 .expect("validator never errors");
             assert_eq!(decision, CredentialDecision::Accept, "domain {domain:?}");
@@ -180,7 +210,7 @@ mod tests {
     async fn validator_rejects_wrong_password_and_leaves_slot_empty() {
         let slot = SessionSlot::new();
         let decision = validator(&slot)
-            .validate(&creds("ryll", "wrong!", None))
+            .validate(&creds("ryll", &wrong_password(), None))
             .await
             .expect("validator never errors");
         assert_eq!(decision, CredentialDecision::Reject);
@@ -191,7 +221,7 @@ mod tests {
     async fn validator_rejects_wrong_username() {
         let slot = SessionSlot::new();
         let decision = validator(&slot)
-            .validate(&creds("other", "secret", None))
+            .validate(&creds("other", &PASSWORD, None))
             .await
             .expect("validator never errors");
         assert_eq!(decision, CredentialDecision::Reject);
@@ -209,7 +239,7 @@ mod tests {
         let slot = SessionSlot::new();
         let validator = ProviderValidator::new(Arc::new(Refuser), slot.clone());
         let decision = validator
-            .validate(&creds("ryll", "secret", None))
+            .validate(&creds("ryll", &PASSWORD, None))
             .await
             .expect("validator never errors");
         assert_eq!(decision, CredentialDecision::Reject);
@@ -218,13 +248,17 @@ mod tests {
 
     #[test]
     fn single_session_ignores_domain_but_not_case() {
-        let provider = SingleSession::new(creds("ryll", "secret", Some("EXPECTED")), handles());
+        let provider = SingleSession::new(creds("ryll", &PASSWORD, Some("EXPECTED")), handles());
         assert!(provider
-            .session(&creds("ryll", "secret", Some("OTHER")))
+            .session(&creds("ryll", &PASSWORD, Some("OTHER")))
             .is_ok());
-        assert!(provider.session(&creds("ryll", "Secret", None)).is_err());
-        assert!(provider.session(&creds("Ryll", "secret", None)).is_err());
-        assert!(provider.session(&creds("ryll", "secret2", None)).is_err());
+        assert!(provider
+            .session(&creds("ryll", &case_flipped_password(), None))
+            .is_err());
+        assert!(provider.session(&creds("Ryll", &PASSWORD, None)).is_err());
+        assert!(provider
+            .session(&creds("ryll", &format!("{}2", *PASSWORD), None))
+            .is_err());
     }
 
     #[test]
@@ -232,8 +266,9 @@ mod tests {
         let first = generate_password();
         let second = generate_password();
         assert_eq!(first.len(), GENERATED_PASSWORD_LEN);
-        assert!(first.chars().all(|c| c.is_ascii_alphanumeric()), "{first}");
-        assert_ne!(first, second);
+        // Plain asserts, so a failure never prints a password.
+        assert!(first.chars().all(|c| c.is_ascii_alphanumeric()));
+        assert!(first != second);
     }
 
     #[test]
