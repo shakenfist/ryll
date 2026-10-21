@@ -22,6 +22,14 @@ use crate::{SessionHandles, SessionSlot};
 /// wheel click per whole notch.
 const WHEEL_UNITS_PER_NOTCH: i32 = 120;
 
+/// The most wheel clicks one RDP event may become. A physical wheel
+/// event is a notch or two; the standard mouse PDU cannot carry more
+/// than two. A larger count means a client encodes its units
+/// differently from what the handler expects, and passing it through
+/// would flood the SPICE inputs channel with thousands of clicks, so
+/// the excess is dropped and logged once.
+const MAX_WHEEL_CLICKS_PER_EVENT: i32 = 8;
+
 /// The lock keys RDP's synchronize event and SPICE's
 /// `KEY_MODIFIERS` share. Both put Scroll, Num and Caps Lock in the
 /// low three bits in that order; RDP's fourth bit, Kana Lock, has no
@@ -151,9 +159,23 @@ impl SpiceInputHandler {
             self.wheel_remainder = 0;
         }
         self.wheel_remainder = self.wheel_remainder.saturating_add(units);
-        let clicks = self.wheel_remainder / WHEEL_UNITS_PER_NOTCH;
+        let mut clicks = self.wheel_remainder / WHEEL_UNITS_PER_NOTCH;
+        debug!(
+            "RDP input: wheel {} units, {} carried, {} clicks",
+            units, self.wheel_remainder, clicks
+        );
         if clicks == 0 {
             return;
+        }
+        if clicks.abs() > MAX_WHEEL_CLICKS_PER_EVENT {
+            warn_once!(
+                "rdp-input:wheel-flood",
+                "RDP input: one wheel event asked for {} clicks; sending {} and dropping the rest",
+                clicks,
+                MAX_WHEEL_CLICKS_PER_EVENT
+            );
+            clicks = clicks.signum() * MAX_WHEEL_CLICKS_PER_EVENT;
+            self.wheel_remainder = 0;
         }
         self.wheel_remainder -= clicks * WHEEL_UNITS_PER_NOTCH;
         let events = self.pointer.wheel(clicks);
@@ -285,14 +307,20 @@ impl RdpServerInputHandler for SpiceInputHandler {
             }
             MouseEvent::VerticalScroll { value } => self.wheel(&session, i32::from(value)),
             MouseEvent::Scroll { x, y } => {
-                if x != 0 {
+                // From FreeRDP's Advanced Input channel, which carries
+                // the wheel value the way WM_MOUSEWHEEL does, in the
+                // high 16 bits: FreeRDP multiplies the rotation units
+                // by 0x10000 before sending (client/common/client.c,
+                // freerdp_client_send_wheel_event). One notch is 120
+                // in the high word, so shift it down before counting.
+                if x >> 16 != 0 {
                     warn_once!(
                         "rdp-input:horizontal-wheel",
                         "RDP input: the client sent horizontal wheel movement, which SPICE cannot carry; \
                          dropping it"
                     );
                 }
-                self.wheel(&session, y);
+                self.wheel(&session, y >> 16);
             }
             MouseEvent::RelMove { x, y } => self.rel_move(&session, mode, x, y),
         }
@@ -562,10 +590,36 @@ mod tests {
 
     #[test]
     fn scroll_uses_the_vertical_units_and_drops_the_horizontal() {
+        // Advanced Input scroll values carry the units in the high
+        // 16 bits, as FreeRDP sends them.
         let mut h = Harness::new(MOUSE_MODE_CLIENT);
-        h.handler.mouse(MouseEvent::Scroll { x: 120, y: -120 });
+        h.handler.mouse(MouseEvent::Scroll {
+            x: 120 << 16,
+            y: -120 << 16,
+        });
         assert_wheel_pairs(&h.drain(), mouse_buttons::DOWN, 1);
-        h.handler.mouse(MouseEvent::Scroll { x: 240, y: 0 });
+        h.handler.mouse(MouseEvent::Scroll { x: 240 << 16, y: 0 });
+        assert!(h.drain().is_empty());
+        h.handler.mouse(MouseEvent::Scroll { x: 0, y: 240 << 16 });
+        assert_wheel_pairs(&h.drain(), mouse_buttons::UP, 2);
+    }
+
+    #[test]
+    fn a_runaway_wheel_event_is_capped() {
+        // A value in the wrong units would otherwise become thousands
+        // of clicks; the handler sends a few and drops the rest, with
+        // nothing carried into the next event.
+        let mut h = Harness::new(MOUSE_MODE_CLIENT);
+        h.handler.mouse(MouseEvent::Scroll {
+            x: 0,
+            y: 120 << 16 << 6,
+        });
+        assert_wheel_pairs(
+            &h.drain(),
+            mouse_buttons::UP,
+            MAX_WHEEL_CLICKS_PER_EVENT as usize,
+        );
+        h.handler.mouse(MouseEvent::VerticalScroll { value: 60 });
         assert!(h.drain().is_empty());
     }
 
