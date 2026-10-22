@@ -526,10 +526,10 @@ impl ConnectionHandler for ConnectionLog {
             ),
             None => info!(%peer, ?duration, "RDP client disconnected"),
         }
-        // Released before the slot is emptied, while the session the
-        // client was using is still in it.
-        // With the slot already empty the session is gone, and its
-        // releases have nowhere to go, so they are let go uncounted.
+        // Released before the slot is emptied, while the client's
+        // session is still in it. If the slot is already empty the
+        // session is gone and the releases have nowhere to go, so
+        // they are discarded uncounted.
         let releases = self.held.end_connection();
         if let Some(session) = self.slot.current() {
             if !releases.is_empty() {
