@@ -493,6 +493,26 @@ pub mod spicevmc_client {
     pub const PONG: u16 = 3;
 }
 
+/// Port channel message types (server -> client)
+///
+/// Used by port (type 10) and webdav (type 11) channels, which carry
+/// these on top of the SpiceVMC set; usbredir (type 9) does not. Values
+/// from spice-protocol/spice/enums.h SPICE_MSG_PORT_*
+pub mod port_server {
+    /// Sent once as the channel connects: the port's name and whether
+    /// the guest side is open.
+    pub const INIT: u16 = 201;
+    /// The guest opened or closed the port.
+    pub const EVENT: u16 = 202;
+}
+
+/// Port channel message types (client -> server)
+///
+/// Values from spice-protocol/spice/enums.h SPICE_MSGC_PORT_*
+pub mod port_client {
+    pub const EVENT: u16 = 201;
+}
+
 /// Image compression types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
