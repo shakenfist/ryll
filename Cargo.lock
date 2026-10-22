@@ -7328,6 +7328,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "ironrdp-connector",
+ "ironrdp-displaycontrol",
  "ironrdp-pdu",
  "ironrdp-server",
  "ironrdp-session",

@@ -551,7 +551,33 @@ To be filled in by step 5.
 
 ## Execution notes
 
-To be filled in as the steps run.
+- **Back brief, 2026-10-23 AEDT.** Mikal confirmed decision 5
+  (honour the client's Core Data size); the management session
+  may start the desktop guest with `make test-qemu-desktop` for
+  step 5 and stop it afterwards; neither a Windows guest nor
+  mstsc is available, so those *Results* cells read "not
+  tested"; this session may push and open the pull request once
+  the definition of done passes.
+- **Steps 1-3** ran in order as planned, each an Opus sub-agent
+  at high effort, reviewed and committed by the management
+  session. Mutation scripts, run on copies under `timeout`:
+  step 1, 23 mutants, all killed; step 2, 12, all killed; step
+  3, 9, all killed (scripts under the session scratchpad's
+  `p03/step1-3/mutate.py`). The cargo helper the scripts used
+  ran cargo as the container's PID 1, which ignores `timeout`'s
+  TERM, so one step 2 run hung until stopped by hand; the helper
+  now passes `--init`.
+- **Step 3 departure:** `ironrdp-server` does not re-export
+  `DisplayControlMonitorLayout`, so `shakenfist-spice-rdp` now
+  depends on `ironrdp-displaycontrol` 0.8 directly; it was
+  already in `Cargo.lock` through `ironrdp-server`, so the lock
+  gains an edge, not a crate.
+- **Step 3 edge case, accepted:** a client whose Core Data size
+  is outside RDP's 200..=8192 range is told the size reported
+  before the handshake (in TLS mode the fallback, since the slot
+  is empty then), and that echo is taken for the size it asked
+  for, so the guest is asked for it. Rare, and the client's next
+  display-control layout supersedes it.
 
 ## Future work
 

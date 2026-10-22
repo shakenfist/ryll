@@ -15,6 +15,12 @@
 //! no other path to the client. It is read the same way: the stream
 //! looks at the session's cursor watch on each poll and sends the
 //! state as it is then.
+//!
+//! The handler also asks the guest to fit the client: for the desktop
+//! size the client connected with, and for the monitor layout the
+//! client sends whenever its window changes size. The guest's answer,
+//! if it has an agent to give one, is a new surface size, which the
+//! stream sends to the client as a resize like any other.
 
 use std::collections::VecDeque;
 use std::num::{NonZeroU16, NonZeroUsize};
@@ -23,11 +29,14 @@ use std::time::Duration;
 
 use anyhow::Result;
 use bytes::Bytes;
+use ironrdp_displaycontrol::pdu::{DisplayControlMonitorLayout, MonitorLayoutEntry};
 use ironrdp_server::{
     BitmapUpdate, DesktopSize, DisplayUpdate, PixelFormat, RdpServerDisplay,
     RdpServerDisplayUpdates,
 };
-use shakenfist_spice_renderer::{DamageRect, DisplaySurface, SurfaceMirror};
+use shakenfist_spice_renderer::channels::align_monitor_dimension;
+use shakenfist_spice_renderer::{DamageRect, DisplaySize, DisplaySurface, SurfaceMirror};
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::watch;
 use tokio::time::{Interval, MissedTickBehavior};
 use tracing::debug;
@@ -53,44 +62,73 @@ const BYTES_PER_PIXEL: usize = 4;
 /// handler.
 ///
 /// IronRDP asks the display handler for the desktop size twice per
-/// connection: once before the handshake, which is the size announced
-/// to the client in the capability exchange, and once after
-/// authentication, which is the size the server builds its encoder
-/// with. In TLS mode the session slot is empty at the first ask,
-/// because the credential check that fills it has not run yet, so the
-/// client is told the fallback size while the encoder gets the
-/// surface's. The update stream therefore starts from the size the
-/// client was told, not the size last reported, and its first update
-/// is a resize to the surface's size; the deactivation and
-/// reactivation that follows announces that size to the client and
-/// rebuilds the encoder with it.
+/// connection: once before the handshake, and once after the
+/// capability exchange, which is the size the server builds its
+/// encoder with. The client is told neither. It is told the desktop
+/// size it asked for in its Client Core Data, when that is within
+/// RDP's limits, and otherwise the size reported at the first ask; the
+/// server then passes the size it was told to `request_initial_size`,
+/// which records it here. In TLS mode the size reported at the first
+/// ask is the fallback, because the credential check that fills the
+/// session slot has not run yet. Either way the client and the encoder
+/// can start at different sizes, so the update stream starts from the
+/// size the client was told, not the size last reported, and when that
+/// is not the surface's size its first update is a resize to it; the
+/// deactivation and reactivation that follows announces that size to
+/// the client and rebuilds the encoder with it.
 ///
-/// The connection handler forgets the size when a connection is
-/// accepted, so the first ask of every connection records afresh.
-/// Clones share the same record.
+/// The first ask records its size too, which stands until the
+/// capability exchange replaces it. The server calls
+/// `request_initial_size` only for a client that can be resized, so
+/// for any other client the first ask's size is all there is.
+///
+/// The connection handler forgets the record when a connection is
+/// accepted, so the first ask of every connection records afresh, and
+/// the first size negotiated on every connection is recognised as the
+/// one the client asked for. Clones share the same record.
 #[derive(Clone, Default)]
-pub(crate) struct ClientSize(Arc<Mutex<Option<DesktopSize>>>);
+pub(crate) struct ClientSize(Arc<Mutex<ClientSizeRecord>>);
+
+#[derive(Default)]
+struct ClientSizeRecord {
+    /// The size the client was last told, if any.
+    size: Option<DesktopSize>,
+    /// Whether a capability exchange of this connection has told the
+    /// client its size.
+    negotiated: bool,
+}
 
 impl ClientSize {
     /// Forget the client's size, for a new connection.
     pub(crate) fn forget(&self) {
-        *self.lock() = None;
+        *self.lock() = ClientSizeRecord::default();
     }
 
     /// The size the client was last told, if any.
     pub(crate) fn get(&self) -> Option<DesktopSize> {
-        *self.lock()
+        self.lock().size
     }
 
     /// Record that the client has been told `size`.
     pub(crate) fn set(&self, size: DesktopSize) {
-        *self.lock() = Some(size);
+        self.lock().size = Some(size);
+    }
+
+    /// Record that a capability exchange has told the client `size`,
+    /// and return whether it is this connection's first: the size the
+    /// client asked for, rather than a reactivation's echo of a resize.
+    pub(crate) fn negotiated(&self, size: DesktopSize) -> bool {
+        let mut record = self.lock();
+        record.size = Some(size);
+        let first = !record.negotiated;
+        record.negotiated = true;
+        first
     }
 
     /// Lock the record. A panic while the lock was held cannot leave
-    /// the `Option` half-written, so a poisoned lock is recovered
-    /// rather than propagated.
-    fn lock(&self) -> MutexGuard<'_, Option<DesktopSize>> {
+    /// it half-written, so a poisoned lock is recovered rather than
+    /// propagated.
+    fn lock(&self) -> MutexGuard<'_, ClientSizeRecord> {
         self.0
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -103,7 +141,8 @@ impl ClientSize {
 /// hands the server an update stream that reads the surface mirror's
 /// damage. Before a session has been chosen, or before its first
 /// surface exists, the desktop is `fallback` in size; the update
-/// stream corrects that with a resize once a surface appears.
+/// stream corrects that with a resize once a surface appears. Sizes
+/// the client asks for are passed to the session as resize requests.
 pub struct MirrorDisplay {
     slot: SessionSlot,
     fallback: DesktopSize,
@@ -142,18 +181,81 @@ impl MirrorDisplay {
             .and_then(surface_desktop_size)
             .unwrap_or(self.fallback)
     }
+
+    /// Ask the session's guest for a `width` x `height` display,
+    /// aligned as the GUI aligns the sizes it asks for.
+    ///
+    /// Never waits, because the server calls `request_layout` on a
+    /// blocking thread with its display lock held. A request the
+    /// session cannot take now is dropped; the client's next layout
+    /// supersedes it anyway.
+    fn request_guest_size(&self, width: u32, height: u32) {
+        let Some(session) = self.slot.current() else {
+            shakenfist_spice_protocol::warn_once!(
+                "rdp-display:resize-no-session",
+                "rdp display: the client asked for {}x{} with no session chosen; dropping the request",
+                width,
+                height
+            );
+            return;
+        };
+        let (width, height) = (
+            align_monitor_dimension(width),
+            align_monitor_dimension(height),
+        );
+        debug!(
+            "rdp display: asking {} for a {}x{} display",
+            session.label, width, height
+        );
+        match session
+            .resize_tx
+            .try_send(DisplaySize::Requested(width, height))
+        {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => shakenfist_spice_protocol::warn_once!(
+                "rdp-display:resize-queue-full",
+                "rdp display: the resize queue for {} is full; dropping a request for {}x{}",
+                session.label,
+                width,
+                height
+            ),
+            Err(TrySendError::Closed(_)) => shakenfist_spice_protocol::warn_once!(
+                "rdp-display:resize-queue-closed",
+                "rdp display: the resize queue for {} is closed; dropping a request for {}x{}",
+                session.label,
+                width,
+                height
+            ),
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl RdpServerDisplay for MirrorDisplay {
     async fn size(&mut self) -> DesktopSize {
         let size = self.current_size().await;
-        // The first ask of a connection is the size the client is
-        // told; later asks of the same connection do not change that.
+        // The first ask of a connection is the size the client has
+        // until the capability exchange says otherwise; later asks of
+        // the same connection do not change that.
         if self.client_size.get().is_none() {
             self.client_size.set(size);
         }
         size
+    }
+
+    async fn request_initial_size(&mut self, client_size: DesktopSize) -> DesktopSize {
+        // The size the client has just been told, which replaces the
+        // one recorded at the first ask. The update stream starts from
+        // it, so when the surface is another size the stream's first
+        // update resizes the client to the surface's.
+        if self.client_size.negotiated(client_size) {
+            // The first of a connection is the size the client asked
+            // for. Later ones follow a reactivation and echo the size
+            // the stream resized the client to, which is the guest's
+            // own; asking the guest for that would undo the request.
+            self.request_guest_size(u32::from(client_size.width), u32::from(client_size.height));
+        }
+        client_size
     }
 
     async fn updates(&mut self) -> Result<Box<dyn RdpServerDisplayUpdates>> {
@@ -167,6 +269,26 @@ impl RdpServerDisplay for MirrorDisplay {
             announced,
         )))
     }
+
+    fn request_layout(&mut self, layout: DisplayControlMonitorLayout) {
+        match layout_size(&layout) {
+            Some((width, height)) => self.request_guest_size(width, height),
+            None => debug!("rdp display: the client sent a monitor layout with no monitors"),
+        }
+    }
+}
+
+/// The size of `layout`'s primary monitor, or of its first monitor when
+/// none is marked primary, which decoding does not insist on; `None`
+/// for a layout with no monitors. Only one monitor is served, so the
+/// others are ignored.
+fn layout_size(layout: &DisplayControlMonitorLayout) -> Option<(u32, u32)> {
+    let monitors = layout.monitors();
+    monitors
+        .iter()
+        .find(|monitor| monitor.is_primary())
+        .or_else(|| monitors.first())
+        .map(MonitorLayoutEntry::dimensions)
 }
 
 /// One connection's stream of display updates, read from the mirror.
@@ -512,6 +634,41 @@ mod tests {
         height: u32,
         cursor: CursorState,
     ) -> (SessionSlot, Arc<SessionHandles>, watch::Sender<CursorState>) {
+        let (slot, handles, cursor_tx, _resize) = session(width, height, cursor);
+        (slot, handles, cursor_tx)
+    }
+
+    /// As [`session_with_surface`], and the receiving end of the
+    /// session's resize queue.
+    fn session_with_resize(
+        width: u32,
+        height: u32,
+    ) -> (
+        SessionSlot,
+        Arc<SessionHandles>,
+        mpsc::Receiver<DisplaySize>,
+    ) {
+        let (slot, handles, _cursor, resize) = session(width, height, CursorState::default());
+        (slot, handles, resize)
+    }
+
+    /// How many requests a test session's resize queue holds.
+    const RESIZE_QUEUE: usize = 4;
+
+    /// A slot holding a session whose mirror has one `width` x `height`
+    /// primary surface of numbered pixels and whose cursor watch starts
+    /// at `cursor`, with the sending end of that watch and the
+    /// receiving end of the session's resize queue.
+    fn session(
+        width: u32,
+        height: u32,
+        cursor: CursorState,
+    ) -> (
+        SessionSlot,
+        Arc<SessionHandles>,
+        watch::Sender<CursorState>,
+        mpsc::Receiver<DisplaySize>,
+    ) {
         let mirror = SurfaceMirror::with_test_surface(
             0,
             0,
@@ -521,7 +678,7 @@ mod tests {
         );
         let (input_tx, _) = mpsc::channel(1);
         let (_, mouse_mode) = watch::channel(0);
-        let (resize_tx, _) = mpsc::channel(1);
+        let (resize_tx, resize_rx) = mpsc::channel(RESIZE_QUEUE);
         let (cursor_tx, cursor) = watch::channel(cursor);
         let handles = Arc::new(SessionHandles {
             surface_mirror: Arc::new(tokio::sync::Mutex::new(mirror)),
@@ -533,7 +690,7 @@ mod tests {
         });
         let slot = SessionSlot::new();
         slot.set(Arc::clone(&handles));
-        (slot, handles, cursor_tx)
+        (slot, handles, cursor_tx, resize_rx)
     }
 
     /// A display over `slot`'s session and its update stream, built as
@@ -597,6 +754,29 @@ mod tests {
             DisplayUpdate::HidePointer => {}
             other => panic!("expected a hidden pointer, got {other:?}"),
         }
+    }
+
+    /// A monitor layout as a client sends it, each monitor given as its
+    /// primary flag, width and height, decoded as the server decodes
+    /// it.
+    fn wire_layout(monitors: &[(bool, u32, u32)]) -> DisplayControlMonitorLayout {
+        // MonitorLayoutSize, then NumMonitors, then ten 32-bit fields
+        // per monitor: flags, left, top, width, height, physical width
+        // and height, orientation, and the two scale factors.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&40u32.to_le_bytes());
+        bytes.extend_from_slice(&(monitors.len() as u32).to_le_bytes());
+        for &(primary, width, height) in monitors {
+            for field in [u32::from(primary), 0, 0, width, height, 0, 0, 0, 0, 0] {
+                bytes.extend_from_slice(&field.to_le_bytes());
+            }
+        }
+        ironrdp_pdu::decode(&bytes).expect("a valid monitor layout")
+    }
+
+    /// Every resize request queued so far.
+    fn requests(resize: &mut mpsc::Receiver<DisplaySize>) -> Vec<DisplaySize> {
+        std::iter::from_fn(|| resize.try_recv().ok()).collect()
     }
 
     /// No update within a few polls.
@@ -943,6 +1123,137 @@ mod tests {
         );
         let bitmap = next_bitmap(&mut updates).await;
         assert_geometry(&bitmap, 0, 0, 8, 6);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_first_negotiated_size_is_recorded_and_asked_for_aligned() {
+        let (slot, _handles, mut resize) = session_with_resize(64, 48);
+        let mut display = MirrorDisplay::new(slot, FALLBACK);
+        display.size().await;
+
+        let asked = DesktopSize {
+            width: 1283,
+            height: 717,
+        };
+        assert_eq!(display.request_initial_size(asked).await, asked);
+        assert_eq!(display.client_size().get(), Some(asked));
+        assert_eq!(requests(&mut resize), [DisplaySize::Requested(1280, 712)]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reactivation_records_its_size_without_asking_the_guest() {
+        let (slot, _handles, mut resize) = session_with_resize(64, 48);
+        let mut display = MirrorDisplay::new(slot, FALLBACK);
+        display.size().await;
+        display
+            .request_initial_size(DesktopSize {
+                width: 800,
+                height: 600,
+            })
+            .await;
+        assert_eq!(requests(&mut resize), [DisplaySize::Requested(800, 600)]);
+
+        // The client's echo of the surface's size it was resized to.
+        let surface = DesktopSize {
+            width: 64,
+            height: 48,
+        };
+        assert_eq!(display.request_initial_size(surface).await, surface);
+        assert_eq!(display.client_size().get(), Some(surface));
+        assert_eq!(requests(&mut resize), []);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_new_connection_asks_the_guest_again() {
+        let (slot, _handles, mut resize) = session_with_resize(64, 48);
+        let mut display = MirrorDisplay::new(slot, FALLBACK);
+        display.size().await;
+        display
+            .request_initial_size(DesktopSize {
+                width: 800,
+                height: 600,
+            })
+            .await;
+        assert_eq!(requests(&mut resize), [DisplaySize::Requested(800, 600)]);
+
+        display.client_size().forget();
+        display.size().await;
+        let asked = DesktopSize {
+            width: 1024,
+            height: 768,
+        };
+        display.request_initial_size(asked).await;
+        assert_eq!(display.client_size().get(), Some(asked));
+        assert_eq!(requests(&mut resize), [DisplaySize::Requested(1024, 768)]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_negotiated_size_other_than_the_surface_starts_with_a_resize() {
+        let (slot, _handles, _resize) = session_with_resize(64, 48);
+        let mut display = MirrorDisplay::new(slot, FALLBACK);
+        let surface = DesktopSize {
+            width: 64,
+            height: 48,
+        };
+        assert_eq!(display.size().await, surface);
+        display
+            .request_initial_size(DesktopSize {
+                width: 1280,
+                height: 720,
+            })
+            .await;
+        // The server sizes its encoder from a second ask.
+        assert_eq!(display.size().await, surface);
+
+        let mut updates = display.updates().await.expect("updates");
+        next_default_pointer(&mut updates).await;
+        assert_eq!(next_resize(&mut updates).await, surface);
+        assert_eq!(display.client_size().get(), Some(surface));
+        assert_geometry(&next_bitmap(&mut updates).await, 0, 0, 64, 48);
+    }
+
+    #[test]
+    fn a_layout_asks_for_its_primary_monitor() {
+        let (slot, _handles, mut resize) = session_with_resize(64, 48);
+        let mut display = MirrorDisplay::new(slot, FALLBACK);
+        display.request_layout(wire_layout(&[(false, 1024, 768), (true, 1366, 802)]));
+        assert_eq!(requests(&mut resize), [DisplaySize::Requested(1360, 800)]);
+    }
+
+    #[test]
+    fn a_layout_without_a_primary_asks_for_its_first_monitor() {
+        let (slot, _handles, mut resize) = session_with_resize(64, 48);
+        let mut display = MirrorDisplay::new(slot, FALLBACK);
+        display.request_layout(wire_layout(&[(false, 1922, 1080), (false, 1024, 768)]));
+        assert_eq!(requests(&mut resize), [DisplaySize::Requested(1920, 1080)]);
+    }
+
+    #[test]
+    fn a_layout_without_monitors_asks_for_nothing() {
+        let (slot, _handles, mut resize) = session_with_resize(64, 48);
+        let mut display = MirrorDisplay::new(slot, FALLBACK);
+        display.request_layout(wire_layout(&[]));
+        assert_eq!(requests(&mut resize), []);
+    }
+
+    #[test]
+    fn a_layout_with_no_session_is_dropped() {
+        let mut display = MirrorDisplay::new(SessionSlot::new(), FALLBACK);
+        display.request_layout(wire_layout(&[(true, 1024, 768)]));
+    }
+
+    #[test]
+    fn a_layout_the_full_queue_cannot_take_is_dropped() {
+        let (slot, _handles, mut resize) = session_with_resize(64, 48);
+        let mut display = MirrorDisplay::new(slot, FALLBACK);
+        for width in (0..=RESIZE_QUEUE as u32).map(|i| 1024 + 8 * i) {
+            display.request_layout(wire_layout(&[(true, width, 768)]));
+        }
+        // The last one found the queue full; the ones before it stand.
+        let expected: Vec<_> = (0..RESIZE_QUEUE as u32)
+            .map(|i| DisplaySize::Requested(1024 + 8 * i, 768))
+            .collect();
+        assert_eq!(requests(&mut resize), expected);
     }
 
     #[tokio::test(start_paused = true)]

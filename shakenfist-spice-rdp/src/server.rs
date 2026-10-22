@@ -464,6 +464,13 @@ fn build_server(parts: ServerParts) -> RdpServer {
     let mut server = builder
         .with_input_handler(input)
         .with_display_handler(display)
+        // Negotiate the desktop size the client asks for in its Client
+        // Core Data rather than the surface's, so that the guest can be
+        // asked for it. IronRDP still builds the encoder at the
+        // surface's size, a mismatch that would drop the client; the
+        // display handler records the negotiated size and resizes the
+        // client to the surface's before it sends any bitmap.
+        .with_honor_client_desktop_size(true)
         .with_connection_handler(Some(Box::new(connections)))
         .with_credential_validator(validator)
         .build();
@@ -484,8 +491,9 @@ struct ConnectionLog {
     slot: SessionSlot,
     /// The display handler's record of the size the client was told.
     /// Forgotten on accept, which runs before the server first asks
-    /// the display for the connection's size, so that ask records the
-    /// size this client is told.
+    /// the display for the connection's size, so that ask records
+    /// afresh and the connection's first negotiated size is taken for
+    /// the size this client asked for.
     client_size: ClientSize,
     /// The input handler's record of held keys and buttons, ended
     /// with each connection.
