@@ -13,7 +13,9 @@
 #     `connection` that is either an http(s) .vv URL (--url) or
 #     HOST:PORT[:TLS_PORT] (--direct), and an optional `password`;
 #   - RYLL_KASM_DIRECT, a HOST:PORT (or HOST:PORT:TLS_PORT) passed as
-#     --direct, for a workspace pinned to one SPICE server.
+#     --direct, for a workspace pinned to one SPICE server. Set
+#     RYLL_KASM_LAUNCH_FORM as well if the workspace also has a launch
+#     form, so that the script waits for its answers.
 # For --direct, a password typed into the launch form wins; otherwise
 # RYLL_KASM_PASSWORD_FILE names a file in the container holding it
 # (mount it with a Kasm volume mapping), passed as --password-file.
@@ -48,13 +50,22 @@ launch_selection() {
 
 # Print the --direct password arguments: a password typed into the
 # launch form, written to a private file because ryll only takes a
-# password from a file, or else RYLL_KASM_PASSWORD_FILE.
+# password from a file, or else RYLL_KASM_PASSWORD_FILE. The file is
+# kept out of $HOME, which Kasm's persistent profiles save when the
+# session ends, and lives as long as the container does, because the
+# restart loop hands ryll the same file each time.
 password_args() {
     local password
     password=$(launch_selection password)
     if [ -n "${password}" ]; then
-        local file="${HOME}/.ryll-launch-password"
-        (umask 077 && printf '%s' "${password}" > "${file}")
+        local dir=${XDG_RUNTIME_DIR:-/dev/shm}
+        if [ ! -d "${dir}" ] || [ ! -w "${dir}" ]; then
+            dir=/tmp
+        fi
+        local file
+        # mktemp creates the file readable by its owner only.
+        file=$(mktemp "${dir}/ryll-password.XXXXXX")
+        printf '%s' "${password}" > "${file}"
         printf '%s\n' --password-file "${file}"
     elif [ -n "${RYLL_KASM_PASSWORD_FILE:-}" ]; then
         printf '%s\n' --password-file "${RYLL_KASM_PASSWORD_FILE}"
@@ -101,16 +112,28 @@ kasm_exec() {
 }
 
 kasm_startup() {
+    if [ -n "${DISABLE_CUSTOM_STARTUP:-}" ]; then
+        return
+    fi
+
     local url=${KASM_URL:-${LAUNCH_URL:-}}
 
-    # With no other source configured, the launch form is the only
-    # way to get a connection; give Kasm a moment to deliver it.
-    if [ -z "${url}" ] && [ -z "${RYLL_KASM_DIRECT:-}" ]; then
+    # Give Kasm a moment to deliver the launch form answers when they
+    # are the only way to get a connection, or when RYLL_KASM_LAUNCH_FORM
+    # says the workspace has a form whose answers override
+    # RYLL_KASM_DIRECT and RYLL_KASM_PASSWORD_FILE.
+    if [ -z "${url}" ] && { [ -z "${RYLL_KASM_DIRECT:-}" ] || [ -n "${RYLL_KASM_LAUNCH_FORM:-}" ]; }; then
         local waited=0
-        while [ ! -r "${LAUNCH_SELECTIONS}" ] && [ ${waited} -lt ${LAUNCH_SELECTIONS_WAIT} ]; do
+        while ! jq -e . "${LAUNCH_SELECTIONS}" > /dev/null 2>&1 \
+                && [ ${waited} -lt ${LAUNCH_SELECTIONS_WAIT} ]; do
             sleep 1
             waited=$((waited + 1))
         done
+    fi
+    if [ -r "${LAUNCH_SELECTIONS}" ] && ! jq -e . "${LAUNCH_SELECTIONS}" > /dev/null 2>&1; then
+        echo "ryll: cannot parse the launch form answers in" \
+            "${LAUNCH_SELECTIONS}." >&2
+        exit 1
     fi
 
     local -a args
@@ -121,10 +144,6 @@ kasm_startup() {
             "Docker Run Config Override, or launch it with a kasm_url" \
             "pointing at a .vv file." >&2
         exit 1
-    fi
-
-    if [ -n "${DISABLE_CUSTOM_STARTUP:-}" ]; then
-        return
     fi
 
     /usr/bin/filter_ready

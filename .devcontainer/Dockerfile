@@ -1,4 +1,7 @@
 # syntax=docker/dockerfile:1
+# The Debian release here must match KASM_BASE in tools/kasm/Dockerfile:
+# the .deb built here names this release's library packages. When this
+# tag moves to a new release, move KASM_BASE with it.
 FROM mcr.microsoft.com/devcontainers/base:debian
 
 # Install build dependencies for egui/eframe GUI application

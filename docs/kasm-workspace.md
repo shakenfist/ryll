@@ -85,12 +85,17 @@ command line from these, in order:
 | `RYLL_KASM_DIRECT` | `--direct <HOST:PORT>` | A workspace pinned to one SPICE server |
 | The launch form's `password` answer | `--password-file <PATH>`, via a private file in the container | With a `--direct` connection, the server's password, asked for at launch |
 | `RYLL_KASM_PASSWORD_FILE` | `--password-file <PATH>` | With a `--direct` connection and no password typed into the form, a file inside the container holding the server's password |
-| `APP_ARGS` | appended as-is | Extra ryll flags, for example `--no-h264` or `-v` |
+| `APP_ARGS` | appended, split on whitespace (quotes are not interpreted, so no argument can contain a space) | Extra ryll flags, for example `--no-h264` or `-v` |
 
 With no URL, no launch form answer and no `RYLL_KASM_DIRECT`, the
 script logs an error and starts nothing. When the launch form is the
 only possible source, the script waits up to thirty seconds for Kasm
-to deliver its answers first.
+to deliver its answers first. A workspace that has a launch form *and*
+`RYLL_KASM_DIRECT` (a default server, say, with a password field)
+should also set `RYLL_KASM_LAUNCH_FORM` to `1`; otherwise the script
+does not wait, and answers that arrive late are ignored. If the
+answers cannot be parsed as JSON, the script logs an error and starts
+nothing.
 
 ### Asking at launch
 
@@ -109,6 +114,12 @@ into the workspace's *Launch Config* field to ask for:
 Kasm writes the answers as a JSON object to `/tmp/launch_selections.json`
 in the container, the destination `launch_config.json` names. If you
 change that destination, set `RYLL_KASM_LAUNCH_SELECTIONS` to match.
+
+That file holds a typed password in plain text for the life of the
+session, and so does the private file the script writes it to for
+ryll (in `/dev/shm`, or `XDG_RUNTIME_DIR` if that is set). Both are
+outside the home directory, so Kasm's persistent profiles do not save
+them, and both go when the container is destroyed.
 
 For example, a workspace pinned to a SPICE server that listens on the
 Kasm docker bridge at `172.18.0.1:5900`:

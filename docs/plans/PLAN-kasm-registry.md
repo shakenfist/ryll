@@ -116,6 +116,9 @@ belong to one installation, not to the registry.
   consistency audits. Could it live in an existing repository instead?
 - **Signing.** Should the image be signed (for example with cosign),
   as the release tags are?
+- **Pinning the base by digest.** `KASM_BASE` names a mutable tag,
+  which is fine for a hand-built image. A published one should pin the
+  base by `@sha256:` digest and let Renovate bump it.
 
 ## Execution
 
