@@ -25,7 +25,9 @@ use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
     make_message, Notify as NotifyMessage, Ping, ReceiveBuffer, SetAck, WireType,
 };
-use shakenfist_spice_protocol::{spicevmc_client, spicevmc_server, ChannelType, NotifySeverity};
+use shakenfist_spice_protocol::{
+    port_server, spicevmc_client, spicevmc_server, ChannelType, NotifySeverity,
+};
 
 use super::{ChannelEvent, DisconnectReason, EventSink, WebdavCommand, MAX_MESSAGE_BODY};
 
@@ -147,10 +149,7 @@ impl WebdavChannel {
             ping_recv_count: 0,
             pong_send_count: 0,
             last_ping_recv_ts_secs: None,
-            opcodes: OpcodeCounters::new(
-                message_names::spicevmc_server,
-                message_names::spicevmc_client,
-            ),
+            opcodes: OpcodeCounters::new(message_names::port_server, message_names::port_client),
             http_requests_received: 0,
             http_response_bytes_sent: 0,
             last_request_ts_secs: None,
@@ -293,7 +292,7 @@ impl WebdavChannel {
 
     async fn handle_message(&mut self, msg_type: u16, payload: &[u8]) -> Result<()> {
         if self.log_config.verbose {
-            let msg_type_str = message_names::spicevmc_server(msg_type);
+            let msg_type_str = message_names::port_server(msg_type);
             logging::log_message(
                 "received",
                 "webdav",
@@ -386,6 +385,12 @@ impl WebdavChannel {
                     entry = entry.with_visibility(v);
                 }
                 self.events.emit(ChannelEvent::Notification(entry)).await;
+            }
+            port_server::INIT | port_server::EVENT => {
+                // The guest's open/closed state. ryll serves WebDAV
+                // whenever the mux delivers a request, so neither
+                // changes what it does; they are named only so they
+                // are counted and logged as known traffic.
             }
             unknown => {
                 logging::log_unknown_once("webdav", unknown, payload);
@@ -720,7 +725,7 @@ impl WebdavChannel {
 
     async fn send_with_log(&mut self, msg_type: u16, data: &[u8]) -> Result<()> {
         if self.log_config.verbose {
-            let msg_type_str = message_names::spicevmc_client(msg_type);
+            let msg_type_str = message_names::port_client(msg_type);
             let payload_size = data.len().saturating_sub(6) as u32;
             logging::log_message("sent", "webdav", msg_type, msg_type_str, payload_size);
         }

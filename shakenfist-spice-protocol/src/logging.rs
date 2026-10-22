@@ -560,6 +560,26 @@ pub mod message_names {
         }
     }
 
+    /// Get port/webdav server message name: the port messages on top
+    /// of the SpiceVMC set. Usbredir has no port messages, so it keeps
+    /// `spicevmc_server`.
+    pub fn port_server(msg_type: u16) -> &'static str {
+        match msg_type {
+            port_server::INIT => "port_init",
+            port_server::EVENT => "port_event",
+            _ => spicevmc_server(msg_type),
+        }
+    }
+
+    /// Get port/webdav client message name: the port messages on top
+    /// of the SpiceVMC set.
+    pub fn port_client(msg_type: u16) -> &'static str {
+        match msg_type {
+            port_client::EVENT => "port_event",
+            _ => spicevmc_client(msg_type),
+        }
+    }
+
     /// Return the human-readable name for a display channel
     /// capability bit, or `None` if the bit position is not
     /// known to this version of the protocol crate.
@@ -973,6 +993,7 @@ mod tests {
             ("cursor_server", message_names::cursor_server),
             ("playback_server", message_names::playback_server),
             ("spicevmc_server", message_names::spicevmc_server),
+            ("port_server", message_names::port_server),
         ];
         let expected: &[(u16, &str)] = &[
             (1, "migrate"),
@@ -1003,5 +1024,46 @@ mod tests {
     fn unknown_server_opcodes_are_still_unknown() {
         assert_eq!(message_names::display_server(9999), "unknown");
         assert_eq!(message_names::cursor_server(9999), "unknown");
+    }
+
+    // spice-server sends PORT_INIT the moment a port or webdav channel
+    // connects. A namer that resolved it to "unknown" made Kerbside's
+    // enforcing firewall, which allowlists by name, terminate every
+    // such channel (shakenfist/kerbside#570).
+    #[test]
+    fn port_namers_name_port_messages_on_top_of_spicevmc() {
+        use crate::constants::{port_client, port_server, spicevmc_client, spicevmc_server};
+
+        assert_eq!(message_names::port_server(port_server::INIT), "port_init");
+        assert_eq!(message_names::port_server(port_server::EVENT), "port_event");
+        assert_eq!(message_names::port_client(port_client::EVENT), "port_event");
+
+        assert_eq!(
+            message_names::port_server(spicevmc_server::DATA),
+            "vmc_data"
+        );
+        assert_eq!(
+            message_names::port_client(spicevmc_client::COMPRESSED_DATA),
+            "vmc_compressed_data"
+        );
+        assert_eq!(message_names::port_server(9999), "unknown");
+        assert_eq!(message_names::port_client(9999), "unknown");
+    }
+
+    // Usbredir rides the plain SpiceVMC set, so the port opcodes stay
+    // unknown there.
+    #[test]
+    fn spicevmc_namers_do_not_name_port_messages() {
+        use crate::constants::{port_client, port_server};
+
+        assert_eq!(message_names::spicevmc_server(port_server::INIT), "unknown");
+        assert_eq!(
+            message_names::spicevmc_server(port_server::EVENT),
+            "unknown"
+        );
+        assert_eq!(
+            message_names::spicevmc_client(port_client::EVENT),
+            "unknown"
+        );
     }
 }
