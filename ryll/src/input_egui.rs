@@ -1627,6 +1627,7 @@ mod tests {
             unit,
             delta: egui::vec2(0.0, y),
             phase,
+            source: egui::MouseWheelSource::Unknown,
             modifiers: egui::Modifiers::default(),
         }
     }
@@ -1698,6 +1699,7 @@ mod tests {
             unit: egui::MouseWheelUnit::Line,
             delta: egui::vec2(5.0, 0.0),
             phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
             modifiers: egui::Modifiers::default(),
         };
         assert_eq!(acc.clicks(&[sideways], 600.0), 0);
@@ -1714,6 +1716,7 @@ mod tests {
                 unit: egui::MouseWheelUnit::Line,
                 delta: egui::vec2(0.0, -1.0),
                 phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Unknown,
                 modifiers,
             };
             assert_eq!(acc.clicks(&[event], 600.0), -1);

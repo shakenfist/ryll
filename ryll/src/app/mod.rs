@@ -106,19 +106,36 @@ const BUG_REPORT_METRICS_DEADLINE: Duration = Duration::from_secs(8);
 /// it; eframe normally delivers it the next frame.
 const WINDOW_SHOT_WAIT: Duration = Duration::from_millis(500);
 
-/// Marks the viewport screenshot ryll asks for when a bug report
-/// starts, so its `Event::Screenshot` can be told apart.
-struct WindowShotRequest;
-
 /// A screenshot of ryll's whole window, panels and menus included, asked
-/// of eframe in the frame a bug report starts (#562). The image arrives
-/// as an `Event::Screenshot` in a later frame and is PNG-encoded on a
-/// worker thread into `png_slot`, as `TriggerSnapshot` encodes the guest
-/// surface.
+/// of eframe in the frame a bug report starts (#562). The renderer hands
+/// the image to a callback after a later frame, which sets `arrived` and
+/// PNG-encodes it on a worker thread into `png_slot`, as
+/// `TriggerSnapshot` encodes the guest surface. Each request owns its
+/// flag and slot, so a screenshot from a discarded request lands nowhere.
 struct WindowShot {
     requested_at: Instant,
-    arrived: bool,
+    arrived: Arc<AtomicBool>,
     png_slot: Arc<std::sync::Mutex<Option<anyhow::Result<Vec<u8>>>>>,
+}
+
+/// PNG-encode a window screenshot on a worker thread into `slot`, so
+/// the renderer that delivered it is not held up.
+fn encode_window_shot(
+    image: Arc<egui::ColorImage>,
+    slot: Arc<std::sync::Mutex<Option<anyhow::Result<Vec<u8>>>>>,
+) {
+    let spawned = std::thread::Builder::new()
+        .name("ryll-bugreport-window-png".to_string())
+        .spawn(move || {
+            let [width, height] = image.size;
+            let result = encode_png(image.as_raw(), width as u32, height as u32);
+            if let Ok(mut guard) = slot.lock() {
+                *guard = Some(result);
+            }
+        });
+    if let Err(e) = spawned {
+        debug!("app: failed to spawn window PNG encoder thread: {}", e);
+    }
 }
 
 /// How long past the end of its sample window a bug report still
@@ -2298,64 +2315,32 @@ impl RyllApp {
     /// `window_shot_holds_dialog`), so the frame shows what the user was
     /// reporting rather than the dialog.
     fn request_window_shot(&mut self) {
-        self.egui_ctx
-            .send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
-                WindowShotRequest,
-            )));
+        let arrived = Arc::new(AtomicBool::new(false));
+        let png_slot = Arc::new(std::sync::Mutex::new(None));
+        let ctx = self.egui_ctx.clone();
+        let (cb_arrived, cb_slot) = (Arc::clone(&arrived), Arc::clone(&png_slot));
+        // The renderer calls this, possibly off the UI thread, and does
+        // not ask for a frame, so it repaints to release the held dialog.
+        self.egui_ctx.request_screenshot(move |image| {
+            cb_arrived.store(true, Ordering::Release);
+            encode_window_shot(image, cb_slot);
+            ctx.request_repaint();
+        });
         self.window_shot = Some(WindowShot {
             requested_at: Instant::now(),
-            arrived: false,
-            png_slot: Arc::new(std::sync::Mutex::new(None)),
+            arrived,
+            png_slot,
         });
         self.egui_ctx.request_repaint();
-    }
-
-    /// Take the window screenshot from this frame's events, if it has
-    /// arrived, and PNG-encode it on a worker thread.
-    fn receive_window_shot(&mut self, ctx: &egui::Context) {
-        let Some(shot) = self.window_shot.as_mut().filter(|s| !s.arrived) else {
-            return;
-        };
-        let image = ctx.input(|i| {
-            i.raw.events.iter().find_map(|event| match event {
-                egui::Event::Screenshot {
-                    user_data, image, ..
-                } if user_data
-                    .data
-                    .as_ref()
-                    .is_some_and(|d| d.is::<WindowShotRequest>()) =>
-                {
-                    Some(Arc::clone(image))
-                }
-                _ => None,
-            })
-        });
-        let Some(image) = image else {
-            return;
-        };
-        shot.arrived = true;
-        let slot = Arc::clone(&shot.png_slot);
-        let spawned = std::thread::Builder::new()
-            .name("ryll-bugreport-window-png".to_string())
-            .spawn(move || {
-                let [width, height] = image.size;
-                let result = encode_png(image.as_raw(), width as u32, height as u32);
-                if let Ok(mut guard) = slot.lock() {
-                    *guard = Some(result);
-                }
-            });
-        if let Err(e) = spawned {
-            debug!("app: failed to spawn window PNG encoder thread: {}", e);
-        }
     }
 
     /// Whether the bug report dialog should wait another frame for the
     /// window screenshot. Not past `WINDOW_SHOT_WAIT`: a renderer that
     /// never delivers one must not keep the dialog from opening.
     fn window_shot_holds_dialog(&self) -> bool {
-        self.window_shot
-            .as_ref()
-            .is_some_and(|s| !s.arrived && s.requested_at.elapsed() < WINDOW_SHOT_WAIT)
+        self.window_shot.as_ref().is_some_and(|s| {
+            !s.arrived.load(Ordering::Acquire) && s.requested_at.elapsed() < WINDOW_SHOT_WAIT
+        })
     }
 
     /// The window screenshot's PNG, if it arrived and has been encoded.
@@ -3386,7 +3371,6 @@ impl eframe::App for RyllApp {
         if !self.show_bug_dialog {
             keep_keyboard_for_guest(ctx);
         }
-        self.receive_window_shot(ctx);
 
         // Resize viewport to match the remote surface (plus stats
         // bar) whenever a new primary surface differs from the
@@ -4810,7 +4794,7 @@ impl eframe::App for RyllApp {
             // Draw instruction banner
             let painter = ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Foreground,
-                egui::Id::new("region_select_banner"),
+                egui::Id::unique("region_select_banner"),
             ));
             let banner_rect = egui::Rect::from_min_size(
                 self.surface_rect.min,
@@ -4840,7 +4824,7 @@ impl eframe::App for RyllApp {
                     egui::Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, bottom));
                 let sel_painter = ctx.layer_painter(egui::LayerId::new(
                     egui::Order::Foreground,
-                    egui::Id::new("region_select_rect"),
+                    egui::Id::unique("region_select_rect"),
                 ));
                 sel_painter.rect_filled(
                     sel_rect,
@@ -4946,7 +4930,7 @@ impl eframe::App for RyllApp {
 
                 let painter = ctx.layer_painter(egui::LayerId::new(
                     egui::Order::Foreground,
-                    egui::Id::new("spice_cursor"),
+                    egui::Id::unique("spice_cursor"),
                 ));
                 let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
                 painter.image(tex.id(), rect, uv, egui::Color32::WHITE);
