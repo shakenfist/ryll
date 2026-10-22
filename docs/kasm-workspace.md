@@ -82,6 +82,7 @@ command line from these, in order:
 |--------|-------------------|-----|
 | A URL Kasm hands the session (`KASM_URL` or `LAUNCH_URL` at startup, or `--url` on an exec into a running session) | `--url <URL>` | A link to a `.vv` file, so one workspace can open any console |
 | `RYLL_KASM_DIRECT` | `--direct <HOST:PORT>` | A workspace pinned to one SPICE server |
+| `RYLL_KASM_PASSWORD_FILE` | `--password-file <PATH>` | With `RYLL_KASM_DIRECT`, a file inside the container holding the server's password |
 | `APP_ARGS` | appended as-is | Extra ryll flags, for example `--no-h264` or `-v` |
 
 With neither a URL nor `RYLL_KASM_DIRECT`, the script logs an error
@@ -97,6 +98,39 @@ Kasm docker bridge at `172.18.0.1:5900`:
   }
 }
 ```
+
+If the server wants a password, keep it out of the environment (Kasm
+shows the override in its admin UI, and `docker inspect` shows it to
+anyone on the host). Instead, map the file holding it into the
+container with the workspace's *Volume Mappings*, read-only, and
+point `RYLL_KASM_PASSWORD_FILE` at it. For andris, whose ticket lives
+in `~/.config/andris/ticket` on the host:
+
+```json
+{
+  "/home/USER/.config/andris/ticket": {
+    "bind": "/run/ryll/ticket",
+    "mode": "ro",
+    "uid": 1000,
+    "gid": 1000,
+    "required": true,
+    "skip_check": false
+  }
+}
+```
+
+```json
+{
+  "environment": {
+    "RYLL_KASM_DIRECT": "172.18.0.1:5900",
+    "RYLL_KASM_PASSWORD_FILE": "/run/ryll/ticket"
+  }
+}
+```
+
+The ticket file is private to its owner, so it is readable in the
+container only if the owner's uid matches the container's
+`kasm-user` (1000).
 
 The SPICE server must be reachable from the workspace container's
 network. A server that listens only on the host's loopback is not;

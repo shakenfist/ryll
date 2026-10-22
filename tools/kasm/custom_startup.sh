@@ -9,7 +9,10 @@
 #     on a later exec into a running session), passed to ryll as --url,
 #     so it must point at a .vv file;
 #   - RYLL_KASM_DIRECT, a HOST:PORT (or HOST:PORT:TLS_PORT) passed as
-#     --direct, for a workspace pinned to one SPICE server.
+#     --direct, for a workspace pinned to one SPICE server. If that
+#     server wants a password, RYLL_KASM_PASSWORD_FILE names a file in
+#     the container holding it (mount it with a Kasm volume mapping),
+#     passed as --password-file.
 # APP_ARGS, Kasm's usual variable for extra application arguments, is
 # appended to either. Set the variables in the workspace's Docker Run
 # Config Override; see docs/kasm-workspace.md.
@@ -33,6 +36,9 @@ ryll_args() {
         printf '%s\n' --url "${url}"
     elif [ -n "${RYLL_KASM_DIRECT:-}" ]; then
         printf '%s\n' --direct "${RYLL_KASM_DIRECT}"
+        if [ -n "${RYLL_KASM_PASSWORD_FILE:-}" ]; then
+            printf '%s\n' --password-file "${RYLL_KASM_PASSWORD_FILE}"
+        fi
     else
         return
     fi
