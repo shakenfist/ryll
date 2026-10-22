@@ -75,11 +75,11 @@ mozjpeg = { version = "=0.10.13", optional = true, features = ["with_simd"] }
 # initialisation) are about this version.
 #
 # Optional: pulled in by `h264-decode` (decode) or `encode` (encode).
-openh264 = { version = "=0.9.8", optional = true }
+openh264 = { version = "=0.9.9", optional = true }
 # The raw option types openh264 does not re-export (SBitrateInfo,
 # SEncParamExt and the ENCODER_OPTION_* constants), for the encoder's
 # live bitrate, frame rate and slice settings. Only with `encode`.
-openh264-sys2 = { version = "=0.9.8", optional = true, default-features = false }
+openh264-sys2 = { version = "=0.9.9", optional = true, default-features = false }
 
 # macOS-only: ImageIO JPEG decoder backend. Pinned to the 0.3.x
 # `objc2-*` family so the framework crates all agree on the
