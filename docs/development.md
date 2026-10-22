@@ -128,9 +128,9 @@ able to be opted out of at build time:
   SPICE session to stock RDP clients through the
   shakenfist-spice-rdp crate and IronRDP.  It is a heavy
   feature: IronRDP brings `sspi` and `picky` for CredSSP, a
-  `reqwest` 0.12 beside ryll's 0.13, and `libz-sys`, which links
-  the system zlib or compiles a bundled copy with the C compiler
-  where pkg-config finds none.  Any build that enables it, and
+  second, older `reqwest` beside the one ryll itself uses, and
+  `libz-sys`, which links the system zlib or compiles a bundled
+  copy with the C compiler where pkg-config finds none.  Any build that enables it, and
   any workspace-wide build, moves `flate2` onto that C zlib
   backend.  `make lint` and `make test` build it; release
   builds leave it out.  Running a binary built without it with

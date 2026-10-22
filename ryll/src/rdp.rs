@@ -6,6 +6,7 @@
 //! runs IronRDP on a thread of its own and reads the session through
 //! the mirror and the input, mouse-mode and resize channels.
 
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,6 +46,17 @@ impl shakenfist_spice_renderer::PlaybackSink for DiscardPlayback {
     fn on_opus_packet(&self, _packet: &[u8], _samples_in_packet: u32) {}
 }
 
+/// The names a generated self-signed certificate carries: the
+/// listen address, then `localhost`. A wildcard bind address is never
+/// what a client connects to, so it is left out.
+fn certificate_names(host: IpAddr) -> Vec<String> {
+    let mut names = vec!["localhost".to_string()];
+    if !host.is_unspecified() {
+        names.insert(0, host.to_string());
+    }
+    names
+}
+
 /// What ended the wait for the session.
 enum Ended {
     /// Ctrl+C.
@@ -81,15 +93,10 @@ pub fn run_rdp(
     // both-or-neither for the two flags.
     let (identity, generated_certificate) = match (&args.rdp_tls_cert, &args.rdp_tls_key) {
         (Some(cert), Some(key)) => (TlsIdentity::from_pem_files(cert, key)?, false),
-        _ => {
-            // A wildcard bind address is never what a client connects
-            // to, so it is left out of the certificate's names.
-            let mut names = vec!["localhost".to_string()];
-            if !rdp_host.is_unspecified() {
-                names.insert(0, rdp_host.to_string());
-            }
-            (TlsIdentity::self_signed(&names)?, true)
-        }
+        _ => (
+            TlsIdentity::self_signed(&certificate_names(rdp_host))?,
+            true,
+        ),
     };
     let monitors = args.monitors;
     let h264 = args.h264_offer();
@@ -434,4 +441,26 @@ pub fn run_rdp(
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn certificate_names_leave_out_a_wildcard_address() {
+        assert_eq!(
+            certificate_names(IpAddr::from([192, 0, 2, 7])),
+            ["192.0.2.7", "localhost"]
+        );
+        assert_eq!(
+            certificate_names("::1".parse().expect("address")),
+            ["::1", "localhost"]
+        );
+        assert_eq!(certificate_names(IpAddr::from([0, 0, 0, 0])), ["localhost"]);
+        assert_eq!(
+            certificate_names("::".parse().expect("address")),
+            ["localhost"]
+        );
+    }
 }

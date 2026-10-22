@@ -6,7 +6,7 @@
 use std::fmt;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr, TcpListener};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -457,6 +457,7 @@ fn build_server(parts: ServerParts) -> RdpServer {
         slot,
         client_size: display.client_size(),
         held: input.held(),
+        dropped: input.dropped_counter(),
         clear_on_disconnect,
         stopping,
     };
@@ -489,6 +490,9 @@ struct ConnectionLog {
     /// The input handler's record of held keys and buttons, ended
     /// with each connection.
     held: HeldInput,
+    /// The input handler's dropped-event count, which releases that
+    /// cannot be queued are added to.
+    dropped: Arc<AtomicU64>,
     /// Whether to empty the slot on disconnect. True in TLS mode,
     /// where the credential check fills it per connection; false for
     /// NLA, where it is filled once when the server starts.
@@ -532,11 +536,15 @@ impl ConnectionHandler for ConnectionLog {
                     "releasing input the RDP client left held"
                 );
             }
-            for event in releases {
+            let total = releases.len();
+            for (sent, event) in releases.into_iter().enumerate() {
                 if session.input_tx.try_send(event).is_err() {
+                    let unsent = total - sent;
+                    self.dropped.fetch_add(unsent as u64, Ordering::Relaxed);
                     warn!(
                         session = %session.label,
-                        "could not release a key or button the RDP client left held"
+                        unsent,
+                        "could not release keys or buttons the RDP client left held"
                     );
                     break;
                 }
@@ -729,6 +737,7 @@ mod tests {
             slot: SessionSlot::new(),
             client_size: client_size.clone(),
             held: HeldInput::default(),
+            dropped: Arc::default(),
             clear_on_disconnect: true,
             stopping: Arc::new(AtomicBool::new(false)),
         };
@@ -756,6 +765,7 @@ mod tests {
             slot: slot.clone(),
             client_size: ClientSize::default(),
             held: input.held(),
+            dropped: input.dropped_counter(),
             clear_on_disconnect: true,
             stopping: Arc::new(AtomicBool::new(false)),
         };
@@ -771,6 +781,53 @@ mod tests {
         assert!(matches!(input_rx.try_recv(), Ok(InputEvent::KeyDown(0x1E))));
         assert!(matches!(input_rx.try_recv(), Ok(InputEvent::KeyUp(0x9E))));
         assert!(input_rx.try_recv().is_err());
+        assert!(slot.current().is_none());
+    }
+
+    #[test]
+    fn releases_that_cannot_be_queued_are_counted_as_dropped() {
+        // Room for one event: the first key-down fills the queue.
+        let (input_tx, mut input_rx) = mpsc::channel(1);
+        let (_mode_tx, mouse_mode) = tokio_watch::channel(0);
+        let (resize_tx, _resize_rx) = mpsc::channel(1);
+        let mirror = SurfaceMirror::with_test_surface(0, 0, 64, 48, &[]);
+        let slot = SessionSlot::new();
+        slot.set(Arc::new(SessionHandles {
+            surface_mirror: Arc::new(tokio::sync::Mutex::new(mirror)),
+            input_tx,
+            mouse_mode,
+            resize_tx,
+            label: "test".to_string(),
+        }));
+        let mut input = SpiceInputHandler::new(slot.clone());
+        let held = input.held();
+        let mut connections = ConnectionLog {
+            slot: slot.clone(),
+            client_size: ClientSize::default(),
+            held: held.clone(),
+            dropped: input.dropped_counter(),
+            clear_on_disconnect: true,
+            stopping: Arc::new(AtomicBool::new(false)),
+        };
+
+        // A is queued; B finds the queue full and is dropped, but is
+        // still recorded as held.
+        for code in [0x1E, 0x30] {
+            input.keyboard(KeyboardEvent::Pressed {
+                code,
+                extended: false,
+            });
+        }
+        assert_eq!(input.dropped(), 1);
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 50000);
+        connections.on_disconnected(peer, Duration::from_secs(1), None);
+
+        // Neither release fits, so both are counted, and the record
+        // is cleared regardless.
+        assert_eq!(input.dropped(), 3);
+        assert!(matches!(input_rx.try_recv(), Ok(InputEvent::KeyDown(0x1E))));
+        assert!(input_rx.try_recv().is_err());
+        assert!(held.end_connection().is_empty());
         assert!(slot.current().is_none());
     }
 
