@@ -4,7 +4,8 @@
 //! scaffolding, event bus, surface mirror and optional control
 //! socket); the RDP side is `shakenfist_spice_rdp::serve`, which
 //! runs IronRDP on a thread of its own and reads the session through
-//! the mirror and the input, mouse-mode and resize channels.
+//! the mirror, the cursor relay and the input, mouse-mode and resize
+//! channels.
 
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,8 +14,8 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use shakenfist_spice_rdp::{
-    generate_password, serve, Credentials, RdpConfig, RdpSecurity, SessionHandles, SingleSession,
-    TlsIdentity,
+    generate_password, serve, spawn_cursor_relay, Credentials, RdpConfig, RdpSecurity,
+    SessionHandles, SingleSession, TlsIdentity,
 };
 use tracing::{info, warn};
 
@@ -207,12 +208,15 @@ pub fn run_rdp(
         drop(webdav_tx);
 
         // The bus's mirror task keeps the surface mirror the RDP
-        // display handler reads damage from. The mirror subscribes
-        // itself when the bus is built, so nothing here has to
-        // subscribe before the session is spawned.
+        // display handler reads damage from; the mirror subscribes
+        // itself when the bus is built. The cursor relay keeps the
+        // cursor shape the display handler sends, and subscribes here,
+        // before the session is spawned, because the first shape
+        // arrives during session setup.
         let event_bus = shakenfist_spice_renderer::EventBus::new(
             shakenfist_spice_renderer::session::EVENT_BROADCAST_CAPACITY,
         );
+        let (cursor, cursor_relay) = spawn_cursor_relay(event_bus.subscribe());
         #[cfg(unix)]
         let event_broadcast_tx = event_bus.sender();
         let surface_mirror = event_bus.mirror();
@@ -239,6 +243,7 @@ pub fn run_rdp(
             input_tx,
             mouse_mode: session_state_rx.mouse_mode.clone(),
             resize_tx,
+            cursor,
             label: session_label,
         });
         let username = credentials.username.clone();
@@ -430,6 +435,7 @@ pub fn run_rdp(
 
         event_bus_handles.forwarder.abort();
         event_bus_handles.mirror.abort();
+        cursor_relay.abort();
 
         result
     });

@@ -11,7 +11,9 @@
 //! the handlers that server is built with: a display handler that
 //! reads damaged rectangles from the session's
 //! [`SurfaceMirror`], and an input handler that turns RDP keyboard
-//! and mouse events into the renderer's [`InputEvent`]s.
+//! and mouse events into the renderer's [`InputEvent`]s. The display
+//! handler also sends the guest's cursor shape, which
+//! [`spawn_cursor_relay`] keeps from the session's event bus.
 //!
 //! IronRDP's server type is not `Send`, so it cannot be spawned on a
 //! multi-thread tokio runtime. The server therefore runs on an OS
@@ -39,12 +41,14 @@ use shakenfist_spice_renderer::{DisplaySize, InputEvent, SurfaceMirror};
 use tokio::sync::{mpsc, watch};
 
 mod auth;
+mod cursor;
 mod display;
 mod input;
 mod server;
 mod tls;
 
 pub use auth::{generate_password, SingleSession};
+pub use cursor::{spawn_cursor_relay, CursorState};
 pub use display::MirrorDisplay;
 pub use input::SpiceInputHandler;
 pub use server::{serve, RdpConfig, RdpSecurity, RdpServerHandle, DEFAULT_RDP_PORT};
@@ -73,6 +77,9 @@ pub struct SessionHandles {
     pub mouse_mode: watch::Receiver<u32>,
     /// Sender for a requested guest display size.
     pub resize_tx: mpsc::Sender<DisplaySize>,
+    /// The session's current cursor shape and visibility, as kept by
+    /// [`spawn_cursor_relay`].
+    pub cursor: watch::Receiver<CursorState>,
     /// A human-readable name for the session, for logs.
     pub label: String,
 }

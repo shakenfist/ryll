@@ -577,7 +577,7 @@ mod tests {
     use shakenfist_spice_renderer::{InputEvent, SurfaceMirror};
     use tokio::sync::watch as tokio_watch;
 
-    use crate::{SessionHandles, SingleSession};
+    use crate::{CursorState, SessionHandles, SingleSession};
 
     const JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -602,6 +602,7 @@ mod tests {
     fn handles() -> Arc<SessionHandles> {
         let (input_tx, _) = mpsc::channel(1);
         let (_, mouse_mode) = tokio_watch::channel(0);
+        let (_, cursor) = tokio_watch::channel(CursorState::default());
         let (resize_tx, _) = mpsc::channel(1);
         let mirror = SurfaceMirror::with_test_surface(0, 0, 64, 48, &[]);
         Arc::new(SessionHandles {
@@ -609,6 +610,7 @@ mod tests {
             input_tx,
             mouse_mode,
             resize_tx,
+            cursor,
             label: "test".to_string(),
         })
     }
@@ -752,6 +754,7 @@ mod tests {
     fn a_disconnect_releases_held_input_before_emptying_the_slot() {
         let (input_tx, mut input_rx) = mpsc::channel(8);
         let (_mode_tx, mouse_mode) = tokio_watch::channel(0);
+        let (_, cursor) = tokio_watch::channel(CursorState::default());
         let (resize_tx, _resize_rx) = mpsc::channel(1);
         let mirror = SurfaceMirror::with_test_surface(0, 0, 64, 48, &[]);
         let slot = SessionSlot::new();
@@ -760,6 +763,7 @@ mod tests {
             input_tx,
             mouse_mode,
             resize_tx,
+            cursor,
             label: "test".to_string(),
         }));
         let mut input = SpiceInputHandler::new(slot.clone());
@@ -791,6 +795,7 @@ mod tests {
         // Room for one event: the first key-down fills the queue.
         let (input_tx, mut input_rx) = mpsc::channel(1);
         let (_mode_tx, mouse_mode) = tokio_watch::channel(0);
+        let (_, cursor) = tokio_watch::channel(CursorState::default());
         let (resize_tx, _resize_rx) = mpsc::channel(1);
         let mirror = SurfaceMirror::with_test_surface(0, 0, 64, 48, &[]);
         let slot = SessionSlot::new();
@@ -799,6 +804,7 @@ mod tests {
             input_tx,
             mouse_mode,
             resize_tx,
+            cursor,
             label: "test".to_string(),
         }));
         let mut input = SpiceInputHandler::new(slot.clone());

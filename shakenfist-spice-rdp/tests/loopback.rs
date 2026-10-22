@@ -36,7 +36,8 @@ use ironrdp_session::{fast_path, ActiveStage, ActiveStageBuilder, ActiveStageOut
 use ironrdp_tokio::{FramedWrite as _, NetworkClient, TokioFramed};
 use shakenfist_spice_protocol::MOUSE_MODE_SERVER;
 use shakenfist_spice_rdp::{
-    serve, Credentials, RdpConfig, RdpSecurity, SessionHandles, SingleSession, TlsIdentity,
+    serve, Credentials, CursorState, RdpConfig, RdpSecurity, SessionHandles, SingleSession,
+    TlsIdentity,
 };
 use shakenfist_spice_renderer::{InputEvent, SurfaceMirror};
 use tokio::net::TcpStream;
@@ -133,12 +134,14 @@ fn session() -> (Arc<SessionHandles>, mpsc::Receiver<InputEvent>) {
     );
     let (input_tx, input_rx) = mpsc::channel(16);
     let (_mouse_mode_tx, mouse_mode) = watch::channel(MOUSE_MODE_SERVER);
+    let (_, cursor) = watch::channel(CursorState::default());
     let (resize_tx, _resize_rx) = mpsc::channel(1);
     let handles = Arc::new(SessionHandles {
         surface_mirror: Arc::new(tokio::sync::Mutex::new(mirror)),
         input_tx,
         mouse_mode,
         resize_tx,
+        cursor,
         label: "loopback".to_string(),
     });
     (handles, input_rx)
@@ -203,8 +206,8 @@ fn client_config() -> ironrdp_connector::Config {
         license_cache: None,
         timezone_info: Default::default(),
         compression_type: None,
-        // The server sends no pointer updates, and the image must hold
-        // only what the server drew.
+        // The client ignores the server's pointer updates, so the image
+        // holds only what the server drew.
         enable_server_pointer: false,
         pointer_software_rendering: false,
         multitransport_flags: None,

@@ -10,10 +10,15 @@
 //! they are by then. Pixels a later draw has already replaced are
 //! never sent, and nothing grows without bound while the client
 //! catches up.
+//!
+//! The guest's cursor shape rides the same stream, since IronRDP has
+//! no other path to the client. It is read the same way: the stream
+//! looks at the session's cursor watch on each poll and sends the
+//! state as it is then.
 
 use std::collections::VecDeque;
 use std::num::{NonZeroU16, NonZeroUsize};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -23,10 +28,12 @@ use ironrdp_server::{
     RdpServerDisplayUpdates,
 };
 use shakenfist_spice_renderer::{DamageRect, DisplaySurface, SurfaceMirror};
+use tokio::sync::watch;
 use tokio::time::{Interval, MissedTickBehavior};
 use tracing::debug;
 
-use crate::SessionSlot;
+use crate::cursor::{rdp_pointer, CursorState};
+use crate::{SessionHandles, SessionSlot};
 
 /// How often the update stream looks at the mirror for new damage.
 ///
@@ -167,7 +174,8 @@ impl RdpServerDisplay for MirrorDisplay {
 /// The server builds a new stream for every connection, and again
 /// after every resize (a resize deactivates and reactivates the
 /// connection), so a stream starts unseeded and sends the whole
-/// surface first.
+/// surface first. A reactivated client also starts from its default
+/// pointer, so a stream sends the cursor state before anything else.
 struct MirrorUpdates {
     slot: SessionSlot,
     /// Updated with every resize sent, since the reactivation that
@@ -185,7 +193,20 @@ struct MirrorUpdates {
     /// of a stream, and the first after a resize, must be the whole
     /// surface.
     seeded: bool,
+    /// The cursor watch of the session last polled, taken afresh when
+    /// the slot's session changes. `None` until the first poll with a
+    /// session.
+    cursor: Option<CursorWatch>,
     interval: Interval,
+}
+
+/// A session's cursor watch, and which session it belongs to.
+struct CursorWatch {
+    /// Weak, so the stream does not keep a session alive; holding it
+    /// keeps the allocation, so a later session cannot share its
+    /// address.
+    session: Weak<SessionHandles>,
+    state: watch::Receiver<CursorState>,
 }
 
 impl MirrorUpdates {
@@ -198,7 +219,40 @@ impl MirrorUpdates {
             pending: VecDeque::new(),
             sent_size: announced,
             seeded: false,
+            cursor: None,
             interval,
+        }
+    }
+
+    /// Look at `session`'s cursor once, and queue a pointer update if
+    /// the client has not been sent its current state: when the watch
+    /// has changed, and whatever it says when the watch has just been
+    /// taken, for a new stream or a new session.
+    ///
+    /// Synchronous for the same reason as [`Self::poll_mirror`]: the
+    /// state read from the watch is in `pending` before this returns.
+    fn poll_cursor(&mut self, session: &Arc<SessionHandles>) {
+        let (cursor, taken) = match &mut self.cursor {
+            Some(cursor) if Weak::as_ptr(&cursor.session) == Arc::as_ptr(session) => {
+                (cursor, false)
+            }
+            other => {
+                let cursor = other.insert(CursorWatch {
+                    session: Arc::downgrade(session),
+                    state: session.cursor.clone(),
+                });
+                (cursor, true)
+            }
+        };
+        // A closed watch (the relay has ended with the session) still
+        // holds the last state, and will not change again.
+        let changed = cursor.state.has_changed().unwrap_or(false);
+        if !(changed || taken) {
+            return;
+        }
+        let state = cursor.state.borrow_and_update().clone();
+        if let Some(update) = pointer_update(&state) {
+            self.pending.push_back(update);
         }
     }
 
@@ -259,9 +313,13 @@ impl RdpServerDisplayUpdates for MirrorUpdates {
         // awaits are the tick and the mirror lock, both before any
         // damage is taken; the take and the queueing happen together
         // in `poll_mirror`, with no await between them, and what is
-        // taken stays in `self.pending` for the next call. The mirror
-        // lock is held only for that synchronous step, so the SPICE
-        // side is never kept waiting on an encode or a network write.
+        // taken stays in `self.pending` for the next call. The cursor
+        // watch is read the same way, in `poll_cursor`, before the
+        // lock, so a pointer update goes out ahead of that poll's
+        // bitmaps and is already queued if the call is dropped at the
+        // lock. The mirror lock is held only for that synchronous step,
+        // so the SPICE side is never kept waiting on an encode or a
+        // network write.
         //
         // The loop never ends on its own: the server treats `None` as
         // the end of the display stream and disconnects the client, so
@@ -277,9 +335,24 @@ impl RdpServerDisplayUpdates for MirrorUpdates {
                 self.seeded = false;
                 continue;
             };
+            self.poll_cursor(&session);
             let mut mirror = session.surface_mirror.lock().await;
             self.poll_mirror(&mut mirror);
         }
+    }
+}
+
+/// The pointer update that shows the client `state`: hidden, the
+/// client's default pointer before the guest has sent a shape, and
+/// otherwise the shape. `None` for a shape with no pixels, which
+/// leaves the client's pointer as it was.
+fn pointer_update(state: &CursorState) -> Option<DisplayUpdate> {
+    if !state.visible {
+        return Some(DisplayUpdate::HidePointer);
+    }
+    match &state.shape {
+        None => Some(DisplayUpdate::DefaultPointer),
+        Some(shape) => rdp_pointer(shape).map(DisplayUpdate::RGBAPointer),
     }
 }
 
@@ -403,12 +476,12 @@ fn row_bytes(surface: &DisplaySurface) -> usize {
 mod tests {
     use std::sync::Arc;
 
-    use shakenfist_spice_renderer::ChannelEvent;
-    use tokio::sync::{mpsc, watch};
+    use ironrdp_server::RGBAPointer;
+    use shakenfist_spice_renderer::{ChannelEvent, CursorImage};
+    use tokio::sync::mpsc;
     use tokio::time::Instant;
 
     use super::*;
-    use crate::SessionHandles;
 
     const FALLBACK: DesktopSize = DesktopSize {
         width: 1024,
@@ -425,8 +498,20 @@ mod tests {
     }
 
     /// A slot holding a session whose mirror has one `width` x `height`
-    /// primary surface of numbered pixels.
+    /// primary surface of numbered pixels, and whose cursor watch
+    /// stays at the default state: no shape, visible.
     fn session_with_surface(width: u32, height: u32) -> (SessionSlot, Arc<SessionHandles>) {
+        let (slot, handles, _cursor) = session_with_cursor(width, height, CursorState::default());
+        (slot, handles)
+    }
+
+    /// As [`session_with_surface`], with the cursor watch starting at
+    /// `cursor`, and its sending end.
+    fn session_with_cursor(
+        width: u32,
+        height: u32,
+        cursor: CursorState,
+    ) -> (SessionSlot, Arc<SessionHandles>, watch::Sender<CursorState>) {
         let mirror = SurfaceMirror::with_test_surface(
             0,
             0,
@@ -437,31 +522,44 @@ mod tests {
         let (input_tx, _) = mpsc::channel(1);
         let (_, mouse_mode) = watch::channel(0);
         let (resize_tx, _) = mpsc::channel(1);
+        let (cursor_tx, cursor) = watch::channel(cursor);
         let handles = Arc::new(SessionHandles {
             surface_mirror: Arc::new(tokio::sync::Mutex::new(mirror)),
             input_tx,
             mouse_mode,
             resize_tx,
+            cursor,
             label: String::from("test"),
         });
         let slot = SessionSlot::new();
         slot.set(Arc::clone(&handles));
-        (slot, handles)
+        (slot, handles, cursor_tx)
     }
 
     /// A display over `slot`'s session and its update stream, built as
     /// the server builds them: size first, then updates.
-    async fn connect(slot: &SessionSlot) -> (MirrorDisplay, Box<dyn RdpServerDisplayUpdates>) {
+    async fn open(slot: &SessionSlot) -> (MirrorDisplay, Box<dyn RdpServerDisplayUpdates>) {
         let mut display = MirrorDisplay::new(slot.clone(), FALLBACK);
         display.size().await;
         let updates = display.updates().await.expect("updates");
         (display, updates)
     }
 
+    /// As [`open`], for a session whose cursor is in the default state,
+    /// with the default pointer the stream sends first already taken.
+    async fn connect(slot: &SessionSlot) -> (MirrorDisplay, Box<dyn RdpServerDisplayUpdates>) {
+        let (display, mut updates) = open(slot).await;
+        next_default_pointer(&mut updates).await;
+        (display, updates)
+    }
+
+    /// The next update. The stream waits for ever while it has nothing
+    /// to send, so a missing update fails the test after a few hundred
+    /// polls of paused time rather than hanging it.
     async fn next(updates: &mut Box<dyn RdpServerDisplayUpdates>) -> DisplayUpdate {
-        updates
-            .next_update()
+        tokio::time::timeout(DAMAGE_POLL_INTERVAL * 300, updates.next_update())
             .await
+            .expect("an update within 300 polls")
             .expect("next_update")
             .expect("an update")
     }
@@ -478,6 +576,68 @@ mod tests {
             DisplayUpdate::Resize(size) => size,
             other => panic!("expected a resize, got {other:?}"),
         }
+    }
+
+    async fn next_pointer(updates: &mut Box<dyn RdpServerDisplayUpdates>) -> RGBAPointer {
+        match next(updates).await {
+            DisplayUpdate::RGBAPointer(pointer) => pointer,
+            other => panic!("expected a pointer, got {other:?}"),
+        }
+    }
+
+    async fn next_default_pointer(updates: &mut Box<dyn RdpServerDisplayUpdates>) {
+        match next(updates).await {
+            DisplayUpdate::DefaultPointer => {}
+            other => panic!("expected the default pointer, got {other:?}"),
+        }
+    }
+
+    async fn next_hide_pointer(updates: &mut Box<dyn RdpServerDisplayUpdates>) {
+        match next(updates).await {
+            DisplayUpdate::HidePointer => {}
+            other => panic!("expected a hidden pointer, got {other:?}"),
+        }
+    }
+
+    /// No update within a few polls.
+    async fn assert_quiet(updates: &mut Box<dyn RdpServerDisplayUpdates>) {
+        if let Ok(update) =
+            tokio::time::timeout(DAMAGE_POLL_INTERVAL * 5, updates.next_update()).await
+        {
+            panic!("expected no update, got {update:?}");
+        }
+    }
+
+    /// A `width` x `height` cursor of one opaque colour, with its hot
+    /// spot at (1, 1).
+    fn cursor_image(width: u16, height: u16, [r, g, b]: [u8; 3]) -> Arc<CursorImage> {
+        Arc::new(CursorImage {
+            width,
+            height,
+            hot_spot_x: 1,
+            hot_spot_y: 1,
+            pixels: [r, g, b, 0xFF].repeat(usize::from(width) * usize::from(height)),
+        })
+    }
+
+    fn showing(shape: &Arc<CursorImage>) -> CursorState {
+        CursorState {
+            shape: Some(Arc::clone(shape)),
+            visible: true,
+        }
+    }
+
+    /// Assert `pointer` is `width` x `height`, hot spot (1, 1), and one
+    /// colour, given as RGB and expected on the wire as BGRA.
+    fn assert_pointer(pointer: &RGBAPointer, width: u16, height: u16, [r, g, b]: [u8; 3]) {
+        assert_eq!(
+            (pointer.width, pointer.height, pointer.hot_x, pointer.hot_y),
+            (width, height, 1, 1)
+        );
+        assert_eq!(
+            pointer.data,
+            [b, g, r, 0xFF].repeat(usize::from(width) * usize::from(height))
+        );
     }
 
     /// The bitmap's pixels, row by row, without stride padding.
@@ -709,6 +869,7 @@ mod tests {
         assert_eq!(display.client_size().get(), Some(FALLBACK));
 
         let mut updates = display.updates().await.expect("updates");
+        next_default_pointer(&mut updates).await;
         assert_eq!(next_resize(&mut updates).await, surface);
         assert_eq!(display.client_size().get(), Some(surface));
         let bitmap = next_bitmap(&mut updates).await;
@@ -753,6 +914,7 @@ mod tests {
         // The new connection's stream starts from the recorded size, so
         // it seeds without a resize.
         let mut updates = display.updates().await.expect("updates");
+        next_default_pointer(&mut updates).await;
         let bitmap = next_bitmap(&mut updates).await;
         assert_geometry(&bitmap, 0, 0, 16, 12);
     }
@@ -761,16 +923,17 @@ mod tests {
     async fn an_empty_slot_yields_nothing_and_reports_the_fallback() {
         let (_other_slot, handles) = session_with_surface(8, 6);
         let slot = SessionSlot::new();
-        let (mut display, mut updates) = connect(&slot).await;
+        let (mut display, mut updates) = open(&slot).await;
         assert_eq!(display.size().await, FALLBACK);
 
         tokio::time::timeout(DAMAGE_POLL_INTERVAL * 5, updates.next_update())
             .await
             .expect_err("no update without a session");
 
-        // Once a session is chosen, the stream resizes from the fallback
-        // and sends the whole surface.
+        // Once a session is chosen, the stream sends its cursor, resizes
+        // from the fallback and sends the whole surface.
         slot.set(handles);
+        next_default_pointer(&mut updates).await;
         assert_eq!(
             next_resize(&mut updates).await,
             DesktopSize {
@@ -780,5 +943,117 @@ mod tests {
         );
         let bitmap = next_bitmap(&mut updates).await;
         assert_geometry(&bitmap, 0, 0, 8, 6);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn first_poll_sends_the_cursor_before_the_whole_surface() {
+        let shape = cursor_image(3, 2, [0x10, 0x80, 0xF0]);
+        let (slot, _handles, _cursor) = session_with_cursor(8, 6, showing(&shape));
+        let (_display, mut updates) = open(&slot).await;
+
+        assert_pointer(&next_pointer(&mut updates).await, 3, 2, [0x10, 0x80, 0xF0]);
+        let bitmap = next_bitmap(&mut updates).await;
+        assert_geometry(&bitmap, 0, 0, 8, 6);
+        assert_quiet(&mut updates).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hidden_cursor_is_sent_hidden() {
+        let hidden = CursorState {
+            shape: Some(cursor_image(3, 2, [1, 2, 3])),
+            visible: false,
+        };
+        let (slot, _handles, _cursor) = session_with_cursor(8, 6, hidden);
+        let (_display, mut updates) = open(&slot).await;
+
+        next_hide_pointer(&mut updates).await;
+        next_bitmap(&mut updates).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cursor_change_mid_stream_sends_one_pointer_update() {
+        let (slot, handles, cursor) = session_with_cursor(8, 6, CursorState::default());
+        let (_display, mut updates) = connect(&slot).await;
+        next_bitmap(&mut updates).await;
+        assert_quiet(&mut updates).await;
+
+        let shape = cursor_image(4, 4, [0xC0, 0x20, 0x08]);
+        cursor.send_replace(showing(&shape));
+        blit(&handles, 2, 1, 3, 2, 100).await;
+        // The pointer goes ahead of the same poll's damage.
+        assert_pointer(&next_pointer(&mut updates).await, 4, 4, [0xC0, 0x20, 0x08]);
+        assert_geometry(&next_bitmap(&mut updates).await, 2, 1, 3, 2);
+        assert_quiet(&mut updates).await;
+
+        // Hiding sends the hidden pointer; showing again resends the
+        // shape.
+        cursor.send_modify(|state| state.visible = false);
+        next_hide_pointer(&mut updates).await;
+        assert_quiet(&mut updates).await;
+        cursor.send_modify(|state| state.visible = true);
+        assert_pointer(&next_pointer(&mut updates).await, 4, 4, [0xC0, 0x20, 0x08]);
+        assert_quiet(&mut updates).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_new_stream_resends_the_cursor() {
+        // The watch never changes, so only the stream itself can ask
+        // for the cursor to be sent.
+        let shape = cursor_image(2, 2, [9, 8, 7]);
+        let (slot, _handles, _cursor) = session_with_cursor(8, 6, showing(&shape));
+        let (mut display, mut updates) = open(&slot).await;
+        next_pointer(&mut updates).await;
+        next_bitmap(&mut updates).await;
+
+        // As after a reactivation.
+        drop(updates);
+        let mut updates = display.updates().await.expect("updates");
+        assert_pointer(&next_pointer(&mut updates).await, 2, 2, [9, 8, 7]);
+        next_bitmap(&mut updates).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_new_session_sends_its_cursor() {
+        let (slot, handles, cursor) = session_with_cursor(8, 6, CursorState::default());
+        let (_display, mut updates) = connect(&slot).await;
+        next_bitmap(&mut updates).await;
+
+        // A second session on the same mirror, whose cursor watch has
+        // not changed since it was made.
+        let shape = cursor_image(5, 3, [0x33, 0x66, 0x99]);
+        let (_second_tx, second_cursor) = watch::channel(showing(&shape));
+        slot.set(Arc::new(SessionHandles {
+            surface_mirror: Arc::clone(&handles.surface_mirror),
+            input_tx: handles.input_tx.clone(),
+            mouse_mode: handles.mouse_mode.clone(),
+            resize_tx: handles.resize_tx.clone(),
+            cursor: second_cursor,
+            label: String::from("second"),
+        }));
+        assert_pointer(&next_pointer(&mut updates).await, 5, 3, [0x33, 0x66, 0x99]);
+        assert_quiet(&mut updates).await;
+
+        // The first session's watch is no longer read.
+        cursor.send_modify(|state| state.visible = false);
+        assert_quiet(&mut updates).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropped_while_waiting_on_the_lock_keeps_the_cursor() {
+        let (slot, handles, cursor) = session_with_cursor(8, 6, CursorState::default());
+        let (_display, mut updates) = connect(&slot).await;
+        next_bitmap(&mut updates).await;
+
+        let shape = cursor_image(2, 3, [0x40, 0x50, 0x60]);
+        cursor.send_replace(showing(&shape));
+        {
+            let _held = handles.surface_mirror.lock().await;
+            tokio::time::timeout(DAMAGE_POLL_INTERVAL * 3, updates.next_update())
+                .await
+                .expect_err("dropped while the mirror is locked");
+        }
+
+        assert_pointer(&next_pointer(&mut updates).await, 2, 3, [0x40, 0x50, 0x60]);
+        assert_quiet(&mut updates).await;
     }
 }
