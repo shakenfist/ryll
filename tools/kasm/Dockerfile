@@ -8,6 +8,7 @@
 # cannot satisfy them. Everything else ryll needs at runtime --
 # PulseAudio and its ALSA plugin for audio in the browser, Mesa for
 # software OpenGL, libxkbcommon-x11, wmctrl -- is already in the base.
+# jq reads the launch form answers in custom_startup.sh.
 #
 # The layout follows Kasm's own single-application images (for
 # example kasmweb/remmina): set up the default profile as root, then
@@ -23,7 +24,7 @@ WORKDIR $HOME
 
 COPY ryll.deb /tmp/ryll.deb
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends /tmp/ryll.deb \
+    && apt-get install -y --no-install-recommends /tmp/ryll.deb jq \
     && rm -rf /var/lib/apt/lists/* /tmp/ryll.deb
 
 # A single-application desktop: no panel, and the xfconf settings Kasm

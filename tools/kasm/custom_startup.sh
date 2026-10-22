@@ -8,14 +8,18 @@
 #   - a URL Kasm hands in (KASM_URL or LAUNCH_URL at startup, or --url
 #     on a later exec into a running session), passed to ryll as --url,
 #     so it must point at a .vv file;
+#   - the workspace's launch form (see tools/kasm/launch_config.json),
+#     whose answers Kasm writes to RYLL_KASM_LAUNCH_SELECTIONS: a
+#     `connection` that is either an http(s) .vv URL (--url) or
+#     HOST:PORT[:TLS_PORT] (--direct), and an optional `password`;
 #   - RYLL_KASM_DIRECT, a HOST:PORT (or HOST:PORT:TLS_PORT) passed as
-#     --direct, for a workspace pinned to one SPICE server. If that
-#     server wants a password, RYLL_KASM_PASSWORD_FILE names a file in
-#     the container holding it (mount it with a Kasm volume mapping),
-#     passed as --password-file.
+#     --direct, for a workspace pinned to one SPICE server.
+# For --direct, a password typed into the launch form wins; otherwise
+# RYLL_KASM_PASSWORD_FILE names a file in the container holding it
+# (mount it with a Kasm volume mapping), passed as --password-file.
 # APP_ARGS, Kasm's usual variable for extra application arguments, is
-# appended to either. Set the variables in the workspace's Docker Run
-# Config Override; see docs/kasm-workspace.md.
+# appended to any of them. Set the variables in the workspace's Docker
+# Run Config Override; see docs/kasm-workspace.md.
 
 set -euo pipefail
 
@@ -26,19 +30,53 @@ export MAXIMIZE="true"
 export MAXIMIZE_NAME="Ryll - SPICE Client"
 MAXIMIZE_SCRIPT="${STARTUPDIR}/maximize_window.sh"
 
+# Kasm's default destination for launch form answers.
+LAUNCH_SELECTIONS=${RYLL_KASM_LAUNCH_SELECTIONS:-/tmp/launch_selections.json}
+# How long to wait for the launch form answers when they are the only
+# possible source of a connection.
+LAUNCH_SELECTIONS_WAIT=30
+
 read -r -a EXTRA_ARGS <<< "${APP_ARGS:-}"
+
+# Print one launch form answer ($1 is its key), or nothing if the form
+# was not used or left it empty.
+launch_selection() {
+    if [ -r "${LAUNCH_SELECTIONS}" ]; then
+        jq -r --arg key "$1" '.[$key] // empty' "${LAUNCH_SELECTIONS}"
+    fi
+}
+
+# Print the --direct password arguments: a password typed into the
+# launch form, written to a private file because ryll only takes a
+# password from a file, or else RYLL_KASM_PASSWORD_FILE.
+password_args() {
+    local password
+    password=$(launch_selection password)
+    if [ -n "${password}" ]; then
+        local file="${HOME}/.ryll-launch-password"
+        (umask 077 && printf '%s' "${password}" > "${file}")
+        printf '%s\n' --password-file "${file}"
+    elif [ -n "${RYLL_KASM_PASSWORD_FILE:-}" ]; then
+        printf '%s\n' --password-file "${RYLL_KASM_PASSWORD_FILE}"
+    fi
+}
 
 # Print the ryll command line for a connection URL ($1, may be empty)
 # one argument per line, or nothing when there is no connection to make.
 ryll_args() {
     local url=$1
+    local connection
+    connection=$(launch_selection connection)
     if [ -n "${url}" ]; then
         printf '%s\n' --url "${url}"
+    elif [[ ${connection} =~ ^https?:// ]]; then
+        printf '%s\n' --url "${connection}"
+    elif [ -n "${connection}" ]; then
+        printf '%s\n' --direct "${connection}"
+        password_args
     elif [ -n "${RYLL_KASM_DIRECT:-}" ]; then
         printf '%s\n' --direct "${RYLL_KASM_DIRECT}"
-        if [ -n "${RYLL_KASM_PASSWORD_FILE:-}" ]; then
-            printf '%s\n' --password-file "${RYLL_KASM_PASSWORD_FILE}"
-        fi
+        password_args
     else
         return
     fi
@@ -64,12 +102,24 @@ kasm_exec() {
 
 kasm_startup() {
     local url=${KASM_URL:-${LAUNCH_URL:-}}
+
+    # With no other source configured, the launch form is the only
+    # way to get a connection; give Kasm a moment to deliver it.
+    if [ -z "${url}" ] && [ -z "${RYLL_KASM_DIRECT:-}" ]; then
+        local waited=0
+        while [ ! -r "${LAUNCH_SELECTIONS}" ] && [ ${waited} -lt ${LAUNCH_SELECTIONS_WAIT} ]; do
+            sleep 1
+            waited=$((waited + 1))
+        done
+    fi
+
     local -a args
     mapfile -t args < <(ryll_args "${url}")
     if [ ${#args[@]} -eq 0 ]; then
-        echo "ryll: no connection configured. Set RYLL_KASM_DIRECT in the" \
-            "workspace's Docker Run Config Override, or launch it with a" \
-            "kasm_url pointing at a .vv file." >&2
+        echo "ryll: no connection configured. Give the workspace a launch" \
+            "form (see docs/kasm-workspace.md), set RYLL_KASM_DIRECT in its" \
+            "Docker Run Config Override, or launch it with a kasm_url" \
+            "pointing at a .vv file." >&2
         exit 1
     fi
 

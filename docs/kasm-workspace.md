@@ -81,12 +81,34 @@ command line from these, in order:
 | Source | Passed to ryll as | Use |
 |--------|-------------------|-----|
 | A URL Kasm hands the session (`KASM_URL` or `LAUNCH_URL` at startup, or `--url` on an exec into a running session) | `--url <URL>` | A link to a `.vv` file, so one workspace can open any console |
+| The launch form's `connection` answer | `--url <URL>` for an `http(s)://` link, otherwise `--direct <HOST:PORT>` | Asking the user which server to open each time the workspace starts |
 | `RYLL_KASM_DIRECT` | `--direct <HOST:PORT>` | A workspace pinned to one SPICE server |
-| `RYLL_KASM_PASSWORD_FILE` | `--password-file <PATH>` | With `RYLL_KASM_DIRECT`, a file inside the container holding the server's password |
+| The launch form's `password` answer | `--password-file <PATH>`, via a private file in the container | With a `--direct` connection, the server's password, asked for at launch |
+| `RYLL_KASM_PASSWORD_FILE` | `--password-file <PATH>` | With a `--direct` connection and no password typed into the form, a file inside the container holding the server's password |
 | `APP_ARGS` | appended as-is | Extra ryll flags, for example `--no-h264` or `-v` |
 
-With neither a URL nor `RYLL_KASM_DIRECT`, the script logs an error
-and starts nothing.
+With no URL, no launch form answer and no `RYLL_KASM_DIRECT`, the
+script logs an error and starts nothing. When the launch form is the
+only possible source, the script waits up to thirty seconds for Kasm
+to deliver its answers first.
+
+### Asking at launch
+
+Kasm can show a form before a workspace starts and hand the answers to
+the container. Paste the contents of `tools/kasm/launch_config.json`
+into the workspace's *Launch Config* field to ask for:
+
+- **SPICE server**: `HOST:PORT`, `HOST:PORT:TLS_PORT`, or an
+  `http(s)://` link to a `.vv` file. Kasm offers to remember it.
+- **Password**: optional and masked, for a `HOST:PORT` server. It is
+  never remembered: Kasm keeps remembered answers in the browser's
+  local storage, which is no place for a password. Leave it empty to
+  fall back to `RYLL_KASM_PASSWORD_FILE`, so a workspace whose server
+  password is mounted (as below) never needs it typed.
+
+Kasm writes the answers as a JSON object to `/tmp/launch_selections.json`
+in the container, the destination `launch_config.json` names. If you
+change that destination, set `RYLL_KASM_LAUNCH_SELECTIONS` to match.
 
 For example, a workspace pinned to a SPICE server that listens on the
 Kasm docker bridge at `172.18.0.1:5900`:
