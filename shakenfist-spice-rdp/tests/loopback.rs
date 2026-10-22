@@ -1,14 +1,20 @@
 //! Drives [`serve`] with IronRDP's own client over loopback, so the
-//! RDP handshake, the display stream, keyboard input and the server's
-//! stop are proven in CI without a desktop RDP client.
+//! RDP handshake, the display stream, the cursor shape, the resize
+//! request, keyboard input and the server's stop are proven in CI
+//! without a desktop RDP client.
 //!
-//! The server runs in TLS mode, as `ryll --rdp` does by default. Its
-//! session slot is empty until the credential check fills it, so the
-//! client is first told the fallback desktop size and is then resized
-//! to the surface's size by a deactivation and reactivation, which is
-//! the sequence every TLS client goes through. The no-security mode
-//! cannot be used here: IronRDP's client connector refuses standard
-//! RDP security outright.
+//! The server runs in TLS mode, as `ryll --rdp` does by default. The
+//! client is first told the desktop size it asked for, and the guest
+//! is asked for that size. The test session has no guest to answer,
+//! so its surface keeps its own size, and the client is resized to it
+//! by a deactivation and reactivation, which is the sequence every
+//! client whose size differs from the guest's goes through. The
+//! no-security mode cannot be used here: IronRDP's client connector
+//! refuses standard RDP security outright.
+//!
+//! The client takes the server's pointer updates and decodes them
+//! itself, as a desktop client does, so the cursor shape it ends up
+//! with is compared with the one the guest sent, pixel for pixel.
 //!
 //! The client advertises RemoteFX, as FreeRDP does, so the server
 //! encodes with it. RemoteFX is lossy, so pixels are compared with a
@@ -39,13 +45,25 @@ use shakenfist_spice_rdp::{
     serve, Credentials, CursorState, RdpConfig, RdpSecurity, SessionHandles, SingleSession,
     TlsIdentity,
 };
-use shakenfist_spice_renderer::{InputEvent, SurfaceMirror};
+use shakenfist_spice_renderer::{CursorImage, DisplaySize, InputEvent, SurfaceMirror};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch};
 
 /// The test surface's size.
 const WIDTH: u16 = 640;
 const HEIGHT: u16 = 480;
+
+/// The desktop size the client asks for: not the surface's, so the
+/// test sees the client told it, the guest asked for it, and the
+/// client then resized to the surface. Multiples of 8, so the request
+/// to the guest is not changed by aligning it.
+const CLIENT_WIDTH: u16 = 800;
+const CLIENT_HEIGHT: u16 = 600;
+
+/// The cursor shape the guest has sent: 4 pixels square, with its hot
+/// spot off the diagonal so that swapped coordinates show.
+const CURSOR_SIDE: u8 = 4;
+const CURSOR_HOT_SPOT: (u16, u16) = (1, 2);
 
 /// The block drawn on the mirror once the client has the whole
 /// surface: 16 pixels square, with its top-left corner here.
@@ -122,9 +140,43 @@ fn block_pixels() -> Vec<u8> {
     [r, g, b, 0xFF].repeat(usize::from(BLOCK_SIDE) * usize::from(BLOCK_SIDE))
 }
 
-/// A SPICE session whose mirror holds the test surface, and the
-/// receiving end of its input queue.
-fn session() -> (Arc<SessionHandles>, mpsc::Receiver<InputEvent>) {
+/// Straight-alpha RGBA pixels for the cursor shape, top row first.
+/// Red follows the column and green the row, blue falls as red
+/// rises, and alpha differs at every pixel, so a pointer flipped or
+/// mirrored, with red and blue swapped, or with its alpha
+/// premultiplied into the colour all decode to other values.
+fn cursor_pixels() -> Vec<u8> {
+    let mut pixels = Vec::new();
+    for y in 0..CURSOR_SIDE {
+        for x in 0..CURSOR_SIDE {
+            let alpha = 0x30 + 0x0C * (y * CURSOR_SIDE + x);
+            pixels.extend_from_slice(&[0x10 + 0x30 * x, 0x20 + 0x30 * y, 0xF0 - 0x40 * x, alpha]);
+        }
+    }
+    pixels
+}
+
+fn cursor_image() -> CursorImage {
+    CursorImage {
+        width: u16::from(CURSOR_SIDE),
+        height: u16::from(CURSOR_SIDE),
+        hot_spot_x: CURSOR_HOT_SPOT.0,
+        hot_spot_y: CURSOR_HOT_SPOT.1,
+        pixels: cursor_pixels(),
+    }
+}
+
+/// A SPICE session whose mirror holds the test surface, with the
+/// test's ends of its channels.
+struct Session {
+    handles: Arc<SessionHandles>,
+    input_rx: mpsc::Receiver<InputEvent>,
+    resize_rx: mpsc::Receiver<DisplaySize>,
+    /// Stands in for the session's cursor relay.
+    cursor_tx: watch::Sender<CursorState>,
+}
+
+fn session() -> Session {
     let mirror = SurfaceMirror::with_test_surface(
         0,
         0,
@@ -134,8 +186,8 @@ fn session() -> (Arc<SessionHandles>, mpsc::Receiver<InputEvent>) {
     );
     let (input_tx, input_rx) = mpsc::channel(16);
     let (_mouse_mode_tx, mouse_mode) = watch::channel(MOUSE_MODE_SERVER);
-    let (_, cursor) = watch::channel(CursorState::default());
-    let (resize_tx, _resize_rx) = mpsc::channel(1);
+    let (cursor_tx, cursor) = watch::channel(CursorState::default());
+    let (resize_tx, resize_rx) = mpsc::channel(1);
     let handles = Arc::new(SessionHandles {
         surface_mirror: Arc::new(tokio::sync::Mutex::new(mirror)),
         input_tx,
@@ -144,7 +196,12 @@ fn session() -> (Arc<SessionHandles>, mpsc::Receiver<InputEvent>) {
         cursor,
         label: "loopback".to_string(),
     });
-    (handles, input_rx)
+    Session {
+        handles,
+        input_rx,
+        resize_rx,
+        cursor_tx,
+    }
 }
 
 fn server_credentials() -> Credentials {
@@ -167,15 +224,15 @@ fn server_config(handles: Arc<SessionHandles>) -> RdpConfig {
     }
 }
 
-/// A TLS-only client asking for a desktop of a size the server will
-/// not use, so the test sees the server's size win. It presents a
-/// domain, as mstsc does, which the server must ignore. It advertises
-/// IronRDP's default codecs, which is RemoteFX alone.
+/// A TLS-only client asking for a desktop of a size other than the
+/// surface's. It presents a domain, as mstsc does, which the server
+/// must ignore. It advertises IronRDP's default codecs, which is
+/// RemoteFX alone.
 fn client_config() -> ironrdp_connector::Config {
     ironrdp_connector::Config {
         desktop_size: ClientDesktopSize {
-            width: 800,
-            height: 600,
+            width: CLIENT_WIDTH,
+            height: CLIENT_HEIGHT,
         },
         desktop_scale_factor: 0,
         enable_tls: true,
@@ -206,9 +263,10 @@ fn client_config() -> ironrdp_connector::Config {
         license_cache: None,
         timezone_info: Default::default(),
         compression_type: None,
-        // The client ignores the server's pointer updates, so the image
-        // holds only what the server drew.
-        enable_server_pointer: false,
+        // The client takes the server's pointer updates and hands them
+        // back decoded rather than drawing them into the image, so the
+        // image holds only what the server drew.
+        enable_server_pointer: true,
         pointer_software_rendering: false,
         multitransport_flags: None,
     }
@@ -226,11 +284,27 @@ impl NetworkClient for NoNetwork {
     }
 }
 
+/// A pointer shape as the client decoded it.
+#[derive(Debug)]
+struct Pointer {
+    width: u16,
+    height: u16,
+    hot_spot: (u16, u16),
+    /// Straight-alpha RGBA, top row first.
+    pixels: Vec<u8>,
+}
+
 /// What the client saw the server do.
 #[derive(Debug)]
 enum Event {
     /// Pixels inside this rectangle of the client's image changed.
     Graphics(InclusiveRectangle),
+    /// The server sent a pointer shape.
+    Pointer(Pointer),
+    /// The server told the client to show its own default pointer.
+    DefaultPointer,
+    /// The server hid the pointer.
+    HiddenPointer,
     /// The server deactivated the connection, as it does to resize it.
     Deactivated,
     /// The server ended the session or closed the connection.
@@ -340,6 +414,20 @@ impl Client {
                     {
                         self.pending.push_back(Event::Graphics(rect));
                     }
+                    ActiveStageOutput::PointerBitmap(pointer) => {
+                        self.pending.push_back(Event::Pointer(Pointer {
+                            width: pointer.width,
+                            height: pointer.height,
+                            hot_spot: (pointer.hotspot_x, pointer.hotspot_y),
+                            pixels: pointer.bitmap_data.clone(),
+                        }));
+                    }
+                    ActiveStageOutput::PointerDefault => {
+                        self.pending.push_back(Event::DefaultPointer);
+                    }
+                    ActiveStageOutput::PointerHidden => {
+                        self.pending.push_back(Event::HiddenPointer);
+                    }
                     ActiveStageOutput::DeactivateAll => self.pending.push_back(Event::Deactivated),
                     ActiveStageOutput::Terminate(_) => self.pending.push_back(Event::Closed),
                     _ => {}
@@ -353,6 +441,14 @@ impl Client {
         match self.next_event().await {
             Event::Graphics(rect) => rect,
             other => panic!("expected a graphics update, got {other:?}"),
+        }
+    }
+
+    /// The next pointer shape, failing the test on anything else.
+    async fn next_pointer(&mut self) -> Pointer {
+        match self.next_event().await {
+            Event::Pointer(pointer) => pointer,
+            other => panic!("expected a pointer shape, got {other:?}"),
         }
     }
 
@@ -434,6 +530,18 @@ impl Client {
     }
 }
 
+/// Fail the test unless `pointer` is the guest's cursor shape, decoded
+/// to the same pixels.
+fn assert_cursor(pointer: &Pointer, what: &str) {
+    assert_eq!(
+        (pointer.width, pointer.height),
+        (u16::from(CURSOR_SIDE), u16::from(CURSOR_SIDE)),
+        "{what}: size"
+    );
+    assert_eq!(pointer.hot_spot, CURSOR_HOT_SPOT, "{what}: hot spot");
+    assert_eq!(pointer.pixels, cursor_pixels(), "{what}: pixels");
+}
+
 /// The rectangle of the whole desktop, inclusive of its last pixel.
 fn whole_desktop() -> InclusiveRectangle {
     InclusiveRectangle {
@@ -447,23 +555,43 @@ fn whole_desktop() -> InclusiveRectangle {
 #[tokio::test]
 async fn ironrdp_client_is_served_the_session_and_its_input_arrives() {
     install_crypto_provider();
-    let (handles, mut input_rx) = session();
+    let Session {
+        handles,
+        mut input_rx,
+        mut resize_rx,
+        cursor_tx,
+    } = session();
+    // The guest has sent a cursor shape before the client connects.
+    cursor_tx.send_modify(|state| state.shape = Some(Arc::new(cursor_image())));
     let server = serve(server_config(Arc::clone(&handles))).expect("serve");
 
-    // The connection activates. In TLS mode the slot is empty when the
-    // server first asks the display for its size, so the client is told
-    // the fallback size and its first update is a resize to the
-    // surface's size, which arrives as a deactivation.
+    // The connection activates, and the client is told the desktop
+    // size it asked for, which the guest is asked for too.
     let mut client = step(
         "the connection sequence",
         Client::connect(server.local_addr()),
     )
     .await;
-    assert_ne!(
+    assert_eq!(
         (client.desktop_size.width, client.desktop_size.height),
-        (WIDTH, HEIGHT),
-        "a TLS client is told the fallback size before it authenticates"
+        (CLIENT_WIDTH, CLIENT_HEIGHT),
+        "the client is told the desktop size it asked for"
     );
+    let requested = step("the request for the client's size", resize_rx.recv()).await;
+    assert_eq!(
+        requested,
+        Some(DisplaySize::Requested(
+            u32::from(CLIENT_WIDTH),
+            u32::from(CLIENT_HEIGHT)
+        ))
+    );
+
+    // The stream sends the cursor shape first, and the client decodes
+    // it to the guest's pixels. The surface is not the size the client
+    // was told, so the next update is a resize to the surface's size,
+    // which arrives as a deactivation.
+    let pointer = step("the cursor shape", client.next_pointer()).await;
+    assert_cursor(&pointer, "the first cursor shape");
     let event = step("the resize to the surface", client.next_event()).await;
     assert!(
         matches!(event, Event::Deactivated),
@@ -471,6 +599,20 @@ async fn ironrdp_client_is_served_the_session_and_its_input_arrives() {
     );
     let size = step("the reactivation", client.reactivate()).await;
     assert_eq!((size.width, size.height), (WIDTH, HEIGHT));
+
+    // A reactivated client starts from its default pointer, so the new
+    // stream sends the cursor shape again before anything else.
+    let pointer = step("the cursor shape again", client.next_pointer()).await;
+    assert_cursor(&pointer, "the cursor shape after the reactivation");
+    // The reactivation's capability exchange echoed the surface's size
+    // back to the server, which must not be taken for a new request
+    // from the client. The server handles that exchange before it
+    // builds the new stream, so by the time the stream has sent
+    // anything, any request it made would be queued.
+    assert!(
+        resize_rx.try_recv().is_err(),
+        "the reactivation asked the guest for another size"
+    );
 
     // The first drawing is the whole surface.
     let seed = step("the whole surface", client.next_graphics()).await;
