@@ -754,6 +754,14 @@
     {
       "path": "shakenfist-spice-protocol/README.md",
       "author": "mikal"
+    },
+    {
+      "path": "docs/channel-diagnostics-audit.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/ci.md",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
