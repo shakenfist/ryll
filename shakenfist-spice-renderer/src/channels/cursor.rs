@@ -523,7 +523,82 @@ impl CursorChannel {
     }
 }
 
+/// The cursor formats ryll decodes. COLOR8 is not one of them, as it is
+/// not one of spice-gtk's.
+#[derive(Clone, Copy)]
+enum CursorFormat {
+    /// 32-bit BGRA per pixel, straight alpha.
+    Alpha,
+    /// An AND plane then an XOR plane, one bit per pixel, rows padded to
+    /// a whole byte.
+    Mono,
+    /// Four-bit palette indices, then a 16-entry BGRx palette, then the
+    /// AND mask.
+    Color4,
+    /// 15-bit xRGB per pixel, little-endian, then the AND mask.
+    Color16,
+    /// 24-bit BGR per pixel. spice-gtk has no decoder for it.
+    Color24,
+    /// 32-bit BGRx per pixel, then the AND mask.
+    Color32,
+}
+
+/// Bytes in a COLOR4 cursor's palette: 16 entries of 32 bits.
+const COLOR4_PALETTE_LEN: usize = 16 * 4;
+
+impl CursorFormat {
+    fn from_type(cursor_type: u8) -> Option<Self> {
+        match cursor_type {
+            cursor_type::ALPHA => Some(Self::Alpha),
+            cursor_type::MONO => Some(Self::Mono),
+            cursor_type::COLOR4 => Some(Self::Color4),
+            cursor_type::COLOR16 => Some(Self::Color16),
+            cursor_type::COLOR24 => Some(Self::Color24),
+            cursor_type::COLOR32 => Some(Self::Color32),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Alpha => "alpha",
+            Self::Mono => "mono",
+            Self::Color4 => "color4",
+            Self::Color16 => "color16",
+            Self::Color24 => "color24",
+            Self::Color32 => "color32",
+        }
+    }
+
+    /// The bytes of cursor data a `width` x `height` image needs in this
+    /// format, or None if the sum overflows.
+    ///
+    /// The AND mask of the colour formats has no per-row padding: spice-gtk
+    /// indexes it by pixel number (`get_pix_mask`), so it is
+    /// `ceil(width * height / 8)` bytes. COLOR4's indices are sized with
+    /// rows rounded up to a whole byte, as spice-gtk sizes them, although
+    /// it too reads them by pixel number.
+    fn data_len(self, width: usize, height: usize) -> Option<usize> {
+        let pixels = width.checked_mul(height)?;
+        let mask = pixels.div_ceil(8);
+        match self {
+            Self::Alpha => pixels.checked_mul(4),
+            Self::Mono => width.div_ceil(8).checked_mul(height)?.checked_mul(2),
+            Self::Color4 => width
+                .div_ceil(2)
+                .checked_mul(height)?
+                .checked_add(COLOR4_PALETTE_LEN)?
+                .checked_add(mask),
+            Self::Color16 => pixels.checked_mul(2)?.checked_add(mask),
+            Self::Color24 => pixels.checked_mul(3),
+            Self::Color32 => pixels.checked_mul(4)?.checked_add(mask),
+        }
+    }
+}
+
 /// Decode cursor pixel data based on cursor_type, returning RGBA pixels.
+/// Mono and the masked colour formats follow spice-gtk's `set_cursor`
+/// pixel for pixel, so a cursor looks the same as in remote-viewer.
 fn decode_cursor_pixels(header: &CursorHeader, pixel_data: &[u8]) -> Option<CursorImage> {
     let w = header.width as usize;
     let h = header.height as usize;
@@ -532,35 +607,27 @@ fn decode_cursor_pixels(header: &CursorHeader, pixel_data: &[u8]) -> Option<Curs
         return None;
     }
 
-    // Bytes per source pixel, whether the fourth byte is alpha, and
-    // the format's name for the warnings below.
-    let (src_bpp, has_alpha, format_name) = match header.cursor_type {
-        // Alpha: 32-bit ARGB per pixel
-        cursor_type::ALPHA => (4, true, "alpha"),
-        // Color24: 24-bit BGR per pixel
-        cursor_type::COLOR24 => (3, false, "color24"),
-        // Color32: 32-bit xRGB per pixel (x is padding, not alpha)
-        cursor_type::COLOR32 => (4, false, "color32"),
-        other => {
-            warn!("cursor: unsupported cursor type {} ({}x{})", other, w, h);
-            return None;
-        }
+    let Some(format) = CursorFormat::from_type(header.cursor_type) else {
+        // COLOR8, and types spice.proto does not define.
+        warn!(
+            "cursor: unsupported cursor type {} ({}x{})",
+            header.cursor_type, w, h
+        );
+        return None;
     };
 
     // The dimensions are server-chosen u16s, so size the buffer with
     // the shared limit, and refuse a short message before allocating
     // anything: a 65535x65535 header with no pixel data must not cost
     // 16 GiB.
-    let Some(rgba_size) = limits::rgba_len(w, h) else {
+    let (Some(rgba_size), Some(needed)) = (limits::rgba_len(w, h), format.data_len(w, h)) else {
         warn!("cursor: dimensions refused: {}x{}", w, h);
         return None;
     };
-    let pixel_count = rgba_size / 4;
-    let needed = pixel_count * src_bpp;
     if pixel_data.len() < needed {
         warn!(
             "cursor: {} data too short (have {}, need {})",
-            format_name,
+            format.name(),
             pixel_data.len(),
             needed
         );
@@ -569,12 +636,73 @@ fn decode_cursor_pixels(header: &CursorHeader, pixel_data: &[u8]) -> Option<Curs
 
     let mut rgba = vec![0u8; rgba_size];
     let (dst_pixels, _) = rgba.as_chunks_mut::<4>();
-    for (src, dst) in pixel_data.chunks_exact(src_bpp).zip(dst_pixels) {
-        // BGR(A/X) -> RGBA
-        dst[0] = src[2]; // R
-        dst[1] = src[1]; // G
-        dst[2] = src[0]; // B
-        dst[3] = if has_alpha { src[3] } else { 255 }; // A
+    let pixel_count = dst_pixels.len();
+    match format {
+        CursorFormat::Alpha | CursorFormat::Color24 => {
+            let (src_bpp, has_alpha) = match format {
+                CursorFormat::Alpha => (4, true),
+                _ => (3, false),
+            };
+            for (src, dst) in pixel_data.chunks_exact(src_bpp).zip(dst_pixels) {
+                // BGR(A) -> RGBA
+                dst[0] = src[2]; // R
+                dst[1] = src[1]; // G
+                dst[2] = src[0]; // B
+                dst[3] = if has_alpha { src[3] } else { 255 }; // A
+            }
+        }
+        CursorFormat::Mono => mono_edge_highlight(w, h, pixel_data, dst_pixels),
+        CursorFormat::Color4 => {
+            let (indices, rest) = pixel_data.split_at(w.div_ceil(2) * h);
+            let (palette, mask) = rest.split_at(COLOR4_PALETTE_LEN);
+            let (palette, _) = palette.as_chunks::<4>();
+            for (i, dst) in dst_pixels.iter_mut().enumerate() {
+                // Two pixels a byte, the first in the high nibble.
+                let byte = indices[i / 2];
+                let index = if i % 2 == 0 { byte >> 4 } else { byte & 0x0f };
+                let entry = palette[index as usize];
+                *dst = masked_pixel(
+                    [entry[2], entry[1], entry[0]],
+                    entry == [0xff, 0xff, 0xff, 0x00],
+                    entry[3],
+                    mask_bit(mask, i),
+                    i,
+                    w,
+                );
+            }
+        }
+        CursorFormat::Color16 => {
+            let (pixels, mask) = pixel_data.split_at(pixel_count * 2);
+            let (pixels, _) = pixels.as_chunks::<2>();
+            for (i, (src, dst)) in pixels.iter().zip(dst_pixels).enumerate() {
+                // Five bits a channel, widened by shifting left as
+                // spice-gtk does; the top bit is unused.
+                let pixel = u16::from_le_bytes(*src);
+                let channel = |shift: u16| (((pixel >> shift) & 0x1f) as u8) << 3;
+                *dst = masked_pixel(
+                    [channel(10), channel(5), channel(0)],
+                    pixel == 0x7fff,
+                    0,
+                    mask_bit(mask, i),
+                    i,
+                    w,
+                );
+            }
+        }
+        CursorFormat::Color32 => {
+            let (pixels, mask) = pixel_data.split_at(pixel_count * 4);
+            let (pixels, _) = pixels.as_chunks::<4>();
+            for (i, (src, dst)) in pixels.iter().zip(dst_pixels).enumerate() {
+                *dst = masked_pixel(
+                    [src[2], src[1], src[0]],
+                    *src == [0xff, 0xff, 0xff, 0x00],
+                    src[3],
+                    mask_bit(mask, i),
+                    i,
+                    w,
+                );
+            }
+        }
     }
 
     Some(CursorImage {
@@ -584,6 +712,79 @@ fn decode_cursor_pixels(header: &CursorHeader, pixel_data: &[u8]) -> Option<Curs
         hot_spot_y: header.hot_spot_y,
         pixels: rgba,
     })
+}
+
+/// Whether pixel `index`'s bit is set in a colour format's AND mask,
+/// which is indexed by pixel number with no per-row padding (spice-gtk's
+/// `get_pix_mask`).
+fn mask_bit(mask: &[u8], index: usize) -> bool {
+    mask[index / 8] & (0x80 >> (index % 8)) != 0
+}
+
+/// One RGBA pixel of a colour format with an AND mask, resolved as
+/// spice-gtk's `set_cursor` resolves it. A clear mask bit makes the
+/// colour opaque. A set one over white asks for the screen to be
+/// inverted, which RGBA cannot express, so it becomes spice-gtk's
+/// translucent grey checker (`get_pix_hack`). A set one over any other
+/// colour keeps the colour with `masked_alpha`: zero for COLOR16, and
+/// for COLOR32 and COLOR4 the colour's fourth byte, which is zero in
+/// practice.
+fn masked_pixel(
+    rgb: [u8; 3],
+    white: bool,
+    masked_alpha: u8,
+    masked: bool,
+    index: usize,
+    width: usize,
+) -> [u8; 4] {
+    let [r, g, b] = rgb;
+    match (masked, white) {
+        (false, _) => [r, g, b, 0xff],
+        (true, true) if ((index % width) ^ (index / width)) & 1 == 1 => [0x30, 0x30, 0x30, 0xc0],
+        (true, true) => [0x50, 0x50, 0x50, 0x30],
+        (true, false) => [r, g, b, masked_alpha],
+    }
+}
+
+/// Decode a mono cursor into `dst`, porting spice-gtk's
+/// `spice_mono_edge_highlight`. A clear AND bit draws the XOR bit as
+/// white or black; a set one leaves the screen alone (transparent) where
+/// the XOR bit is clear and inverts it where it is set. RGBA cannot
+/// invert, so an inverting pixel is drawn white, and when the AND plane
+/// is entirely ones (padding bits included) the clear pixels bordering a
+/// set XOR pixel are drawn black, so that a text cursor stays visible
+/// over white.
+fn mono_edge_highlight(width: usize, height: usize, data: &[u8], dst: &mut [[u8; 4]]) {
+    const BLACK: [u8; 4] = [0x00, 0x00, 0x00, 0xff];
+    const WHITE: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
+    const TRANSPARENT: [u8; 4] = [0x00, 0x00, 0x00, 0x00];
+
+    let stride = width.div_ceil(8);
+    let (and, xor) = data.split_at(stride * height);
+    let and_ones = and.iter().all(|&byte| byte == 0xff);
+    let bit = |plane: &[u8], x: usize, y: usize| plane[stride * y + x / 8] & (0x80 >> (x % 8)) != 0;
+    // A clear XOR pixel with a set one among its eight neighbours. The
+    // image's outermost pixels are never edges.
+    let is_edge = |x: usize, y: usize| {
+        if x == 0 || x == width - 1 || y == 0 || y == height - 1 {
+            return false;
+        }
+        !bit(xor, x, y) && (y - 1..=y + 1).any(|ny| (x - 1..=x + 1).any(|nx| bit(xor, nx, ny)))
+    };
+
+    for y in 0..height {
+        for x in 0..width {
+            dst[width * y + x] = if and_ones && is_edge(x, y) {
+                BLACK
+            } else {
+                match (bit(and, x, y), bit(xor, x, y)) {
+                    (_, true) => WHITE,
+                    (true, false) => TRANSPARENT,
+                    (false, false) => BLACK,
+                }
+            };
+        }
+    }
 }
 
 #[cfg(test)]
@@ -660,7 +861,10 @@ mod tests {
 
     #[test]
     fn test_color32_cursor_xrgb_to_rgba() {
-        let pixels: Vec<u8> = vec![0xAA, 0xBB, 0xCC, 0x00]; // B=AA, G=BB, R=CC, x=00
+        let pixels: Vec<u8> = vec![
+            0xAA, 0xBB, 0xCC, 0x00, // B=AA, G=BB, R=CC, x=00
+            0x00, // AND mask: clear, so opaque
+        ];
         let cursor = wire_cursor(cursor_type::COLOR32, 1, 1, 0, &pixels);
         let result = decode(&cursor);
         assert!(result.is_some());
@@ -685,18 +889,39 @@ mod tests {
 
     #[test]
     fn test_short_cursor_data_returns_none() {
-        // One byte short of a 2x2 cursor, for each format.
-        for (cursor_type, bpp) in [
-            (cursor_type::ALPHA, 4usize),
-            (cursor_type::COLOR24, 3),
-            (cursor_type::COLOR32, 4),
+        // Each format at exactly the length it needs decodes, and one
+        // byte short is refused. Pixels, then COLOR4's 64-byte palette,
+        // then the colour formats' AND mask of one bit per pixel without
+        // row padding; mono's two planes are padded to a byte per row.
+        for (cursor_type, width, height, needed) in [
+            (cursor_type::ALPHA, 2, 2, 16),
+            (cursor_type::COLOR24, 2, 2, 12),
+            (cursor_type::COLOR32, 2, 2, 16 + 1),
+            (cursor_type::COLOR32, 5, 3, 60 + 2),
+            (cursor_type::COLOR16, 2, 2, 8 + 1),
+            (cursor_type::COLOR16, 5, 3, 30 + 2),
+            (cursor_type::COLOR4, 2, 2, 2 + 64 + 1),
+            (cursor_type::COLOR4, 5, 3, 9 + 64 + 2),
+            (cursor_type::MONO, 2, 2, 2 * 2),
+            (cursor_type::MONO, 9, 3, 2 * 6),
         ] {
-            let pixels = vec![0u8; 2 * 2 * bpp - 1];
-            let cursor = wire_cursor(cursor_type, 2, 2, 0, &pixels);
+            let pixels = vec![0u8; needed];
+            let cursor = wire_cursor(cursor_type, width, height, 0, &pixels);
+            assert!(
+                decode(&cursor).is_some(),
+                "cursor type {} {}x{} with {} bytes must decode",
+                cursor_type,
+                width,
+                height,
+                needed
+            );
+            let cursor = wire_cursor(cursor_type, width, height, 0, &pixels[..needed - 1]);
             assert!(
                 decode(&cursor).is_none(),
-                "cursor type {} with short data must be refused",
-                cursor_type
+                "cursor type {} {}x{} with short data must be refused",
+                cursor_type,
+                width,
+                height
             );
         }
     }
@@ -708,6 +933,9 @@ mod tests {
         // noticed the data was short.
         for cursor_type in [
             cursor_type::ALPHA,
+            cursor_type::MONO,
+            cursor_type::COLOR4,
+            cursor_type::COLOR16,
             cursor_type::COLOR24,
             cursor_type::COLOR32,
         ] {
@@ -748,20 +976,296 @@ mod tests {
     }
 
     #[test]
-    fn test_unsupported_cursor_types_return_none() {
-        // Only ALPHA, COLOR24 and COLOR32 decode; the rest are refused
-        // even with ample data.
-        for cursor_type in [
-            cursor_type::MONO,
-            cursor_type::COLOR4,
-            cursor_type::COLOR8,
-            cursor_type::COLOR16,
-            7,
-            0xff,
-        ] {
-            let cursor = wire_cursor(cursor_type, 2, 2, 0, &[0u8; 64]);
+    fn test_color8_and_unknown_cursor_types_return_none() {
+        // COLOR8 and types spice.proto does not define are refused even
+        // with ample data.
+        for cursor_type in [cursor_type::COLOR8, 7, 0xff] {
+            let cursor = wire_cursor(cursor_type, 2, 2, 0, &[0u8; 2048]);
             assert!(decode(&cursor).is_none(), "cursor type {}", cursor_type);
         }
+    }
+
+    // The masked colour formats. Each test builds a `width`x2 image in
+    // which pixel `width + 1` is masked over a colour (transparent), and
+    // pixels 1 and `width + 3` are masked over white (inverting, one of
+    // each checker colour). Two of the three sit on the second row, so a
+    // mask read with per-row padding would misplace them unless the
+    // width is a multiple of 8; each test runs with widths 5 and 8.
+
+    const MASKED_TRANSPARENT: usize = 1;
+    const MASKED_INVERTING: [usize; 2] = [1, 3];
+
+    /// The masked pixels of a `width`x2 test image: the transparent one
+    /// and the two inverting ones.
+    fn masked_pixels(width: usize) -> (usize, [usize; 2]) {
+        (
+            width + MASKED_TRANSPARENT,
+            [MASKED_INVERTING[0], width + MASKED_INVERTING[1]],
+        )
+    }
+
+    /// An AND mask for `count` pixels with the given ones set, packed
+    /// eight pixels a byte, most significant bit first, with no row
+    /// padding.
+    fn and_mask(count: usize, set: &[usize]) -> Vec<u8> {
+        let mut mask = vec![0u8; count.div_ceil(8)];
+        for &i in set {
+            mask[i / 8] |= 0x80 >> (i % 8);
+        }
+        mask
+    }
+
+    /// The RGBA a masked test image decodes to, given each pixel's
+    /// colour. The checker colours are spice-gtk's, by the parity of
+    /// x ^ y: (1, 0) is odd and (3, 1) even.
+    fn expected_masked(width: usize, colour: impl Fn(usize) -> [u8; 3]) -> Vec<u8> {
+        let (transparent, inverting) = masked_pixels(width);
+        (0..width * 2)
+            .flat_map(|i| {
+                let [r, g, b] = colour(i);
+                if i == inverting[0] {
+                    [0x30, 0x30, 0x30, 0xc0]
+                } else if i == inverting[1] {
+                    [0x50, 0x50, 0x50, 0x30]
+                } else if i == transparent {
+                    [r, g, b, 0x00]
+                } else {
+                    [r, g, b, 0xff]
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_color32_cursor_mask() {
+        for width in [5usize, 8] {
+            let (transparent, inverting) = masked_pixels(width);
+            let colour = |i: usize| [0x10 + i as u8, 0x40 + i as u8, 0xc0 - i as u8];
+            let mut data = Vec::new();
+            for i in 0..width * 2 {
+                let [r, g, b] = if inverting.contains(&i) {
+                    [0xff; 3]
+                } else {
+                    colour(i)
+                };
+                data.extend_from_slice(&[b, g, r, 0x00]);
+            }
+            data.extend(and_mask(
+                width * 2,
+                &[transparent, inverting[0], inverting[1]],
+            ));
+
+            let cursor = wire_cursor(cursor_type::COLOR32, width as u16, 2, 0, &data);
+            let img = decode(&cursor).expect("a masked COLOR32 cursor decodes");
+            assert_eq!(
+                img.pixels,
+                expected_masked(width, colour),
+                "width {}",
+                width
+            );
+        }
+    }
+
+    #[test]
+    fn test_color32_cursor_unmasked_white_is_opaque() {
+        // White inverts only where the mask is set.
+        let data = [0xff, 0xff, 0xff, 0x00, 0x00];
+        let cursor = wire_cursor(cursor_type::COLOR32, 1, 1, 0, &data);
+        assert_eq!(decode(&cursor).unwrap().pixels, [0xff, 0xff, 0xff, 0xff]);
+    }
+
+    #[test]
+    fn test_color16_cursor_mask() {
+        for width in [5usize, 8] {
+            let (transparent, inverting) = masked_pixels(width);
+            // Five-bit channels, all different, widened by << 3.
+            let channels = |i: usize| [i as u16 + 1, i as u16 + 12, 30 - i as u16];
+            let colour = |i: usize| channels(i).map(|c| (c << 3) as u8);
+            let mut data = Vec::new();
+            for i in 0..width * 2 {
+                let pixel = if inverting.contains(&i) {
+                    0x7fff
+                } else {
+                    let [r, g, b] = channels(i);
+                    (r << 10) | (g << 5) | b
+                };
+                data.extend_from_slice(&u16::to_le_bytes(pixel));
+            }
+            data.extend(and_mask(
+                width * 2,
+                &[transparent, inverting[0], inverting[1]],
+            ));
+
+            let cursor = wire_cursor(cursor_type::COLOR16, width as u16, 2, 0, &data);
+            let img = decode(&cursor).expect("a COLOR16 cursor decodes");
+            assert_eq!(
+                img.pixels,
+                expected_masked(width, colour),
+                "width {}",
+                width
+            );
+        }
+    }
+
+    #[test]
+    fn test_color16_cursor_channel_order() {
+        // Red, green and blue at full intensity, then white with the
+        // unused top bit set: masked, it is not the 0x7fff that inverts,
+        // so it is transparent white.
+        let mut data = Vec::new();
+        for pixel in [0x7c00u16, 0x03e0, 0x001f, 0xffff] {
+            data.extend_from_slice(&pixel.to_le_bytes());
+        }
+        data.push(0b0001_0000);
+        let cursor = wire_cursor(cursor_type::COLOR16, 4, 1, 0, &data);
+        assert_eq!(
+            decode(&cursor).unwrap().pixels,
+            [
+                0xf8, 0x00, 0x00, 0xff, // red
+                0x00, 0xf8, 0x00, 0xff, // green
+                0x00, 0x00, 0xf8, 0xff, // blue
+                0xf8, 0xf8, 0xf8, 0x00, // masked white with the top bit
+            ]
+        );
+    }
+
+    #[test]
+    fn test_color4_cursor_mask() {
+        for width in [5usize, 8] {
+            let (transparent, inverting) = masked_pixels(width);
+            // Palette entry k is BGRx with asymmetric channels; entry 15
+            // is white. Neighbouring pixels use different entries, so
+            // reading the nibbles in the wrong order shows.
+            let entry = |k: usize| [0x10 * k as u8 + 1, 0x80, 0xe0 - 0x08 * k as u8];
+            let index = |i: usize| {
+                if inverting.contains(&i) {
+                    15
+                } else {
+                    i % 15
+                }
+            };
+            let colour = |i: usize| entry(index(i));
+
+            // Indices by pixel number, two a byte, high nibble first,
+            // then zeros up to spice-gtk's row-padded length.
+            let mut data = vec![0u8; width.div_ceil(2) * 2];
+            for i in 0..width * 2 {
+                data[i / 2] |= (index(i) as u8) << if i % 2 == 0 { 4 } else { 0 };
+            }
+            for k in 0..15 {
+                let [r, g, b] = entry(k);
+                data.extend_from_slice(&[b, g, r, 0x00]);
+            }
+            data.extend_from_slice(&[0xff, 0xff, 0xff, 0x00]);
+            data.extend(and_mask(
+                width * 2,
+                &[transparent, inverting[0], inverting[1]],
+            ));
+
+            let cursor = wire_cursor(cursor_type::COLOR4, width as u16, 2, 0, &data);
+            let img = decode(&cursor).expect("a COLOR4 cursor decodes");
+            assert_eq!(
+                img.pixels,
+                expected_masked(width, colour),
+                "width {}",
+                width
+            );
+        }
+    }
+
+    /// One plane of a mono cursor from rows of '0' and '1', each row
+    /// padded to a whole byte with `pad`.
+    fn mono_plane(rows: &[&str], pad: bool) -> Vec<u8> {
+        let mut plane = Vec::new();
+        for row in rows {
+            let mut bits: Vec<bool> = row.chars().map(|c| c == '1').collect();
+            bits.resize(row.len().div_ceil(8) * 8, pad);
+            plane.extend(bits.chunks(8).map(|byte| {
+                byte.iter()
+                    .fold(0u8, |acc, &bit| (acc << 1) | u8::from(bit))
+            }));
+        }
+        plane
+    }
+
+    /// A decoded mono cursor as rows of characters: '#' opaque black,
+    /// 'o' opaque white, '.' transparent.
+    fn mono_picture(img: &CursorImage) -> Vec<String> {
+        let (pixels, _) = img.pixels.as_chunks::<4>();
+        pixels
+            .chunks(img.width as usize)
+            .map(|row| {
+                row.iter()
+                    .map(|pixel| match pixel {
+                        [0x00, 0x00, 0x00, 0xff] => '#',
+                        [0xff, 0xff, 0xff, 0xff] => 'o',
+                        [0x00, 0x00, 0x00, 0x00] => '.',
+                        other => panic!("unexpected mono pixel {:?}", other),
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn decode_mono(and: &[u8], xor: &[u8], width: u16, height: u16) -> CursorImage {
+        let data = [and, xor].concat();
+        let cursor = wire_cursor(cursor_type::MONO, width, height, 0, &data);
+        decode(&cursor).expect("a mono cursor decodes")
+    }
+
+    #[test]
+    fn test_mono_cursor_and_xor() {
+        // Each AND/XOR combination: AND 0 draws XOR as black or white,
+        // AND 1 is transparent over XOR 0 and inverting (white) over
+        // XOR 1. The AND plane is not all ones, so there is no edge.
+        for (and, xor, picture) in [
+            (
+                ["00110", "00000", "11111"],
+                ["01010", "00000", "00000"],
+                ["#o.o#", "#####", "....."],
+            ),
+            (
+                ["00110011", "00000000", "11111111"],
+                ["01010101", "00000000", "00000000"],
+                ["#o.o#o.o", "########", "........"],
+            ),
+        ] {
+            let width = and[0].len() as u16;
+            let img = decode_mono(&mono_plane(&and, false), &mono_plane(&xor, false), width, 3);
+            assert_eq!(mono_picture(&img), picture);
+        }
+    }
+
+    #[test]
+    fn test_mono_cursor_edge_highlight() {
+        // spice-gtk's own example (spice-util.c): with the AND plane all
+        // ones, the inverting pixels turn white and the clear pixels
+        // around them black, except on the image's outermost pixels.
+        let xor = ["00000", "00000", "00100", "00100", "00000", "00000"];
+        let picture = [".....", ".###.", ".#o#.", ".#o#.", ".###.", "....."];
+        let and = vec![0xffu8; 6];
+        let img = decode_mono(&and, &mono_plane(&xor, false), 5, 6);
+        assert_eq!(mono_picture(&img), picture);
+
+        // The same at a width of 8, with the shape beside the last
+        // column and the first row, which stay transparent.
+        let xor = ["00000000", "00000010", "00000000", "00000000"];
+        let picture = ["........", ".....#o.", ".....##.", "........"];
+        let img = decode_mono(&[0xffu8; 4], &mono_plane(&xor, false), 8, 4);
+        assert_eq!(mono_picture(&img), picture);
+    }
+
+    #[test]
+    fn test_mono_cursor_padding_bits_count_for_edge_highlight() {
+        // spice-gtk tests whole bytes of the AND plane for all ones, so
+        // a 5-wide plane whose padding bits are clear gets no edge.
+        let xor = ["00000", "00000", "00100", "00100", "00000", "00000"];
+        let and = mono_plane(&["11111"; 6], false);
+        let img = decode_mono(&and, &mono_plane(&xor, false), 5, 6);
+        assert_eq!(
+            mono_picture(&img),
+            [".....", ".....", "..o..", "..o..", ".....", "....."]
+        );
     }
 
     #[test]
