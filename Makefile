@@ -3,6 +3,10 @@
 
 RYLL_IMAGE := ryll-dev
 RYLL_FUZZ_IMAGE := ryll-fuzz
+# Kasm Workspaces image built by `make kasm-image`; see
+# docs/kasm-workspace.md.
+KASM_IMAGE ?= ryll-kasm:latest
+KASM_STAGING := target/kasm
 DEVCONTAINER_DIR := .devcontainer
 # Cargo download cache, bind-mounted into the devcontainer so crates are
 # not re-downloaded on every build. Override CARGO_CACHE to point at a
@@ -108,7 +112,7 @@ DOCKER_RUN_OFFLINE := docker run --rm --network none $(DOCKER_BASE_ARGS) $(CACHE
 
 .PHONY: all build release propose-release tag-release clean clean-testdata \
 	devcontainer fuzz-devcontainer ensure-cache fetch lock lint lint-fix test help \
-	deb rpm web-smoke web-smoke-tls fuzz-fmt-check fuzz-fmt package-check publish-crates \
+	deb rpm kasm-image web-smoke web-smoke-tls fuzz-fmt-check fuzz-fmt package-check publish-crates \
 	test-qemu test-qemu-usb test-qemu-desktop test-qemu-stop test-k1-idle \
 	macos-prereqs macos-build macos-release \
 	build-tokio-console check-windows
@@ -130,6 +134,7 @@ help:
 	@echo "  make package-check          - Package and verify every crate as crates.io would"
 	@echo "  make deb                    - Package the release binary as a .deb"
 	@echo "  make rpm                    - Package the release binary as an .rpm"
+	@echo "  make kasm-image             - Build a Kasm Workspaces image from the .deb"
 	@echo "  make web-smoke              - Smoke-test ryll --web (plain HTTP)"
 	@echo "  make web-smoke-tls          - Smoke-test ryll --web (TLS)"
 	@echo "  make devcontainer           - Build the development container"
@@ -307,6 +312,17 @@ rpm: release
 	$(DOCKER_RUN) \
 		$(RYLL_IMAGE) \
 		cargo generate-rpm -p ryll
+
+# Build a Kasm Workspaces image around the .deb. The build context is a
+# staging directory holding only the Dockerfile, the startup script and
+# the newest .deb, so the whole checkout (target/ included) is not sent
+# to the docker daemon.
+kasm-image: deb
+	rm -rf $(KASM_STAGING)
+	mkdir -p $(KASM_STAGING)
+	cp tools/kasm/Dockerfile tools/kasm/custom_startup.sh $(KASM_STAGING)/
+	cp "$$(ls -t target/debian/ryll_*.deb | head -n 1)" $(KASM_STAGING)/ryll.deb
+	docker build -t $(KASM_IMAGE) $(KASM_STAGING)
 
 # Smoke-test `ryll --web` startup/shutdown. Runs inside the
 # devcontainer, which has the runtime libraries the binary links

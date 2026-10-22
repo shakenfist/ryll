@@ -117,6 +117,13 @@ on a given platform.
 See [plans/PLAN-pip-distribution.md](plans/PLAN-pip-distribution.md)
 for the full design rationale.
 
+## Kasm Workspaces
+
+`make kasm-image` builds a [Kasm Workspaces](https://kasm.com/) image
+that runs the ryll GUI as a single-application workspace. See the
+[Kasm workspace guide](kasm-workspace.md) for registering it and
+choosing the connection it makes.
+
 ## Building from source
 
 If no pre-built package is available for your platform, you can build
