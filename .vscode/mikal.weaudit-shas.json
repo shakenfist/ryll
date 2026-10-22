@@ -333,14 +333,6 @@
       "sha": "af96836e04851d493d60e8aabe229ca3163dbd7d",
       "date": "2026-07-18"
     },
-    "shakenfist-spice-protocol/src/lib.rs": {
-      "sha": "2ddf9749c75f25bd8cf0d5a9e4a833c57835a6c3",
-      "date": "2026-10-20"
-    },
-    "shakenfist-spice-protocol/src/logging.rs": {
-      "sha": "8a17865618c7565047b907cc9cfe530a9014c0f7",
-      "date": "2026-10-20"
-    },
     "shakenfist-spice-protocol/src/messages/agent_stream.rs": {
       "sha": "df3ccacd5fd3c6361b874811c85215b577f76164",
       "date": "2026-10-20"

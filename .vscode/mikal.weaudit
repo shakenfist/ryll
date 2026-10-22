@@ -740,14 +740,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-protocol/src/lib.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-protocol/src/logging.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-protocol/src/reader.rs",
       "author": "mikal"
     },
