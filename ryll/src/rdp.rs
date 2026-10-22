@@ -81,10 +81,15 @@ pub fn run_rdp(
     // both-or-neither for the two flags.
     let (identity, generated_certificate) = match (&args.rdp_tls_cert, &args.rdp_tls_key) {
         (Some(cert), Some(key)) => (TlsIdentity::from_pem_files(cert, key)?, false),
-        _ => (
-            TlsIdentity::self_signed(&[rdp_host.to_string(), "localhost".to_string()])?,
-            true,
-        ),
+        _ => {
+            // A wildcard bind address is never what a client connects
+            // to, so it is left out of the certificate's names.
+            let mut names = vec!["localhost".to_string()];
+            if !rdp_host.is_unspecified() {
+                names.insert(0, rdp_host.to_string());
+            }
+            (TlsIdentity::self_signed(&names)?, true)
+        }
     };
     let monitors = args.monitors;
     let h264 = args.h264_offer();

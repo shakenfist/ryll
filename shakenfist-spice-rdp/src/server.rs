@@ -17,10 +17,11 @@ use ironrdp_server::{
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_rustls::TlsAcceptor;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::auth::ProviderValidator;
 use crate::display::ClientSize;
+use crate::input::HeldInput;
 use crate::tls::TlsIdentity;
 use crate::{MirrorDisplay, SessionProvider, SessionSlot, SpiceInputHandler};
 
@@ -451,14 +452,16 @@ fn build_server(parts: ServerParts) -> RdpServer {
 
     let validator = validator.map(|v| v as Arc<dyn ironrdp_server::CredentialValidator>);
     let display = MirrorDisplay::new(slot.clone(), FALLBACK_DESKTOP_SIZE);
+    let input = SpiceInputHandler::new(slot.clone());
     let connections = ConnectionLog {
-        slot: slot.clone(),
+        slot,
         client_size: display.client_size(),
+        held: input.held(),
         clear_on_disconnect,
         stopping,
     };
     let mut server = builder
-        .with_input_handler(SpiceInputHandler::new(slot))
+        .with_input_handler(input)
         .with_display_handler(display)
         .with_connection_handler(Some(Box::new(connections)))
         .with_credential_validator(validator)
@@ -473,9 +476,9 @@ fn build_server(parts: ServerParts) -> RdpServer {
 }
 
 /// Logs each connection's start and end, starts each connection with
-/// no known client desktop size, empties the session slot when a TLS
-/// client leaves, and stops the server's accept loop once a shutdown
-/// has been asked for.
+/// no known client desktop size, releases whatever a leaving client
+/// still held, empties the session slot when a TLS client leaves, and
+/// stops the server's accept loop once a shutdown has been asked for.
 struct ConnectionLog {
     slot: SessionSlot,
     /// The display handler's record of the size the client was told.
@@ -483,6 +486,9 @@ struct ConnectionLog {
     /// the display for the connection's size, so that ask records the
     /// size this client is told.
     client_size: ClientSize,
+    /// The input handler's record of held keys and buttons, ended
+    /// with each connection.
+    held: HeldInput,
     /// Whether to empty the slot on disconnect. True in TLS mode,
     /// where the credential check fills it per connection; false for
     /// NLA, where it is filled once when the server starts.
@@ -516,6 +522,26 @@ impl ConnectionHandler for ConnectionLog {
             ),
             None => info!(%peer, ?duration, "RDP client disconnected"),
         }
+        // Released before the slot is emptied, while the session the
+        // client was using is still in it.
+        let releases = self.held.end_connection();
+        if let Some(session) = self.slot.current() {
+            if !releases.is_empty() {
+                debug!(
+                    count = releases.len(),
+                    "releasing input the RDP client left held"
+                );
+            }
+            for event in releases {
+                if session.input_tx.try_send(event).is_err() {
+                    warn!(
+                        session = %session.label,
+                        "could not release a key or button the RDP client left held"
+                    );
+                    break;
+                }
+            }
+        }
         if self.clear_on_disconnect {
             self.slot.clear();
         }
@@ -537,7 +563,8 @@ mod tests {
 
     use std::net::Ipv4Addr;
 
-    use shakenfist_spice_renderer::SurfaceMirror;
+    use ironrdp_server::{KeyboardEvent, RdpServerInputHandler};
+    use shakenfist_spice_renderer::{InputEvent, SurfaceMirror};
     use tokio::sync::watch as tokio_watch;
 
     use crate::{SessionHandles, SingleSession};
@@ -701,12 +728,50 @@ mod tests {
         let mut connections = ConnectionLog {
             slot: SessionSlot::new(),
             client_size: client_size.clone(),
+            held: HeldInput::default(),
             clear_on_disconnect: true,
             stopping: Arc::new(AtomicBool::new(false)),
         };
         let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 50000);
         assert!(connections.on_accept(peer));
         assert_eq!(client_size.get(), None);
+    }
+
+    #[test]
+    fn a_disconnect_releases_held_input_before_emptying_the_slot() {
+        let (input_tx, mut input_rx) = mpsc::channel(8);
+        let (_mode_tx, mouse_mode) = tokio_watch::channel(0);
+        let (resize_tx, _resize_rx) = mpsc::channel(1);
+        let mirror = SurfaceMirror::with_test_surface(0, 0, 64, 48, &[]);
+        let slot = SessionSlot::new();
+        slot.set(Arc::new(SessionHandles {
+            surface_mirror: Arc::new(tokio::sync::Mutex::new(mirror)),
+            input_tx,
+            mouse_mode,
+            resize_tx,
+            label: "test".to_string(),
+        }));
+        let mut input = SpiceInputHandler::new(slot.clone());
+        let mut connections = ConnectionLog {
+            slot: slot.clone(),
+            client_size: ClientSize::default(),
+            held: input.held(),
+            clear_on_disconnect: true,
+            stopping: Arc::new(AtomicBool::new(false)),
+        };
+
+        // The client presses A and leaves without releasing it.
+        input.keyboard(KeyboardEvent::Pressed {
+            code: 0x1E,
+            extended: false,
+        });
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 50000);
+        connections.on_disconnected(peer, Duration::from_secs(1), None);
+
+        assert!(matches!(input_rx.try_recv(), Ok(InputEvent::KeyDown(0x1E))));
+        assert!(matches!(input_rx.try_recv(), Ok(InputEvent::KeyUp(0x9E))));
+        assert!(input_rx.try_recv().is_err());
+        assert!(slot.current().is_none());
     }
 
     #[test]
