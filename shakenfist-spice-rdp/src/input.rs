@@ -113,8 +113,10 @@ impl HeldInput {
     /// released where this connection's pointer last was, or at the
     /// origin, as [`PointerTranslator`] does, if it never moved.
     pub(crate) fn end_connection(&self) -> Vec<InputEvent> {
-        self.0.connection.fetch_add(1, Ordering::AcqRel);
+        // Counted under the lock, so no key, button or position from
+        // the next connection can land in this one's releases.
         let mut state = self.lock();
+        self.0.connection.fetch_add(1, Ordering::AcqRel);
         let (x, y) = state.pos.take().unwrap_or((0, 0));
         let keys = std::mem::take(&mut state.keys);
         let buttons = std::mem::take(&mut state.buttons);
@@ -232,10 +234,11 @@ impl SpiceInputHandler {
     }
 
     /// Queue `event` for the session's inputs channel, dropping and
-    /// counting it if the queue cannot take it now.
-    fn send(&self, session: &SessionHandles, event: InputEvent) {
+    /// counting it if the queue cannot take it now. Returns whether
+    /// it was queued.
+    fn send(&self, session: &SessionHandles, event: InputEvent) -> bool {
         match session.input_tx.try_send(event) {
-            Ok(()) => {}
+            Ok(()) => true,
             Err(TrySendError::Full(_)) => {
                 self.count_drop();
                 warn_once!(
@@ -243,6 +246,7 @@ impl SpiceInputHandler {
                     "RDP input: the SPICE input queue for {} is full; dropping input events",
                     session.label
                 );
+                false
             }
             Err(TrySendError::Closed(_)) => {
                 self.count_drop();
@@ -251,14 +255,18 @@ impl SpiceInputHandler {
                     "RDP input: the SPICE input queue for {} is closed; dropping input events",
                     session.label
                 );
+                false
             }
         }
     }
 
-    fn send_all(&self, session: &SessionHandles, events: Vec<InputEvent>) {
+    /// Queue each of `events`, returning whether all were queued.
+    fn send_all(&self, session: &SessionHandles, events: Vec<InputEvent>) -> bool {
+        let mut all = true;
         for event in events {
-            self.send(session, event);
+            all &= self.send(session, event);
         }
+        all
     }
 
     fn button(&mut self, session: &SessionHandles, mode: u32, button: u32, down: bool) {
@@ -266,8 +274,15 @@ impl SpiceInputHandler {
         // release, so the button lands where the last move left the
         // pointer.
         let events = self.pointer.button(mode, button, down, None);
-        self.held.button(button, down);
-        self.send_all(session, events);
+        // A press is recorded whether or not it is queued, and a
+        // release forgotten only once it is, so a release the queue
+        // drops is sent again when the connection ends.
+        if down {
+            self.held.button(button, true);
+            self.send_all(session, events);
+        } else if self.send_all(session, events) {
+            self.held.button(button, false);
+        }
     }
 
     /// Add `units` of vertical wheel rotation (positive is away from
@@ -380,9 +395,11 @@ impl RdpServerInputHandler for SpiceInputHandler {
                 self.send(&session, InputEvent::KeyDown(make_scancode(base, false)));
             }
             KeyboardEvent::Released { code, extended } => {
+                // Forgotten only once queued, as for buttons.
                 let scancode = make_scancode(scancode_base(code, extended), true);
-                self.held.key(scancode, false);
-                self.send(&session, InputEvent::KeyUp(scancode));
+                if self.send(&session, InputEvent::KeyUp(scancode)) {
+                    self.held.key(scancode, false);
+                }
             }
             KeyboardEvent::Synchronize(flags) => {
                 let locks = u16::from(flags.bits()) & LOCK_KEYS;
@@ -447,7 +464,7 @@ impl RdpServerInputHandler for SpiceInputHandler {
                 // sending plain units, which the shift turns into
                 // nothing (or one unit down, for a negative value);
                 // that is logged once.
-                if y & 0xFFFF != 0 {
+                if (y & 0xFFFF) != 0 {
                     warn_once!(
                         "rdp-input:ainput-wheel-units",
                         "RDP input: an Advanced Input wheel event carried {} with its low 16 bits set; \
@@ -959,6 +976,45 @@ mod tests {
         // Released once: a second end has nothing left to release.
         let again = held.end_connection();
         assert!(again.is_empty(), "{again:?}");
+    }
+
+    #[test]
+    fn a_release_the_full_queue_drops_is_sent_when_the_connection_ends() {
+        // Room for one event: the first key-down fills the queue, and
+        // the autorepeat, the button and both releases are dropped.
+        let mut h = Harness::with_queue(MOUSE_MODE_CLIENT, 1);
+        let held = h.handler.held();
+        for _ in 0..2 {
+            h.handler.keyboard(KeyboardEvent::Pressed {
+                code: 0x1E,
+                extended: false,
+            });
+        }
+        h.handler.mouse(MouseEvent::LeftPressed);
+        h.handler.keyboard(KeyboardEvent::Released {
+            code: 0x1E,
+            extended: false,
+        });
+        h.handler.mouse(MouseEvent::LeftReleased);
+        assert_eq!(h.handler.dropped(), 4);
+        h.drain();
+
+        // The guest saw A go down and nothing else, so A is released
+        // once despite the autorepeat, and so is the button.
+        let releases = held.end_connection();
+        assert!(
+            matches!(
+                releases[..],
+                [
+                    InputEvent::KeyUp(0x9E),
+                    InputEvent::MouseUp {
+                        button: mouse_buttons::LEFT,
+                        ..
+                    }
+                ]
+            ),
+            "{releases:?}"
+        );
     }
 
     #[test]

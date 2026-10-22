@@ -528,6 +528,8 @@ impl ConnectionHandler for ConnectionLog {
         }
         // Released before the slot is emptied, while the session the
         // client was using is still in it.
+        // With the slot already empty the session is gone, and its
+        // releases have nowhere to go, so they are let go uncounted.
         let releases = self.held.end_connection();
         if let Some(session) = self.slot.current() {
             if !releases.is_empty() {

@@ -130,10 +130,10 @@ able to be opted out of at build time:
   feature: IronRDP brings `sspi` and `picky` for CredSSP, a
   second, older `reqwest` beside the one ryll itself uses, and
   `libz-sys`, which links the system zlib or compiles a bundled
-  copy with the C compiler where pkg-config finds none.  Any build that enables it, and
-  any workspace-wide build, moves `flate2` onto that C zlib
-  backend.  `make lint` and `make test` build it; release
-  builds leave it out.  Running a binary built without it with
+  copy with the C compiler where pkg-config finds none.  Any
+  build that enables it, and any workspace-wide build, moves
+  `flate2` onto that C zlib backend.  `make lint` and `make
+  test` build it; release builds leave it out.  Running a binary built without it with
   `--rdp` exits with a clear "this ryll binary was built without
   the `rdp` feature" message.
 
