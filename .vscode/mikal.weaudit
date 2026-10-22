@@ -128,10 +128,6 @@
       "author": "mikal"
     },
     {
-      "path": "tools/publish-crates.sh",
-      "author": "mikal"
-    },
-    {
       "path": "tools/run-shellcheck.sh",
       "author": "mikal"
     },
@@ -596,10 +592,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/configuration.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/device-redirection.md",
       "author": "mikal"
     },
@@ -653,10 +645,6 @@
     },
     {
       "path": "ryll/src/clipboard_arboard.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/config.rs",
       "author": "mikal"
     },
     {

@@ -101,10 +101,6 @@
       "sha": "154626ef4e81f6aa3e7c271ef613fe017ad658f9",
       "date": "2026-09-23"
     },
-    "docs/configuration.md": {
-      "sha": "0d5077f262997629ce763111b34ef08b42570729",
-      "date": "2026-10-16"
-    },
     "docs/development-macos.md": {
       "sha": "9fef25179d5ec56bb52e4a5b5edeecadcff74097",
       "date": "2026-09-17"
@@ -179,10 +175,6 @@
     },
     "ryll/src/clipboard_arboard.rs": {
       "sha": "058ef513df12824921acda54af01c9b1893f4197",
-      "date": "2026-10-17"
-    },
-    "ryll/src/config.rs": {
-      "sha": "09d56b68bbba4c6fe8491c42e60df11a79bf51cd",
       "date": "2026-10-17"
     },
     "ryll/src/display_gui.rs": {
@@ -612,10 +604,6 @@
     "tools/proxmox-smoke.py": {
       "sha": "63a243a0d330982e367945942ef188ef58b4d4e3",
       "date": "2026-10-05"
-    },
-    "tools/publish-crates.sh": {
-      "sha": "f9979a0b78225bd283b4433499aaa196a3d533f8",
-      "date": "2026-07-26"
     },
     "tools/report-fuzz-failure.sh": {
       "sha": "431d9995ae224a161b5793d3b0293bdfbd19ce08",
