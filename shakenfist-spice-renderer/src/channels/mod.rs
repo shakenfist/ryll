@@ -504,6 +504,13 @@ pub enum InputEvent {
     /// type docs.
     KeyUp(u32),
 
+    /// The client's lock-key state, as SPICE `keyboard_modifiers` bits
+    /// (`SCROLL_LOCK`, `NUM_LOCK`, `CAPS_LOCK`). The inputs channel
+    /// sends it as `KEY_MODIFIERS`; the server toggles each lock that
+    /// differs from its own record. Bits beyond those three are passed
+    /// through unchanged, since the protocol owns their meaning.
+    KeyModifiers(u16),
+
     /// Mouse moved (absolute position, client mode)
     MouseMove { x: u32, y: u32 },
 

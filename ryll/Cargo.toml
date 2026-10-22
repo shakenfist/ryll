@@ -54,6 +54,14 @@ audio = ["shakenfist-spice-renderer/audio"]
 digest-decode = ["shakenfist-spice-renderer/digest-decode"]
 
 capture = ["dep:pcap-file", "dep:etherparse", "dep:mp4"]
+
+# `rdp` adds the `--rdp` mode, which serves the SPICE session to
+# stock RDP clients through shakenfist-spice-rdp.  Default-off: it
+# pulls in IronRDP and its CredSSP stack, so release builds leave it
+# out; `make lint` and `make test` turn it on so the mode is compiled
+# and tested in CI.  Without it, `--rdp` exits with a clear "built
+# without the `rdp` feature" message.
+rdp = ["dep:shakenfist-spice-rdp"]
 # Diagnostic-only feature for the K1 hang investigation. Adds
 # `console-subscriber` and a startup hook that exposes ryll's
 # tokio runtime to a `tokio-console` TUI viewer over a unix
@@ -133,6 +141,9 @@ shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "
 ] }
 shakenfist-spice-usbredir = { path = "../shakenfist-spice-usbredir", version = "0.3.0" }
 shakenfist-spice-webrtc = { path = "../shakenfist-spice-webrtc", version = "0.3.0" }
+# The RDP server behind `--rdp`, optional so that only the `rdp`
+# feature links IronRDP.
+shakenfist-spice-rdp = { path = "../shakenfist-spice-rdp", version = "0.3.0", optional = true }
 
 # Zlib decompression for SPICE ZLIB_GLZ_RGB (type 107)
 flate2 = "1"

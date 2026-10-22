@@ -16,13 +16,14 @@ Use it two ways:
   author happened to test in is a parity regression waiting to be
   discovered by a user. The matrix makes that visible at review time.
 
-## The three modes
+## The four modes
 
 | Mode | Invocation | Description |
 |------|-----------|-------------|
 | GUI | (default) | Desktop window with menus, status bar, panels. See [Features](features.md). |
 | Headless | `--headless` | No window. Draws are applied to an in-memory surface, a stats line is logged every 10 s, and an optional [control socket](control-socket-protocol.md) (`--control-socket`) lets an external driver send input, take screenshots, read the display counters, and subscribe to events. |
 | Web | `--web` | Serves a browser client over WebRTC. Shipped; the MVP scope was declared in [PLAN-web-frontend.md](plans/PLAN-web-frontend.md) and items outside it are marked below. See the [web frontend operator guide](web-frontend.md). |
+| RDP | `--rdp` | Serves a stock RDP client with IronRDP; in progress, display and input only; the column lands with the operator guide |
 
 ## How to read the matrix
 

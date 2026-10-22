@@ -232,13 +232,15 @@ go, and it overrides sfui by being unlayered rather than by
 
 ## Cargo feature gating
 
-The `ryll` binary ships four features: `gui`, `audio` and `capture`
-default-on, `digest-decode` default-off. The kerbside loadtest and
-direct-qemu CI build with `--no-default-features`. When adding code
-that needs a GUI, audio, capture or digest type, **gate the import at
-the use site** — an ungated import breaks the no-default-features
-build, which only some CI lanes exercise. The feature list and what
-each pulls in is in [`docs/development.md`](docs/development.md).
+The `ryll` binary ships five features: `gui`, `audio` and `capture`
+default-on, `digest-decode` and `rdp` default-off. The kerbside
+loadtest and direct-qemu CI build with `--no-default-features`;
+`make lint` and `make test` add `rdp`, release builds do not. When
+adding code that needs a GUI, audio, capture, digest or RDP type,
+**gate the import at the use site** — an ungated import breaks the
+no-default-features build, which only some CI lanes exercise. The
+feature list and what each pulls in is in
+[`docs/development.md`](docs/development.md).
 `shakenfist-spice-renderer` has its own feature set with the same
 rule, and `make lint` builds it with `--no-default-features` to catch
 an ungated use.

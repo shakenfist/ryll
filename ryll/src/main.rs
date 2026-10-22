@@ -6,6 +6,8 @@ mod bugreport;
 #[cfg(feature = "capture")]
 mod capture;
 mod notifications;
+#[cfg(feature = "rdp")]
+mod rdp;
 #[cfg(feature = "gui")]
 mod streaming_state;
 mod web;
@@ -298,7 +300,24 @@ fn main() -> Result<()> {
 
     let obey_guest_size = !args.no_obey_guest_size;
 
-    if args.web {
+    if args.rdp {
+        #[cfg(feature = "rdp")]
+        {
+            rdp::run_rdp(
+                config,
+                &args,
+                virtual_disks,
+                share_dir,
+                capture,
+                pedantic_config,
+            )
+        }
+        #[cfg(not(feature = "rdp"))]
+        {
+            let _ = (config, virtual_disks, share_dir, capture, pedantic_config);
+            anyhow::bail!("this ryll binary was built without the `rdp` feature");
+        }
+    } else if args.web {
         run_web(
             config,
             &args,
