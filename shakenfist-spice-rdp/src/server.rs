@@ -468,8 +468,11 @@ fn build_server(parts: ServerParts) -> RdpServer {
         // Core Data rather than the surface's, so that the guest can be
         // asked for it. IronRDP still builds the encoder at the
         // surface's size, a mismatch that would drop the client; the
-        // display handler records the negotiated size and resizes the
-        // client to the surface's before it sends any bitmap.
+        // display handler records the negotiated size and sends no
+        // bitmap until the two agree. Either the guest adopts the
+        // client's size, or, once a short grace period after accept has
+        // let the client's dynamic channels open, the display handler
+        // resizes the client to the surface's.
         .with_honor_client_desktop_size(true)
         .with_connection_handler(Some(Box::new(connections)))
         .with_credential_validator(validator)
@@ -490,10 +493,11 @@ fn build_server(parts: ServerParts) -> RdpServer {
 struct ConnectionLog {
     slot: SessionSlot,
     /// The display handler's record of the size the client was told.
-    /// Forgotten on accept, which runs before the server first asks
-    /// the display for the connection's size, so that ask records
-    /// afresh and the connection's first negotiated size is taken for
-    /// the size this client asked for.
+    /// Started afresh on accept, which runs before the server first
+    /// asks the display for the connection's size, so that ask records
+    /// afresh, the connection's first negotiated size is taken for the
+    /// size this client asked for, and the grace period before the
+    /// client is resized runs from the accept.
     client_size: ClientSize,
     /// The input handler's record of held keys and buttons, ended
     /// with each connection.
@@ -515,7 +519,7 @@ impl ConnectionHandler for ConnectionLog {
             return false;
         }
         info!(%peer, "RDP client connected");
-        self.client_size.forget();
+        self.client_size.start_connection();
         true
     }
 
@@ -742,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn accepting_a_connection_forgets_the_client_size() {
+    fn accepting_a_connection_starts_the_client_size_afresh() {
         let client_size = ClientSize::default();
         client_size.set(FALLBACK_DESKTOP_SIZE);
         let mut connections = ConnectionLog {
@@ -754,8 +758,10 @@ mod tests {
             stopping: Arc::new(AtomicBool::new(false)),
         };
         let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 50000);
+        assert_eq!(client_size.resize_held_until(), None);
         assert!(connections.on_accept(peer));
         assert_eq!(client_size.get(), None);
+        assert!(client_size.resize_held_until().is_some());
     }
 
     #[test]

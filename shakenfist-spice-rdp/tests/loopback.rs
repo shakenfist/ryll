@@ -86,7 +86,10 @@ const BLOCK_COLOUR: [u8; 3] = [250, 120, 10];
 const TOLERANCE: u8 = 8;
 
 /// The longest any one step may take before the test fails, so a hang
-/// is a failure rather than a stuck CI job.
+/// is a failure rather than a stuck CI job. The longest wait is for the
+/// resize, which the server holds back for a couple of seconds after
+/// accepting the connection so that the client's dynamic channels can
+/// open first.
 const STEP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Scan code 0x1E is the A key.
@@ -589,7 +592,10 @@ async fn ironrdp_client_is_served_the_session_and_its_input_arrives() {
     // The stream sends the cursor shape first, and the client decodes
     // it to the guest's pixels. The surface is not the size the client
     // was told, so the next update is a resize to the surface's size,
-    // which arrives as a deactivation.
+    // which arrives as a deactivation. The server holds it back for a
+    // grace period after accepting the connection, and sends nothing
+    // else in the meantime, since the surface does not fit the
+    // client's desktop.
     let pointer = step("the cursor shape", client.next_pointer()).await;
     assert_cursor(&pointer, "the first cursor shape");
     let event = step("the resize to the surface", client.next_event()).await;

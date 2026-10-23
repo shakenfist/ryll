@@ -20,7 +20,9 @@
 //! size the client connected with, and for the monitor layout the
 //! client sends whenever its window changes size. The guest's answer,
 //! if it has an agent to give one, is a new surface size, which the
-//! stream sends to the client as a resize like any other.
+//! stream sends to the client as a resize like any other, except in
+//! the first moments of a connection, when a resize is held back (see
+//! [`FIRST_RESIZE_GRACE`]).
 
 use std::collections::VecDeque;
 use std::num::{NonZeroU16, NonZeroUsize};
@@ -38,7 +40,7 @@ use shakenfist_spice_renderer::channels::align_monitor_dimension;
 use shakenfist_spice_renderer::{DamageRect, DisplaySize, DisplaySurface, SurfaceMirror};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::watch;
-use tokio::time::{Interval, MissedTickBehavior};
+use tokio::time::{Instant, Interval, MissedTickBehavior};
 use tracing::debug;
 
 use crate::cursor::{rdp_pointer, CursorState};
@@ -52,6 +54,32 @@ use crate::{SessionHandles, SessionSlot};
 /// one frame at 60 Hz: short enough that a poll adds no visible
 /// latency, long enough that an idle session costs next to nothing.
 const DAMAGE_POLL_INTERVAL: Duration = Duration::from_millis(16);
+
+/// How long after a connection is accepted the update stream holds
+/// back a resize of the client.
+///
+/// A resize deactivates and reactivates the connection, and IronRDP
+/// handles the client's dynamic virtual channels badly across that. It
+/// starts the static channel that carries them only on a connection's
+/// first activation, and while a connection is reactivating it drops
+/// every PDU from the client other than its capability confirm. A
+/// resize sent as soon as the connection is up lands while the client
+/// is still answering the dynamic-channel handshake, its answers are
+/// lost, and the dynamic channels never open for the rest of the
+/// connection: the client's monitor layouts never arrive, nor does the
+/// mouse input a client like FreeRDP sends over its own channel (the
+/// middle button and its wheel). The handshake must therefore finish
+/// before any reactivation. IronRDP offers no signal for that, so the
+/// stream waits this long from the connection's accept instead: long
+/// enough for the rest of the connection sequence and the handshake's
+/// few round trips on any network an interactive session is usable
+/// over, and short enough that the client waiting for its first frame
+/// is no great cost.
+///
+/// While it waits, the stream sends no bitmaps either, since the
+/// surface does not fit the desktop the client has. Pointer updates
+/// are not held: they do not reactivate the connection.
+const FIRST_RESIZE_GRACE: Duration = Duration::from_secs(2);
 
 /// Bytes per pixel of the surface mirror's RGBA pixels, which are
 /// sent to the client as they are, in [`PixelFormat::RgbA32`].
@@ -73,19 +101,24 @@ const BYTES_PER_PIXEL: usize = 4;
 /// session slot has not run yet. Either way the client and the encoder
 /// can start at different sizes, so the update stream starts from the
 /// size the client was told, not the size last reported, and when that
-/// is not the surface's size its first update is a resize to it; the
-/// deactivation and reactivation that follows announces that size to
-/// the client and rebuilds the encoder with it.
+/// is not the surface's size it resizes the client to the surface's;
+/// the deactivation and reactivation that follows announces that size
+/// to the client and rebuilds the encoder with it. That resize waits
+/// until [`FIRST_RESIZE_GRACE`] has passed since the connection was
+/// accepted, which is recorded here too, and the stream sends nothing
+/// but pointer updates until then. If the guest adopts the size the
+/// client was told within that time, no resize is needed at all.
 ///
 /// The first ask records its size too, which stands until the
 /// capability exchange replaces it. The server calls
 /// `request_initial_size` only for a client that can be resized, so
 /// for any other client the first ask's size is all there is.
 ///
-/// The connection handler forgets the record when a connection is
-/// accepted, so the first ask of every connection records afresh, and
+/// The connection handler starts the record afresh when a connection
+/// is accepted, so the first ask of every connection records afresh,
 /// the first size negotiated on every connection is recognised as the
-/// one the client asked for. Clones share the same record.
+/// one the client asked for, and the connection's grace period runs
+/// from then. Clones share the same record.
 #[derive(Clone, Default)]
 pub(crate) struct ClientSize(Arc<Mutex<ClientSizeRecord>>);
 
@@ -96,12 +129,26 @@ struct ClientSizeRecord {
     /// Whether a capability exchange of this connection has told the
     /// client its size.
     negotiated: bool,
+    /// When the connection was accepted; `None` before any has been.
+    accepted_at: Option<Instant>,
 }
 
 impl ClientSize {
-    /// Forget the client's size, for a new connection.
-    pub(crate) fn forget(&self) {
-        *self.lock() = ClientSizeRecord::default();
+    /// Forget the client's size, and note the time, for a connection
+    /// accepted now.
+    pub(crate) fn start_connection(&self) {
+        *self.lock() = ClientSizeRecord {
+            accepted_at: Some(Instant::now()),
+            ..ClientSizeRecord::default()
+        };
+    }
+
+    /// When the connection's grace period for resizing the client
+    /// ends, or `None` if no connection has been accepted.
+    pub(crate) fn resize_held_until(&self) -> Option<Instant> {
+        self.lock()
+            .accepted_at
+            .map(|accepted| accepted + FIRST_RESIZE_GRACE)
     }
 
     /// The size the client was last told, if any.
@@ -164,7 +211,8 @@ impl MirrorDisplay {
     }
 
     /// A shared handle on the record of the client's desktop size, for
-    /// the connection handler to forget when a new connection starts.
+    /// the connection handler to start afresh when a new connection is
+    /// accepted.
     pub(crate) fn client_size(&self) -> ClientSize {
         self.client_size.clone()
     }
@@ -246,8 +294,9 @@ impl RdpServerDisplay for MirrorDisplay {
     async fn request_initial_size(&mut self, client_size: DesktopSize) -> DesktopSize {
         // The size the client has just been told, which replaces the
         // one recorded at the first ask. The update stream starts from
-        // it, so when the surface is another size the stream's first
-        // update resizes the client to the surface's.
+        // it, so when the surface is another size the stream resizes
+        // the client to the surface's, once the connection's grace
+        // period has passed.
         if self.client_size.negotiated(client_size) {
             // The first of a connection is the size the client asked
             // for. Later ones follow a reactivation and echo the size
@@ -298,6 +347,14 @@ fn layout_size(layout: &DisplayControlMonitorLayout) -> Option<(u32, u32)> {
 /// connection), so a stream starts unseeded and sends the whole
 /// surface first. A reactivated client also starts from its default
 /// pointer, so a stream sends the cursor state before anything else.
+///
+/// Within [`FIRST_RESIZE_GRACE`] of the connection's accept, a surface
+/// that is not the size the client has is neither resized to nor sent:
+/// the stream sends only pointer updates and keeps polling. When the
+/// grace period ends it resizes the client and sends the whole surface,
+/// or, if the surface has become the client's size meanwhile, sends the
+/// whole surface with no resize. A stream built after the grace period,
+/// as every stream after a reactivation is, resizes at once.
 struct MirrorUpdates {
     slot: SessionSlot,
     /// Updated with every resize sent, since the reactivation that
@@ -308,6 +365,10 @@ struct MirrorUpdates {
     /// The desktop size the client currently has: the size it was
     /// told when the stream was built, or the last resize sent.
     sent_size: DesktopSize,
+    /// Until when a surface of another size than `sent_size` is held
+    /// back rather than resized to; `None` once that has passed, or if
+    /// no connection was recorded as accepted.
+    resize_held_until: Option<Instant>,
     /// Whether the client has been sent the whole surface at
     /// `sent_size`. IronRDP seeds its framebuffer only from a bitmap
     /// covering the whole desktop, and without one it re-encodes every
@@ -335,11 +396,13 @@ impl MirrorUpdates {
     fn new(slot: SessionSlot, client_size: ClientSize, announced: DesktopSize) -> Self {
         let mut interval = tokio::time::interval(DAMAGE_POLL_INTERVAL);
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let resize_held_until = client_size.resize_held_until();
         Self {
             slot,
             client_size,
             pending: VecDeque::new(),
             sent_size: announced,
+            resize_held_until,
             seeded: false,
             cursor: None,
             interval,
@@ -378,10 +441,23 @@ impl MirrorUpdates {
         }
     }
 
+    /// Whether a resize of the client must still be held back, because
+    /// the connection's grace period has not passed.
+    fn resize_held(&mut self) -> bool {
+        match self.resize_held_until {
+            Some(until) if Instant::now() < until => true,
+            _ => {
+                self.resize_held_until = None;
+                false
+            }
+        }
+    }
+
     /// Look at the mirror once and queue whatever the client needs:
-    /// a resize and the whole surface if the surface changed size, the
-    /// whole surface if the client has not had it yet, and otherwise
-    /// one bitmap per damaged rectangle.
+    /// a resize and the whole surface if the surface changed size
+    /// (nothing at all while that resize is held), the whole surface if
+    /// the client has not had it yet, and otherwise one bitmap per
+    /// damaged rectangle.
     ///
     /// Synchronous on purpose: everything taken from the mirror is in
     /// `pending` before this returns.
@@ -399,6 +475,14 @@ impl MirrorUpdates {
         };
 
         if size != self.sent_size {
+            if self.resize_held() {
+                // Bitmaps of this surface would not fit the client's
+                // desktop, so nothing is sent until the resize is. The
+                // client's view is stale by then, so whatever is sent
+                // next is the whole surface.
+                self.seeded = false;
+                return;
+            }
             debug!(
                 "rdp display: surface is {}x{}, client has {}x{}; resizing",
                 size.width, size.height, self.sent_size.width, self.sent_size.height
@@ -779,6 +863,26 @@ mod tests {
         std::iter::from_fn(|| resize.try_recv().ok()).collect()
     }
 
+    /// A display over `slot`'s session for a connection accepted now,
+    /// built as the server builds it for a client told `told` in the
+    /// capability exchange: started afresh, size, the negotiated size,
+    /// then size again for the encoder.
+    async fn accept_told(slot: &SessionSlot, told: DesktopSize) -> MirrorDisplay {
+        let mut display = MirrorDisplay::new(slot.clone(), FALLBACK);
+        display.client_size().start_connection();
+        display.size().await;
+        display.request_initial_size(told).await;
+        display.size().await;
+        display
+    }
+
+    /// No update before `deadline`.
+    async fn assert_quiet_until(updates: &mut Box<dyn RdpServerDisplayUpdates>, deadline: Instant) {
+        if let Ok(update) = tokio::time::timeout_at(deadline, updates.next_update()).await {
+            panic!("expected no update before the deadline, got {update:?}");
+        }
+    }
+
     /// No update within a few polls.
     async fn assert_quiet(updates: &mut Box<dyn RdpServerDisplayUpdates>) {
         if let Ok(update) =
@@ -1082,11 +1186,12 @@ mod tests {
             width: 16,
             height: 12,
         };
-        // Without a forget, the record keeps the first connection's size.
+        // Until a new connection starts, the record keeps the first
+        // connection's size.
         assert_eq!(display.size().await, second);
         assert_eq!(display.client_size().get(), Some(first));
 
-        display.client_size().forget();
+        display.client_size().start_connection();
         assert_eq!(display.client_size().get(), None);
         assert_eq!(display.size().await, second);
         assert_eq!(display.client_size().get(), Some(second));
@@ -1176,7 +1281,7 @@ mod tests {
             .await;
         assert_eq!(requests(&mut resize), [DisplaySize::Requested(800, 600)]);
 
-        display.client_size().forget();
+        display.client_size().start_connection();
         display.size().await;
         let asked = DesktopSize {
             width: 1024,
@@ -1366,5 +1471,171 @@ mod tests {
 
         assert_pointer(&next_pointer(&mut updates).await, 2, 3, [0x40, 0x50, 0x60]);
         assert_quiet(&mut updates).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_resize_waits_for_the_grace_period_with_no_bitmap_before_it() {
+        let (slot, _handles) = session_with_surface(64, 48);
+        let accepted = Instant::now();
+        let mut display = accept_told(
+            &slot,
+            DesktopSize {
+                width: 1280,
+                height: 720,
+            },
+        )
+        .await;
+        let mut updates = display.updates().await.expect("updates");
+        next_default_pointer(&mut updates).await;
+
+        // Neither the resize nor a bitmap of the surface, which would
+        // not fit the client's desktop, until the grace period ends.
+        let held_until = accepted + FIRST_RESIZE_GRACE;
+        assert_quiet_until(&mut updates, held_until - DAMAGE_POLL_INTERVAL).await;
+
+        let surface = DesktopSize {
+            width: 64,
+            height: 48,
+        };
+        assert_eq!(next_resize(&mut updates).await, surface);
+        assert!(Instant::now() >= held_until);
+        assert!(Instant::now() <= held_until + DAMAGE_POLL_INTERVAL);
+        assert_eq!(display.client_size().get(), Some(surface));
+        let bitmap = next_bitmap(&mut updates).await;
+        assert_geometry(&bitmap, 0, 0, 64, 48);
+        assert_eq!(bitmap_rows(&bitmap), numbered_pixels(64, 48, 0));
+        assert_quiet(&mut updates).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_guest_adopting_the_told_size_in_the_grace_period_needs_no_resize() {
+        let (slot, handles) = session_with_surface(64, 48);
+        let accepted = Instant::now();
+        let told = DesktopSize {
+            width: 128,
+            height: 96,
+        };
+        let mut display = accept_told(&slot, told).await;
+        let mut updates = display.updates().await.expect("updates");
+        next_default_pointer(&mut updates).await;
+        assert_quiet(&mut updates).await;
+
+        // The guest answers the request for the client's size.
+        handles
+            .surface_mirror
+            .lock()
+            .await
+            .apply_event(&ChannelEvent::SurfaceCreated {
+                display_channel_id: 0,
+                surface_id: 0,
+                width: 128,
+                height: 96,
+            });
+        blit(&handles, 0, 0, 128, 96, 200).await;
+
+        let bitmap = next_bitmap(&mut updates).await;
+        assert!(Instant::now() < accepted + FIRST_RESIZE_GRACE);
+        assert_geometry(&bitmap, 0, 0, 128, 96);
+        assert_eq!(bitmap_rows(&bitmap), numbered_pixels(128, 96, 200));
+        // The client already has the surface's size, so nothing follows
+        // when the grace period ends.
+        assert_quiet_until(
+            &mut updates,
+            accepted + FIRST_RESIZE_GRACE + DAMAGE_POLL_INTERVAL * 5,
+        )
+        .await;
+        assert_eq!(display.client_size().get(), Some(told));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_guest_resize_in_the_grace_period_waits_for_it() {
+        let (slot, handles) = session_with_surface(64, 48);
+        let accepted = Instant::now();
+        let surface = DesktopSize {
+            width: 64,
+            height: 48,
+        };
+        let mut display = accept_told(&slot, surface).await;
+        let mut updates = display.updates().await.expect("updates");
+        next_default_pointer(&mut updates).await;
+        // The client was told the surface's size, so it is served at once.
+        assert_geometry(&next_bitmap(&mut updates).await, 0, 0, 64, 48);
+
+        // The guest changes size on its own before the grace period ends.
+        handles
+            .surface_mirror
+            .lock()
+            .await
+            .apply_event(&ChannelEvent::SurfaceCreated {
+                display_channel_id: 0,
+                surface_id: 0,
+                width: 16,
+                height: 12,
+            });
+        let held_until = accepted + FIRST_RESIZE_GRACE;
+        assert_quiet_until(&mut updates, held_until - DAMAGE_POLL_INTERVAL).await;
+
+        let resized = DesktopSize {
+            width: 16,
+            height: 12,
+        };
+        assert_eq!(next_resize(&mut updates).await, resized);
+        assert!(Instant::now() >= held_until);
+        assert_eq!(display.client_size().get(), Some(resized));
+        assert_geometry(&next_bitmap(&mut updates).await, 0, 0, 16, 12);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pointer_updates_are_not_held_in_the_grace_period() {
+        let shape = cursor_image(3, 2, [0x10, 0x80, 0xF0]);
+        let (slot, _handles, cursor) = session_with_cursor(64, 48, showing(&shape));
+        let accepted = Instant::now();
+        let mut display = accept_told(
+            &slot,
+            DesktopSize {
+                width: 1280,
+                height: 720,
+            },
+        )
+        .await;
+        let mut updates = display.updates().await.expect("updates");
+
+        assert_pointer(&next_pointer(&mut updates).await, 3, 2, [0x10, 0x80, 0xF0]);
+        assert!(Instant::now() <= accepted + DAMAGE_POLL_INTERVAL);
+        cursor.send_modify(|state| state.visible = false);
+        next_hide_pointer(&mut updates).await;
+        assert!(Instant::now() < accepted + FIRST_RESIZE_GRACE);
+
+        // The resize still waits for the grace period.
+        next_resize(&mut updates).await;
+        assert!(Instant::now() >= accepted + FIRST_RESIZE_GRACE);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_built_after_the_grace_period_resizes_at_once() {
+        let (slot, _handles) = session_with_surface(64, 48);
+        let mut display = accept_told(
+            &slot,
+            DesktopSize {
+                width: 1280,
+                height: 720,
+            },
+        )
+        .await;
+        // As for a stream built after a reactivation.
+        tokio::time::sleep(FIRST_RESIZE_GRACE).await;
+        let built = Instant::now();
+        let mut updates = display.updates().await.expect("updates");
+        next_default_pointer(&mut updates).await;
+
+        assert_eq!(
+            next_resize(&mut updates).await,
+            DesktopSize {
+                width: 64,
+                height: 48
+            }
+        );
+        assert!(Instant::now() <= built + DAMAGE_POLL_INTERVAL);
+        assert_geometry(&next_bitmap(&mut updates).await, 0, 0, 64, 48);
     }
 }
