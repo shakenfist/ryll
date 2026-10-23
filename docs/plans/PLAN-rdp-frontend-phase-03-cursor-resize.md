@@ -524,24 +524,24 @@ answers), and this plan's *Results*.
 
 ## Definition of done
 
-- [ ] `grep -n 'COLOR8\|unsupported cursor type' shakenfist-spice-renderer/src/channels/cursor.rs`
+- [x] `grep -n 'COLOR8\|unsupported cursor type' shakenfist-spice-renderer/src/channels/cursor.rs`
       shows `COLOR8` as the only named refused format, and
       cursor tests for `MONO`, `COLOR4`, `COLOR16` and masked
       `COLOR32` pass under `make test`.
-- [ ] `SessionHandles` has a `cursor` field, `ryll/src/rdp.rs`
+- [x] `SessionHandles` has a `cursor` field, `ryll/src/rdp.rs`
       subscribes a cursor relay before spawning the session,
       and `grep -n 'RGBAPointer\|HidePointer' shakenfist-spice-rdp/src/display.rs`
       finds both.
-- [ ] `grep -n 'with_honor_client_desktop_size(true)' shakenfist-spice-rdp/src/server.rs`
+- [x] `grep -n 'with_honor_client_desktop_size(true)' shakenfist-spice-rdp/src/server.rs`
       finds it, and `MirrorDisplay` implements
       `request_initial_size` and `request_layout`.
-- [ ] The loopback test enables server pointers, asserts a
+- [x] The loopback test enables server pointers, asserts a
       decoded pointer and a `Requested` size, and fails when
       the stream's pointer update or the honour flag is
       removed (mutation, management session).
-- [ ] Every mutation listed in briefs 1-4 is killed; the
+- [x] Every mutation listed in briefs 1-4 is killed; the
       scripts' paths and counts are in *Execution notes*.
-- [ ] `make build`, `make test`, `make lint`, `make
+- [x] `make build`, `make test`, `make lint`, `make
       check-windows`, `make package-check` and `pre-commit run
       --all-files` pass.
 - [ ] *Results* records, with FreeRDP's version and the date:
@@ -551,10 +551,10 @@ answers), and this plan's *Results*.
       a window resize after that adopting too, the
       `desktop_resize_flag` FreeRDP sent, the cursor formats the
       guest sent, and server mouse mode's cursor behaviour.
-- [ ] `docs/multi-mode-parity.md`'s RDP row (`:26`) names
+- [x] `docs/multi-mode-parity.md`'s RDP row (`:26`) names
       cursor shapes and resize, and *Results* lists the RDP
       cursor and resize cells phase 6's column will need.
-- [ ] `git grep -n -i 'phase 3\|decision [0-9]\|survey item' -- shakenfist-spice-rdp shakenfist-spice-renderer/src ryll/src docs ':!docs/plans'`
+- [x] `git grep -n -i 'phase 3\|decision [0-9]\|survey item' -- shakenfist-spice-rdp shakenfist-spice-renderer/src ryll/src docs ':!docs/plans'`
       finds nothing.
 
 ## Results
@@ -670,6 +670,30 @@ lands with the operator guide:
   `QEMU_QMP_SOCKET=/tmp/ryll-p03-qmp.sock`, and stopped by its
   own PID at the end, since `make test-qemu-stop` also removes
   a shared OVMF vars copy.
+- **Rebased** onto `origin/develop` (12 commits ahead, including
+  #608-#610) before pushing; the one conflict, both sides adding
+  a row to `docs/plans/index.md`, was resolved by keeping both.
+- **Definition of done, checked 2026-10-23 13:04 AEDT** on the
+  rebased tree: `make build`, `make check-windows` and `make
+  package-check` exit 0 (the Windows check's four warnings are in
+  `session.rs` and `bugreport.rs`, which this phase does not
+  touch); `make test` 1630 passed, 0 failed; `make lint` and
+  `pre-commit run --all-files` pass. `COLOR8` is the only named
+  refused cursor format; `SessionHandles.cursor` exists and
+  `ryll/src/rdp.rs` subscribes the relay (`:219`) before spawning
+  the session (`:295`); `display.rs` sends `RGBAPointer` and
+  `HidePointer`; the server sets
+  `with_honor_client_desktop_size(true)` and `MirrorDisplay`
+  implements both resize hooks; the loopback test enables server
+  pointers and its mutants are killed; every step's mutants are
+  killed (steps 1, 2, 3, 3b and 4: 23, 12, 9, 7 and 5, plus the
+  layout echo's one); the parity row names cursor and resize and
+  *Results* carries phase 6's cells; the citation grep finds
+  nothing. **Not met:** the *Results* item, which asks for the
+  guest adopting the requested size and for server mouse mode's
+  cursor behaviour. The guest image ignores client resizes from
+  any client, and server mouse mode was not run; both are under
+  *Future work*.
 
 ## Future work
 
