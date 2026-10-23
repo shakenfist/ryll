@@ -184,10 +184,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/index.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/macos-metrics-verification.md",
       "author": "mikal"
     },
@@ -233,10 +229,6 @@
     },
     {
       "path": ".devcontainer/devcontainer.json",
-      "author": "mikal"
-    },
-    {
-      "path": ".devcontainer/Dockerfile",
       "author": "mikal"
     },
     {
@@ -532,10 +524,6 @@
       "author": "mikal"
     },
     {
-      "path": ".devcontainer",
-      "author": "mikal"
-    },
-    {
       "path": ".github/workflows/manual-build.yml",
       "author": "mikal"
     },
@@ -593,10 +581,6 @@
     },
     {
       "path": "docs/device-redirection.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/installation.md",
       "author": "mikal"
     },
     {

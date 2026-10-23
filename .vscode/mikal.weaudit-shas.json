@@ -1,10 +1,6 @@
 {
   "version": 1,
   "files": {
-    ".devcontainer/Dockerfile": {
-      "sha": "502d3811eed477975f6c7b213b96324e839e63fc",
-      "date": "2026-09-10"
-    },
     ".devcontainer/devcontainer.json": {
       "sha": "49f7a86770a92824fecdde678d773bb02971deb7",
       "date": "2026-09-10"
@@ -115,14 +111,6 @@
     },
     "docs/device-redirection.md": {
       "sha": "851b7981637d7a0d7c9175b02c891cf0e73db7ce",
-      "date": "2026-10-16"
-    },
-    "docs/index.md": {
-      "sha": "433a4b2d9aa945247f0bde4f98cc6b948463c486",
-      "date": "2026-08-17"
-    },
-    "docs/installation.md": {
-      "sha": "2bd3ab3c982f397a703ee6111df2afc5d8ca2b26",
       "date": "2026-10-16"
     },
     "docs/libvirt-spice-recommendations.md": {
