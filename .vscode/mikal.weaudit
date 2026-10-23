@@ -640,10 +640,6 @@
       "author": "mikal"
     },
     {
-      "path": ".github/workflows/renovate.yml",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-compression/src/lz4.rs",
       "author": "mikal"
     },
