@@ -79,6 +79,11 @@ const DAMAGE_POLL_INTERVAL: Duration = Duration::from_millis(16);
 /// While it waits, the stream sends no bitmaps either, since the
 /// surface does not fit the desktop the client has. Pointer updates
 /// are not held: they do not reactivate the connection.
+///
+/// The guest is asked for the client's size rounded down to a
+/// multiple of 8, so a guest that adopts it within the hold still
+/// needs a resize when the client's size is not such a multiple: the
+/// client then waits out the whole hold before its first frame.
 const FIRST_RESIZE_GRACE: Duration = Duration::from_secs(2);
 
 /// Bytes per pixel of the surface mirror's RGBA pixels, which are

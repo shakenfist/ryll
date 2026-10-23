@@ -78,7 +78,9 @@ pub struct SessionHandles {
     /// Sender for a requested guest display size.
     pub resize_tx: mpsc::Sender<DisplaySize>,
     /// The session's current cursor shape and visibility, as kept by
-    /// [`spawn_cursor_relay`].
+    /// [`spawn_cursor_relay`]. Subscribe the relay to the session's
+    /// event bus before the session is spawned, or the first cursor
+    /// shape is lost.
     pub cursor: watch::Receiver<CursorState>,
     /// A human-readable name for the session, for logs.
     pub label: String,

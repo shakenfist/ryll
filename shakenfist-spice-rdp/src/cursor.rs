@@ -28,6 +28,9 @@ use tracing::debug;
 const MAX_POINTER_SIDE: u16 = 96;
 
 /// The session's cursor as the RDP client should show it.
+///
+/// Its `Debug` output gives the shape's size and hotspot, not its
+/// pixels.
 #[derive(Clone)]
 pub struct CursorState {
     /// The latest cursor shape the guest sent, or `None` before the
@@ -36,6 +39,21 @@ pub struct CursorState {
     pub shape: Option<Arc<CursorImage>>,
     /// Whether the guest shows the cursor.
     pub visible: bool,
+}
+
+impl std::fmt::Debug for CursorState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let shape = self.shape.as_ref().map(|shape| {
+            format!(
+                "{}x{} hotspot ({}, {})",
+                shape.width, shape.height, shape.hot_spot_x, shape.hot_spot_y
+            )
+        });
+        f.debug_struct("CursorState")
+            .field("shape", &shape)
+            .field("visible", &self.visible)
+            .finish()
+    }
 }
 
 impl Default for CursorState {
@@ -221,6 +239,22 @@ mod tests {
             y: 20,
             visible,
         }
+    }
+
+    #[test]
+    fn debug_output_gives_the_shape_without_its_pixels() {
+        let state = CursorState {
+            shape: Some(Arc::new(image(2, 1, (1, 0), vec![0xAB; 8]))),
+            visible: false,
+        };
+        assert_eq!(
+            format!("{state:?}"),
+            r#"CursorState { shape: Some("2x1 hotspot (1, 0)"), visible: false }"#
+        );
+        assert_eq!(
+            format!("{:?}", CursorState::default()),
+            "CursorState { shape: None, visible: true }"
+        );
     }
 
     #[test]
