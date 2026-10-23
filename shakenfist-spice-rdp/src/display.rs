@@ -320,10 +320,27 @@ impl RdpServerDisplay for MirrorDisplay {
     }
 
     fn request_layout(&mut self, layout: DisplayControlMonitorLayout) {
-        match layout_size(&layout) {
-            Some((width, height)) => self.request_guest_size(width, height),
-            None => debug!("rdp display: the client sent a monitor layout with no monitors"),
+        let Some((width, height)) = layout_size(&layout) else {
+            debug!("rdp display: the client sent a monitor layout with no monitors");
+            return;
+        };
+        // A client that fits its window to its desktop reports the
+        // window's new size after every resize the stream sends, so a
+        // layout of the size the client already has is that echo, not
+        // a request. Passing it on would ask the guest for its own old
+        // size, superseding a request it has not yet answered.
+        let has = self
+            .client_size
+            .get()
+            .map(|size| (u32::from(size.width), u32::from(size.height)));
+        if has == Some((width, height)) {
+            debug!(
+                "rdp display: the client's layout is the {}x{} it already has; ignoring it",
+                width, height
+            );
+            return;
         }
+        self.request_guest_size(width, height);
     }
 }
 
@@ -1331,6 +1348,22 @@ mod tests {
         let mut display = MirrorDisplay::new(slot, FALLBACK);
         display.request_layout(wire_layout(&[(false, 1922, 1080), (false, 1024, 768)]));
         assert_eq!(requests(&mut resize), [DisplaySize::Requested(1920, 1080)]);
+    }
+
+    #[test]
+    fn a_layout_of_the_size_the_client_has_asks_for_nothing() {
+        let (slot, _handles, mut resize) = session_with_resize(64, 48);
+        let mut display = MirrorDisplay::new(slot, FALLBACK);
+        display.client_size().set(DesktopSize {
+            width: 1024,
+            height: 768,
+        });
+        // The client fitting its window to a resize the stream sent.
+        display.request_layout(wire_layout(&[(true, 1024, 768)]));
+        assert_eq!(requests(&mut resize), []);
+        // A window the user resized is a request.
+        display.request_layout(wire_layout(&[(true, 1280, 768)]));
+        assert_eq!(requests(&mut resize), [DisplaySize::Requested(1280, 768)]);
     }
 
     #[test]
