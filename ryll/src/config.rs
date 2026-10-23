@@ -76,6 +76,13 @@ pub struct Args {
     #[arg(long, group = "config_source")]
     pub direct: Option<String>,
 
+    /// Read the SPICE password for --direct from <PATH>. One trailing
+    /// newline is stripped, so a ticket file written by a SPICE server
+    /// (such as andris's) works as-is. A .vv file carries its own
+    /// password, so this is only valid with --direct.
+    #[arg(long, value_name = "PATH", requires = "direct", conflicts_with_all = ["url", "file"])]
+    pub password_file: Option<PathBuf>,
+
     /// Run in headless mode (no GUI)
     #[arg(long, default_value_t = false)]
     pub headless: bool,
@@ -600,7 +607,11 @@ impl Config {
         } else if let Some(file) = &args.file {
             Self::from_vv_file(file)
         } else if let Some(direct) = &args.direct {
-            Self::from_direct(direct)
+            let mut config = Self::from_direct(direct)?;
+            if let Some(path) = &args.password_file {
+                config.password = Some(read_password_file(path)?);
+            }
+            Ok(config)
         } else {
             Err(anyhow!("Must specify one of --url, --file, or --direct"))
         }
@@ -893,6 +904,26 @@ fn validate_disk_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Read a SPICE password from `path` for `--password-file`.
+///
+/// One trailing line ending (`\n` or `\r\n`) is stripped, so a
+/// ticket file written with `echo` or by a SPICE server works as-is;
+/// any other whitespace is part of the password. An empty password is
+/// refused, because it almost always means the wrong file. Errors name
+/// the path but never echo the file's contents.
+fn read_password_file(path: &Path) -> Result<String> {
+    let content = fs::read_to_string(path)
+        .map_err(|e| anyhow!("--password-file {}: {}", path.display(), e))?;
+    let password = content
+        .strip_suffix('\n')
+        .map(|s| s.strip_suffix('\r').unwrap_or(s))
+        .unwrap_or(&content);
+    if password.is_empty() {
+        bail!("--password-file {}: the file is empty", path.display());
+    }
+    Ok(password.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -999,6 +1030,89 @@ mod tests {
     fn vv_delete_this_file_0_leaves_single_use_off() {
         let cfg = parse("[virt-viewer]\nhost=h\nport=5900\ndelete-this-file=0\n");
         assert!(!cfg.ticket_is_single_use);
+    }
+
+    /// Write `content` to a password file in a fresh temp dir and load
+    /// a `--direct` config that names it.
+    fn load_direct_with_password_file(content: &str) -> Result<Config> {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("ticket");
+        fs::write(&path, content).unwrap();
+        let args = Args::parse_from([
+            "ryll",
+            "--direct",
+            "host:5900",
+            "--password-file",
+            path.to_str().unwrap(),
+        ]);
+        Config::from_args(&args)
+    }
+
+    #[test]
+    fn password_file_strips_one_trailing_newline() {
+        let cfg = load_direct_with_password_file("s3cret\n").expect("load");
+        assert_eq!(cfg.password.as_deref(), Some("s3cret"));
+    }
+
+    #[test]
+    fn password_file_strips_crlf() {
+        let cfg = load_direct_with_password_file("s3cret\r\n").expect("load");
+        assert_eq!(cfg.password.as_deref(), Some("s3cret"));
+    }
+
+    #[test]
+    fn password_file_without_newline_is_used_verbatim() {
+        let cfg = load_direct_with_password_file(" s3cret ").expect("load");
+        assert_eq!(cfg.password.as_deref(), Some(" s3cret "));
+    }
+
+    #[test]
+    fn password_file_that_is_empty_is_refused() {
+        let err = load_direct_with_password_file("\n").expect_err("empty must fail");
+        assert!(err.to_string().contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn password_file_that_is_missing_names_the_path() {
+        let args = Args::parse_from([
+            "ryll",
+            "--direct",
+            "host:5900",
+            "--password-file",
+            "/nonexistent/ryll-ticket",
+        ]);
+        let err = Config::from_args(&args).expect_err("missing must fail");
+        assert!(
+            err.to_string().contains("/nonexistent/ryll-ticket"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn password_file_is_refused_with_a_vv_source() {
+        for source in ["--file", "--url"] {
+            let err = Args::try_parse_from(["ryll", source, "x.vv", "--password-file", "ticket"])
+                .expect_err("--password-file with a .vv source must be refused");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn password_file_alone_is_refused() {
+        let err = Args::try_parse_from(["ryll", "--password-file", "ticket"])
+            .expect_err("--password-file without --direct must be refused");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn direct_without_password_file_has_no_password() {
+        let args = Args::parse_from(["ryll", "--direct", "host:5900"]);
+        let cfg = Config::from_args(&args).expect("load");
+        assert_eq!(cfg.password, None);
     }
 
     /// Write `content` to a .vv file in a fresh temp dir, load it

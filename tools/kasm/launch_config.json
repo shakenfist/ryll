@@ -1,0 +1,33 @@
+{
+  "file_mapping": {
+    "destination": "/tmp/launch_selections.json"
+  },
+  "launch_form": [
+    {
+      "key": "connection",
+      "label": "SPICE server",
+      "allow_saving": true,
+      "placeholder": "host:port, host:port:tls_port, or https://.../console.vv",
+      "help": "The SPICE server to connect to: HOST:PORT, HOST:PORT:TLS_PORT, or an http(s) link to a .vv file.",
+      "input_type": "text",
+      "options": [],
+      "required": true,
+      "validator_regex": "^(https?://\\S+|[^\\s:\\/]+:[0-9]{1,5}(:[0-9]{1,5})?)$",
+      "validator_regex_description": "HOST:PORT, HOST:PORT:TLS_PORT, or an http(s) URL",
+      "display_if": []
+    },
+    {
+      "key": "password",
+      "label": "Password",
+      "allow_saving": false,
+      "placeholder": "Leave empty for none (or the workspace's password file)",
+      "help": "The SPICE password for a HOST:PORT connection. A .vv file carries its own.",
+      "input_type": "password",
+      "options": [],
+      "required": false,
+      "validator_regex": ".*",
+      "validator_regex_description": "Any password",
+      "display_if": []
+    }
+  ]
+}
