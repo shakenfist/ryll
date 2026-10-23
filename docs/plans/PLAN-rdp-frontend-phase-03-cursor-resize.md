@@ -272,6 +272,18 @@ guest-driven size change is already `DisplayUpdate::Resize`.
    size and the stream sends nothing to correct the client.
    Such a client cannot follow a resize anyway; every client in
    the master plan's list sets the flag. Recorded under *Risks*.
+10. **Hold a connection's first resize for two seconds** (added
+    after step 5; Mikal's choice). A reactivation during the
+    dynamic-channel handshake strands those channels for the
+    whole connection, and IronRDP gives no signal that the
+    handshake has finished. So for `FIRST_RESIZE_GRACE` after
+    accept the update stream holds a resize for a size mismatch,
+    and the bitmaps that would not fit, while still sending
+    pointer updates; if the guest adopts the size the client was
+    told meanwhile, no resize is needed at all. The rejected
+    alternative was serving the guest clipped into the client's
+    size with no initial resize: more invasive, and a client
+    without an agent would keep a wrong-size desktop.
 
 ## Step plan
 
@@ -547,7 +559,68 @@ answers), and this plan's *Results*.
 
 ## Results
 
-To be filled in by step 5.
+### Manual test: FreeRDP against the desktop guest
+
+2026-10-23, 07:40 to 12:52 AEDT, on the Kasm host, with Mikal
+watching and driving the pointer. Guest: `debian-xfce:13` under
+`tools/start-desktop-qemu.sh` (QXL, vdagent) on SPICE port
+5910, in client mouse mode, at 1024x768. Server: a debug build of
+`ryll --rdp --rdp-port 0 --direct 127.0.0.1:5910`, with
+`--verbose` for the later runs. Client: `xfreerdp3` (FreeRDP
+3.15.0) on the same host, `/cert:tofu /dynamic-resolution`,
+started at 1600x900, 1440x900, 1280x960 and 1152x864 on
+successive connections.
+
+- **Cursor shapes:** correct. Over the desktop, a terminal and a
+  window edge the pointer took the guest's arrow, I-beam and
+  resize shapes, the right way up and in the right colours. The
+  guest sent only `ALPHA` cursors (type 0), all 64x64, so none
+  was scaled; the mono, 4-bit and 16-bit decoders and the
+  scaling are covered by unit tests only, and no Windows guest
+  was available.
+- **Initial size:** FreeRDP sets `desktop_resize_flag`. Each
+  client was told the size it asked for, the guest was asked for
+  it (aligned to 8, so 1600x900 became 1600x896), and the client
+  was then resized to the guest's 1024x768: FreeRDP's window
+  shrank to match.
+- **The guest never changed resolution**, for ryll's requests or
+  for remote-viewer's "resize guest to window": this guest image
+  does not apply client-driven monitors configs, so the guest
+  adopting the requested size could not be observed end to end.
+  The loopback test covers the RDP side.
+- **Defect found and fixed:** the first runs showed every
+  dynamic virtual channel (FreeRDP's Advanced Input,
+  DisplayControl, ECHO) left pending for the whole connection,
+  so window drags sent nothing. The server's log showed the
+  client's dynamic-channel replies "received and lost" during
+  the reactivation that the immediate first resize caused.
+  IronRDP starts those channels only on the first activation and
+  drops client PDUs while reactivating. Fixed by decision 10;
+  after it the channels open, the resize follows two seconds
+  after accept, and no PDU is lost.
+- **Layout echo found and fixed:** FreeRDP reports its window's
+  new size as a layout after every server resize, which passed
+  the guest's own old size back as a request. Layouts of the
+  size the client already has are now ignored (`139dc98`). After
+  both fixes, Mikal's window drag reached the guest as a
+  1488x968 monitors config.
+- **Middle click** worked through FreeRDP's Advanced Input
+  channel once that channel opened.
+- **Server mouse mode: not tested** this phase.
+- **mstsc and a Windows guest: not tested** (none available).
+
+### Cells for phase 6's RDP column
+
+For `docs/multi-mode-parity.md`'s per-feature RDP column, which
+lands with the operator guide:
+
+| Feature | RDP |
+|---|---|
+| Server cursor rendering (SET/INIT) | available (the shape is sent as an RDP pointer; larger than 96x96 is scaled down to fit) |
+| Cursor position tracking | n/a (the client draws its own pointer where its mouse is; the guest's position is not sent) |
+| Cursor hide/show | available |
+| Default arrow fallback cursor | available (the client's own default pointer until the guest sends a shape) |
+| Guest resolution follows viewport | available (the client's initial size and its display-control layouts, with vdagent in the guest; a connection's first resize waits up to 2 s) |
 
 ## Execution notes
 
@@ -578,6 +651,25 @@ To be filled in by step 5.
   is empty then), and that echo is taken for the size it asked
   for, so the guest is asked for it. Rare, and the client's next
   display-control layout supersedes it.
+- **Step 4** ran as planned (Opus, high); five mutants, all
+  killed. The loopback client decodes pointers itself, so no
+  harness change was needed.
+- **Step 5, 2026-10-23 AEDT**, found two defects, fixed before
+  step 6 as step 3b (`fca07c7`, Opus, high: decision 10, seven
+  mutants, all killed) and a management-session fix for
+  FreeRDP's layout echo (`139dc98`, one mutant, killed). See
+  *Results*. Mikal chose the hold over serving the guest at the
+  client's size or deferring the fix. An issue for IronRDP
+  describing the dropped dynamic-channel replies was drafted for
+  Mikal to file.
+- **Step 5 interruption:** the desktop guest was stopped part
+  way through by another session, most likely through the
+  `/tmp/ryll-test-qemu.pid` file every checkout's
+  `make test-qemu-*` targets share. It was restarted with
+  `QEMU_PID_FILE=/tmp/ryll-p03-qemu.pid` and
+  `QEMU_QMP_SOCKET=/tmp/ryll-p03-qmp.sock`, and stopped by its
+  own PID at the end, since `make test-qemu-stop` also removes
+  a shared OVMF vars copy.
 
 ## Future work
 
@@ -587,6 +679,17 @@ To be filled in by step 5.
   between a few shapes often.
 - `LargePointer` once an IronRDP release sends it, so HiDPI
   cursors need not be scaled.
+- Drop the first-resize hold once IronRDP keeps the client's
+  dynamic-channel replies across a reactivation (or restarts
+  unfinished channels); the hold costs a client of another size
+  up to two seconds of blank desktop at connect.
+- A desktop guest image that applies client-driven monitors
+  configs, so resize can be tested end to end: `debian-xfce:13`
+  ignores them from ryll and from remote-viewer alike.
+- Per-checkout PID and QMP paths for the Makefile's
+  `test-qemu-*` targets, so concurrent sessions cannot stop each
+  other's guests.
+- Server mouse mode's cursor behaviour, untested this phase.
 
 ## Back brief
 

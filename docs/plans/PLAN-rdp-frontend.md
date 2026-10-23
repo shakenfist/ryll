@@ -181,7 +181,8 @@ Kerbside spike* below).
    shows as an opaque block (phase 3's survey). Guests that use
    them show no cursor shape in any mode. spice-gtk decodes all
    but 8-bit into RGBA, approximating inverting pixels, so this
-   is a renderer fix that benefits every mode.
+   is a renderer fix that benefits every mode. Phase 3 made it,
+   decoding every format but 8-bit as spice-gtk does.
 
 ### The RDP side: IronRDP as of 2026-10-19
 
