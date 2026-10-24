@@ -1,6 +1,6 @@
 # Phase 5 — Auto-snapshot bug-report mode
 
-Phase 5 of [PLAN-stream-caps-and-flap.md](PLAN-stream-caps-and-flap.md).
+Phase 5 of [PLAN-stream-caps-and-flap.md](../PLAN-stream-caps-and-flap.md).
 
 ## Prompt
 
