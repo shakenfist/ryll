@@ -676,6 +676,15 @@ FreeRDP's version and the date:
   receiver is IronRDP's), so recorded under *Future work*; the
   clipboard has the same exposure only for a paste request or
   data response sent in the last instant of a connection.
+- **Step 3** ran as planned (Opus, high), including the optional
+  second connection that accepts Opus. Three mutants, all killed
+  (`p04/step3/run-tests.sh`); the new test passed 20 runs alone
+  and 24 alongside the first test, eight at a time. It does not
+  check the wave's format with the IronRDP client's
+  `Rdpsnd::get_format`, which looks `format_no` up in the
+  server's list while the server (correctly, per MS-RDPEA)
+  numbers it by the client's; the test asserts the number and
+  the bytes instead.
 
 ## Future work
 

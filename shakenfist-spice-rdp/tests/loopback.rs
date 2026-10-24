@@ -19,13 +19,31 @@
 //! The client advertises RemoteFX, as FreeRDP does, so the server
 //! encodes with it. RemoteFX is lossy, so pixels are compared with a
 //! small tolerance, at points well inside flat areas of colour.
+//!
+//! A second test opens the clipboard and audio output channels with
+//! IronRDP's own client-side channel processors, against a session
+//! with a clipboard and an audio relay. Text copied on the client
+//! reaches the session's clipboard with LF line endings, and text the
+//! guest copies is offered to the client and reaches it as CRLF
+//! `CF_UNICODETEXT`. Audio the session plays reaches the client as a
+//! wave in the format the two sides agreed: 16-bit PCM, unchanged
+//! sample for sample, for a client that accepts only PCM, and the
+//! guest's Opus packet, unchanged, for one that accepts Opus too.
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use ironrdp_cliprdr::backend::CliprdrBackend;
+use ironrdp_cliprdr::pdu::{
+    ClipboardFormat, ClipboardFormatId, ClipboardGeneralCapabilityFlags, FileContentsRequest,
+    FileContentsResponse, FormatDataRequest, FormatDataResponse, LockDataId,
+    OwnedFormatDataResponse,
+};
+use ironrdp_cliprdr::CliprdrClient;
 use ironrdp_connector::connection_activation::{
     ConnectionActivationFactory, ConnectionActivationState,
 };
@@ -36,16 +54,22 @@ use ironrdp_pdu::geometry::{InclusiveRectangle, Rectangle as _};
 use ironrdp_pdu::input::fast_path::{FastPathInputEvent, KeyboardFlags};
 use ironrdp_pdu::rdp::capability_sets::MajorPlatformType;
 use ironrdp_pdu::WriteBuf;
+use ironrdp_rdpsnd::client::{Rdpsnd, RdpsndClientHandler};
+use ironrdp_rdpsnd::pdu::{AudioFormat, PitchPdu, VolumePdu, WaveFormat};
 use ironrdp_server::PixelFormat;
 use ironrdp_session::image::DecodedImage;
 use ironrdp_session::{fast_path, ActiveStage, ActiveStageBuilder, ActiveStageOutput};
+use ironrdp_svc::{SvcProcessor, SvcProcessorMessages};
 use ironrdp_tokio::{FramedWrite as _, NetworkClient, TokioFramed};
 use shakenfist_spice_protocol::MOUSE_MODE_SERVER;
 use shakenfist_spice_rdp::{
-    serve, Credentials, CursorState, RdpConfig, RdpSecurity, SessionHandles, SingleSession,
-    TlsIdentity,
+    serve, AudioRelay, Credentials, CursorState, RdpConfig, RdpSecurity, SessionHandles,
+    SingleSession, TlsIdentity,
 };
-use shakenfist_spice_renderer::{CursorImage, DisplaySize, InputEvent, SurfaceMirror};
+use shakenfist_spice_renderer::{
+    ClipboardBackend as _, CursorImage, DisplaySize, InputEvent, MemoryClipboard,
+    PlaybackSink as _, SurfaceMirror,
+};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch};
 
@@ -94,6 +118,24 @@ const STEP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Scan code 0x1E is the A key.
 const KEY_A: u8 = 0x1E;
+
+/// The rate and channel count of the audio the session plays, which
+/// is what decoded Opus always is.
+const AUDIO_RATE_HZ: u32 = 48_000;
+const AUDIO_CHANNELS: u8 = 2;
+
+/// The frames in one 20 ms Opus packet at 48 kHz: one PCM wave's worth.
+const PACKET_FRAMES: u32 = 960;
+
+/// Stands in for one of the guest's Opus packets. The server passes
+/// Opus through without decoding it, and the client here does not
+/// decode it either, so it need not be real Opus.
+const OPUS_PACKET: &[u8] = &[0xFC, 0xFF, 0xFE, 0x10, 0x32, 0x54, 0x76, 0x98];
+
+/// How often the test looks for text the client sent to have reached
+/// the session's clipboard, which it is stored in on the server's
+/// thread.
+const CLIPBOARD_POLL: Duration = Duration::from_millis(5);
 
 const USERNAME: &str = "ryll";
 /// The session password, minted once per run rather than written into
@@ -179,7 +221,60 @@ struct Session {
     cursor_tx: watch::Sender<CursorState>,
 }
 
+/// The session's audio as the playback channel would hand it on: one
+/// packet's interleaved stereo samples, varying in both bytes and
+/// negative as often as not, so that samples reordered, truncated or
+/// sent big-endian all arrive as other bytes.
+fn decoded_samples() -> Vec<i16> {
+    let samples = PACKET_FRAMES * u32::from(AUDIO_CHANNELS);
+    (0..samples)
+        .map(|i| {
+            let i = i16::try_from(i).expect("a packet's samples fit an i16 index");
+            i.wrapping_mul(97).wrapping_sub(16_000)
+        })
+        .collect()
+}
+
+/// `samples` as the bytes of a 16-bit PCM wave: little-endian.
+fn pcm_bytes(samples: &[i16]) -> Vec<u8> {
+    samples
+        .iter()
+        .flat_map(|sample| sample.to_le_bytes())
+        .collect()
+}
+
+/// `text` as `CF_UNICODETEXT` data: NUL-terminated UTF-16LE.
+fn unicode_text_bytes(text: &str) -> Vec<u8> {
+    text.encode_utf16()
+        .chain([0])
+        .flat_map(|unit| unit.to_le_bytes())
+        .collect()
+}
+
+/// An audio format as the server offers it: 48 kHz stereo, with the
+/// derived fields of 16-bit PCM, which IronRDP's client matches
+/// against the server's offer field for field.
+fn audio_format(format: WaveFormat) -> AudioFormat {
+    AudioFormat {
+        format,
+        n_channels: u16::from(AUDIO_CHANNELS),
+        n_samples_per_sec: AUDIO_RATE_HZ,
+        n_avg_bytes_per_sec: AUDIO_RATE_HZ * u32::from(AUDIO_CHANNELS) * 2,
+        n_block_align: u16::from(AUDIO_CHANNELS) * 2,
+        bits_per_sample: 16,
+        data: None,
+    }
+}
+
+/// A session with neither a clipboard nor audio.
 fn session() -> Session {
+    session_with(None, None)
+}
+
+fn session_with(
+    clipboard: Option<Arc<MemoryClipboard>>,
+    audio: Option<Arc<AudioRelay>>,
+) -> Session {
     let mirror = SurfaceMirror::with_test_surface(
         0,
         0,
@@ -197,8 +292,8 @@ fn session() -> Session {
         mouse_mode,
         resize_tx,
         cursor,
-        clipboard: None,
-        audio: None,
+        clipboard,
+        audio,
         label: "loopback".to_string(),
     });
     Session {
@@ -229,16 +324,12 @@ fn server_config(handles: Arc<SessionHandles>) -> RdpConfig {
     }
 }
 
-/// A TLS-only client asking for a desktop of a size other than the
-/// surface's. It presents a domain, as mstsc does, which the server
-/// must ignore. It advertises IronRDP's default codecs, which is
-/// RemoteFX alone.
-fn client_config() -> ironrdp_connector::Config {
+/// A TLS-only client asking for a `width` x `height` desktop. It
+/// presents a domain, as mstsc does, which the server must ignore. It
+/// advertises IronRDP's default codecs, which is RemoteFX alone.
+fn client_config(width: u16, height: u16, channels: &Channels) -> ironrdp_connector::Config {
     ironrdp_connector::Config {
-        desktop_size: ClientDesktopSize {
-            width: CLIENT_WIDTH,
-            height: CLIENT_HEIGHT,
-        },
+        desktop_size: ClientDesktopSize { width, height },
         desktop_scale_factor: 0,
         enable_tls: true,
         enable_credssp: false,
@@ -263,7 +354,7 @@ fn client_config() -> ironrdp_connector::Config {
         hardware_id: None,
         request_data: None,
         autologon: false,
-        enable_audio_playback: false,
+        enable_audio_playback: matches!(channels, Channels::ClipboardAndAudio(_)),
         performance_flags: Default::default(),
         license_cache: None,
         timezone_info: Default::default(),
@@ -314,6 +405,120 @@ enum Event {
     Deactivated,
     /// The server ended the session or closed the connection.
     Closed,
+    /// The server's clipboard channel asked for the client's clipboard
+    /// formats, which the client answers with a copy.
+    FormatListRequested,
+    /// The server accepted the client's first Format List, so the
+    /// client's clipboard channel is Ready.
+    ClipboardReady,
+    /// The server copied: its clipboard holds these formats.
+    RemoteCopy(Vec<ClipboardFormatId>),
+    /// The server asked for the client's clipboard in this format.
+    DataRequested(ClipboardFormatId),
+    /// The server sent the clipboard data the client pasted, or `None`
+    /// for an error response.
+    Data(Option<Vec<u8>>),
+    /// The server sent a wave of audio in the client's format
+    /// `format_no`.
+    Wave {
+        format_no: usize,
+        timestamp: u32,
+        data: Vec<u8>,
+    },
+}
+
+/// The client's clipboard backend: it records what the server's
+/// clipboard channel tells it, and the test answers.
+#[derive(Debug)]
+struct ClipboardRecorder(std::sync::mpsc::Sender<Event>);
+
+impl ClipboardRecorder {
+    fn record(&self, event: Event) {
+        // The receiver lives as long as the client that owns this.
+        let _ = self.0.send(event);
+    }
+}
+
+ironrdp_core::impl_as_any!(ClipboardRecorder);
+
+impl CliprdrBackend for ClipboardRecorder {
+    fn temporary_directory(&self) -> &str {
+        ""
+    }
+
+    fn client_capabilities(&self) -> ClipboardGeneralCapabilityFlags {
+        ClipboardGeneralCapabilityFlags::empty()
+    }
+
+    fn on_ready(&mut self) {
+        self.record(Event::ClipboardReady);
+    }
+
+    fn on_request_format_list(&mut self) {
+        self.record(Event::FormatListRequested);
+    }
+
+    fn on_process_negotiated_capabilities(&mut self, _: ClipboardGeneralCapabilityFlags) {}
+
+    fn on_remote_copy(&mut self, available_formats: &[ClipboardFormat]) {
+        self.record(Event::RemoteCopy(
+            available_formats.iter().map(ClipboardFormat::id).collect(),
+        ));
+    }
+
+    fn on_format_data_request(&mut self, request: FormatDataRequest) {
+        self.record(Event::DataRequested(request.format));
+    }
+
+    fn on_format_data_response(&mut self, response: FormatDataResponse<'_>) {
+        let data = (!response.is_error()).then(|| response.data().to_vec());
+        self.record(Event::Data(data));
+    }
+
+    fn on_file_contents_request(&mut self, _: FileContentsRequest) {}
+
+    fn on_file_contents_response(&mut self, _: FileContentsResponse<'_>) {}
+
+    fn on_lock(&mut self, _: LockDataId) {}
+
+    fn on_unlock(&mut self, _: LockDataId) {}
+}
+
+/// The client's audio output handler: it accepts `formats` and records
+/// every wave.
+#[derive(Debug)]
+struct AudioRecorder {
+    formats: Vec<AudioFormat>,
+    events: std::sync::mpsc::Sender<Event>,
+}
+
+impl RdpsndClientHandler for AudioRecorder {
+    fn get_formats(&self) -> &[AudioFormat] {
+        &self.formats
+    }
+
+    fn wave(&mut self, format_no: usize, timestamp: u32, data: Cow<'_, [u8]>) {
+        let _ = self.events.send(Event::Wave {
+            format_no,
+            timestamp,
+            data: data.into_owned(),
+        });
+    }
+
+    fn set_volume(&mut self, _: VolumePdu) {}
+
+    fn set_pitch(&mut self, _: PitchPdu) {}
+
+    fn close(&mut self) {}
+}
+
+/// The static channels the client opens.
+enum Channels {
+    /// None: the display and input alone.
+    None,
+    /// The clipboard and audio output channels, accepting these audio
+    /// formats.
+    ClipboardAndAudio(Vec<AudioFormat>),
 }
 
 /// IronRDP's client, connected and active.
@@ -327,17 +532,29 @@ struct Client {
     desktop_size: ClientDesktopSize,
     /// Events decoded from one PDU and not yet returned.
     pending: VecDeque<Event>,
+    /// What the client's static channels recorded while a PDU was
+    /// decoded.
+    channel_events: std::sync::mpsc::Receiver<Event>,
 }
 
 impl Client {
-    /// Connect to `addr` and run the whole connection sequence: the
+    /// Connect to `addr`, asking for a `width` x `height` desktop and
+    /// opening `channels`, and run the whole connection sequence: the
     /// security negotiation, the TLS upgrade, the settings and
     /// capability exchanges, and the finalization.
-    async fn connect(addr: SocketAddr) -> Self {
+    async fn connect(addr: SocketAddr, width: u16, height: u16, channels: Channels) -> Self {
         let tcp = TcpStream::connect(addr).await.expect("TCP connect");
         let client_addr = tcp.local_addr().expect("client address");
         let mut framed = TokioFramed::new(tcp);
-        let mut connector = ClientConnector::new(client_config(), client_addr);
+        let mut connector =
+            ClientConnector::new(client_config(width, height, &channels), client_addr);
+        let (events, channel_events) = std::sync::mpsc::channel();
+        if let Channels::ClipboardAndAudio(formats) = channels {
+            let clipboard = ClipboardRecorder(events.clone());
+            let audio = AudioRecorder { formats, events };
+            connector.attach_static_channel(CliprdrClient::new(Box::new(clipboard)));
+            connector.attach_static_channel(Rdpsnd::new(Box::new(audio)));
+        }
 
         let should_upgrade = ironrdp_tokio::connect_begin(&mut framed, &mut connector)
             .await
@@ -387,6 +604,7 @@ impl Client {
             image,
             desktop_size: result.desktop_size,
             pending: VecDeque::new(),
+            channel_events,
         }
     }
 
@@ -438,7 +656,69 @@ impl Client {
                     _ => {}
                 }
             }
+            // A static channel's answer to the server, if it had one,
+            // went out above as a response frame; what it told its
+            // backend or handler is the test's to act on.
+            self.pending.extend(self.channel_events.try_iter());
         }
+    }
+
+    /// The next thing the clipboard or audio output channel was told,
+    /// passing over the display stream's drawing and pointer updates.
+    async fn next_channel_event(&mut self) -> Event {
+        loop {
+            match self.next_event().await {
+                Event::Graphics(_)
+                | Event::Pointer(_)
+                | Event::DefaultPointer
+                | Event::HiddenPointer => {}
+                event => return event,
+            }
+        }
+    }
+
+    /// Send what a static channel processor produced to the server.
+    async fn send_channel_messages<C: SvcProcessor + 'static>(
+        &mut self,
+        messages: SvcProcessorMessages<C>,
+    ) {
+        let frame = self
+            .stage
+            .process_svc_processor_messages(messages)
+            .expect("encode static channel messages");
+        self.framed
+            .write_all(&frame)
+            .await
+            .expect("send static channel messages");
+    }
+
+    fn clipboard(&mut self) -> &mut CliprdrClient {
+        self.stage
+            .get_svc_processor_mut::<CliprdrClient>()
+            .expect("the client has a clipboard channel")
+    }
+
+    /// Copy on the client: announce `formats` to the server.
+    async fn copy(&mut self, formats: &[ClipboardFormatId]) {
+        let formats: Vec<_> = formats.iter().map(|&id| ClipboardFormat::new(id)).collect();
+        let messages = self.clipboard().initiate_copy(&formats).expect("copy");
+        self.send_channel_messages(messages).await;
+    }
+
+    /// Paste on the client: ask the server for its clipboard as
+    /// `format`.
+    async fn paste(&mut self, format: ClipboardFormatId) {
+        let messages = self.clipboard().initiate_paste(format).expect("paste");
+        self.send_channel_messages(messages).await;
+    }
+
+    /// Answer the server's request for the client's clipboard.
+    async fn send_clipboard_data(&mut self, response: OwnedFormatDataResponse) {
+        let messages = self
+            .clipboard()
+            .submit_format_data(response)
+            .expect("clipboard data");
+        self.send_channel_messages(messages).await;
     }
 
     /// The next drawing, failing the test on anything else.
@@ -574,7 +854,12 @@ async fn ironrdp_client_is_served_the_session_and_its_input_arrives() {
     // size it asked for, which the guest is asked for too.
     let mut client = step(
         "the connection sequence",
-        Client::connect(server.local_addr()),
+        Client::connect(
+            server.local_addr(),
+            CLIENT_WIDTH,
+            CLIENT_HEIGHT,
+            Channels::None,
+        ),
     )
     .await;
     assert_eq!(
@@ -710,6 +995,202 @@ async fn ironrdp_client_is_served_the_session_and_its_input_arrives() {
 
     // A stop asked for while the client is connected disconnects it and
     // ends the server.
+    server.shutdown();
+    step("the client to be disconnected", client.wait_closed()).await;
+    step("the server thread to finish", server.stopped()).await;
+    server
+        .join(Duration::ZERO)
+        .expect("the server stops cleanly");
+}
+
+/// Run the clipboard both ways over `client`'s clipboard channel,
+/// which has just opened: the client's clipboard, `client_text` with
+/// CRLF line endings, reaches the session's `clipboard` with LF ones,
+/// and then a guest copy of `guest_text`, with LF line endings, is
+/// offered to the client and pasted there with CRLF ones.
+async fn exchange_clipboard(
+    client: &mut Client,
+    clipboard: &MemoryClipboard,
+    client_text: &str,
+    guest_text: &str,
+) {
+    // The server's channel asks for the client's formats, and the
+    // client answers with its clipboard's, as a desktop client does
+    // when it connects. The server accepting them makes the channel
+    // Ready on both sides.
+    let event = step(
+        "the request for the client's formats",
+        client.next_channel_event(),
+    )
+    .await;
+    assert!(
+        matches!(event, Event::FormatListRequested),
+        "expected the request for the client's formats, got {event:?}"
+    );
+    client.copy(&[ClipboardFormatId::CF_UNICODETEXT]).await;
+    let event = step("the clipboard to be ready", client.next_channel_event()).await;
+    assert!(
+        matches!(event, Event::ClipboardReady),
+        "expected the server to accept the client's formats, got {event:?}"
+    );
+
+    // Offered text, the server asks for it straight away, and stores
+    // it in the session's clipboard with LF line endings.
+    let event = step(
+        "the server's request for the client's text",
+        client.next_channel_event(),
+    )
+    .await;
+    assert!(
+        matches!(
+            event,
+            Event::DataRequested(ClipboardFormatId::CF_UNICODETEXT)
+        ),
+        "expected a request for the client's text, got {event:?}"
+    );
+    let generation = clipboard.generation();
+    client
+        .send_clipboard_data(OwnedFormatDataResponse::new_unicode_string(client_text))
+        .await;
+    step("the client's text to reach the session", async {
+        while clipboard.generation() == generation {
+            tokio::time::sleep(CLIPBOARD_POLL).await;
+        }
+    })
+    .await;
+    assert_eq!(
+        clipboard.text().as_deref(),
+        Some(client_text.replace("\r\n", "\n").as_str()),
+        "the client's text in the session's clipboard"
+    );
+
+    // A guest copy, stored as the main channel stores one, is offered
+    // to the client, which pastes it as Windows text.
+    clipboard.set_text(guest_text).expect("the guest's copy");
+    let event = step(
+        "the guest's copy to be offered",
+        client.next_channel_event(),
+    )
+    .await;
+    let Event::RemoteCopy(formats) = event else {
+        panic!("expected the guest's copy to be offered, got {event:?}");
+    };
+    assert_eq!(formats, [ClipboardFormatId::CF_UNICODETEXT]);
+    client.paste(ClipboardFormatId::CF_UNICODETEXT).await;
+    let event = step("the guest's text", client.next_channel_event()).await;
+    let Event::Data(data) = event else {
+        panic!("expected the guest's text, got {event:?}");
+    };
+    assert_eq!(
+        data,
+        Some(unicode_text_bytes(&guest_text.replace('\n', "\r\n"))),
+        "the guest's text as the client received it"
+    );
+}
+
+/// The next audio the client was sent, failing the test on anything
+/// else.
+async fn next_wave(client: &mut Client, what: &str) -> (usize, u32, Vec<u8>) {
+    match step(what, client.next_channel_event()).await {
+        Event::Wave {
+            format_no,
+            timestamp,
+            data,
+        } => (format_no, timestamp, data),
+        other => panic!("expected {what}, got {other:?}"),
+    }
+}
+
+/// Play one packet of the guest's audio, as the playback channel hands
+/// a packet to the relay: the Opus packet, then what it decoded to.
+fn play_packet(relay: &AudioRelay) {
+    relay.on_opus_packet(OPUS_PACKET, PACKET_FRAMES);
+    relay.on_decoded_pcm(&decoded_samples(), AUDIO_RATE_HZ, AUDIO_CHANNELS);
+}
+
+#[tokio::test]
+async fn ironrdp_client_shares_the_clipboard_and_hears_the_guest() {
+    install_crypto_provider();
+    let clipboard = Arc::new(MemoryClipboard::new());
+    let relay = Arc::new(AudioRelay::new());
+    let session = session_with(Some(Arc::clone(&clipboard)), Some(Arc::clone(&relay)));
+    let server = serve(server_config(Arc::clone(&session.handles))).expect("serve");
+
+    // The client asks for the surface's own size, so the connection is
+    // never resized: the deactivation a resize takes would drop any
+    // static channel PDU that arrived during it. It accepts PCM alone.
+    let mut client = step(
+        "the connection sequence",
+        Client::connect(
+            server.local_addr(),
+            WIDTH,
+            HEIGHT,
+            Channels::ClipboardAndAudio(vec![audio_format(WaveFormat::PCM)]),
+        ),
+    )
+    .await;
+    exchange_clipboard(
+        &mut client,
+        &clipboard,
+        "copied on the client\r\nsecond line, na\u{ef}ve caf\u{e9}\r\n",
+        "copied in the guest\nzweite Zeile, gr\u{fc}\u{df} dich",
+    )
+    .await;
+
+    // The server starts the audio channel when the client confirms its
+    // training, which the client sends as it reads the server's
+    // training request, and the server sends that before it stores the
+    // client's text. So by the time the client has read the guest's
+    // copy, which the server sent after storing that text, it has
+    // confirmed; and the server reads the confirmation before the
+    // paste that the client sent after it. Once the guest's text has
+    // arrived, the audio channel has started and is listening to the
+    // relay.
+    //
+    // A client that accepts only PCM hears the decoded samples, as one
+    // wave of little-endian 16-bit PCM, and not the Opus packet.
+    play_packet(&relay);
+    let (format_no, timestamp, data) = next_wave(&mut client, "the PCM wave").await;
+    assert_eq!(format_no, 0, "the wave is in the client's only format");
+    assert_eq!(timestamp, 0, "the first wave starts the stream's clock");
+    assert_eq!(
+        data,
+        pcm_bytes(&decoded_samples()),
+        "the PCM wave holds the decoded samples"
+    );
+
+    // The client disconnects, and one that accepts Opus as well
+    // connects. Its clipboard works as the first one's did, and it
+    // hears the guest's Opus packet unchanged.
+    drop(client);
+    let mut client = step(
+        "the second connection sequence",
+        Client::connect(
+            server.local_addr(),
+            WIDTH,
+            HEIGHT,
+            Channels::ClipboardAndAudio(vec![
+                audio_format(WaveFormat::PCM),
+                audio_format(WaveFormat::OPUS),
+            ]),
+        ),
+    )
+    .await;
+    exchange_clipboard(
+        &mut client,
+        &clipboard,
+        "the second client's copy\r\n",
+        "the guest's second copy\n",
+    )
+    .await;
+    play_packet(&relay);
+    let (_, timestamp, data) = next_wave(&mut client, "the Opus wave").await;
+    assert_eq!(timestamp, 0, "the first wave starts the stream's clock");
+    assert_eq!(
+        data, OPUS_PACKET,
+        "the Opus wave is the guest's packet, unchanged"
+    );
+
     server.shutdown();
     step("the client to be disconnected", client.wait_closed()).await;
     step("the server thread to finish", server.stopped()).await;
