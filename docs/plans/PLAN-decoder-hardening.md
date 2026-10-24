@@ -160,7 +160,7 @@ split.
 | Phase | Plan | Status | Merged |
 |-------|------|--------|--------|
 | 1. Decoder hardening | This file, steps below | Complete | a167670 |
-| 2. Push audit | This file, below | Not started | |
+| 2. Push audit | [PLAN-decoder-hardening-phase-02-push-audit.md](PLAN-decoder-hardening-phase-02-push-audit.md) | In progress | |
 
 ### Phase 1: Decoder hardening
 
@@ -313,10 +313,13 @@ commit each).**
 
 ### Phase 2: Push audit
 
-Run `PUSH-AUDIT.md` over Phase 1's merge commit, once it is known.
-Findings land as their own pull request, and that pull request
-records Phase 1's `Merged` cell and closes this plan out. If the
-audit finds nothing, this phase sets the plan `Complete` in its own
+Run `PUSH-AUDIT.md` over Phase 1's merge commit, `a167670`; the
+phase plan is
+[PLAN-decoder-hardening-phase-02-push-audit.md](PLAN-decoder-hardening-phase-02-push-audit.md).
+Phase 1's `Merged` cell is recorded by the first commit of this
+phase's branch. Findings land as their own pull request, and that
+pull request closes this plan out. If the audit finds nothing that
+needs a code change, this phase sets the plan `Complete` in its own
 pull request.
 
 ## Administration and logistics
@@ -349,7 +352,9 @@ pull request.
   by #457, which merged into this branch.
 * Fuzz targets for the compression crate's decoders (#135). The
   helper makes "never allocates past the cap" a property a fuzzer
-  can assert.
+  can assert. The LZ4 decoder has one since `9364569`
+  (`fuzz_lz4_decode`); QUIC, LZ, GLZ and the cursor decoder do
+  not.
 * Per-channel message size caps (#436).
 
 ### Bugs fixed during this work
