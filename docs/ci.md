@@ -713,9 +713,9 @@ thing to look at if you see queue churn.
 ## Review-only changes
 
 Changes that touch only the code-review artefacts —
-`REVIEWS.md`, `.vscode/*.weaudit`, `.vscode/*.weaudit-shas.json`
-and `.vscode/review-scope.toml` — cannot affect the build, so
-the `check_paths` job skips every tier job for them. Both gates
+`REVIEWS.md`, `.vscode/*.weaudit` and `.vscode/*.weaudit-shas.json`
+— cannot affect the build, so the `check_paths` job skips every
+tier job for them. Both gates
 still pass, because their jq counts a skipped dependency as
 success, so such a pull request goes through the queue without
 running a single build.
@@ -725,7 +725,9 @@ running a single build.
 quantifier a file matches if it matches *any* pattern, so `'**'`
 would match everything and silently defeat the `!REVIEWS.md`
 exclusions. Keep its skip list in sync with the `.vscode`
-whitelist in `.gitignore` and with `codeql-analysis.yml`.
+whitelist in `.gitignore` and with `codeql-analysis.yml`, which
+alone also skips `.vscode/review-scope.toml` because CodeQL does
+not read it.
 
 ## Retesting
 

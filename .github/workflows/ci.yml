@@ -16,7 +16,10 @@ name: CI
 # weaudit annotations and the rendered REVIEWS.md -- are skipped by the
 # check_paths job below. The gates still pass: their jq treats a skipped
 # dependency as success. Keep check_paths' skip list in sync with the
-# .vscode whitelist in .gitignore and with codeql-analysis.yml.
+# .vscode whitelist in .gitignore and with codeql-analysis.yml, which
+# alone also skips .vscode/review-scope.toml because CodeQL does not
+# read it. The scope config decides what is reviewed at all, so here a
+# change to it is linted and reviewed like code.
 #
 # The content scanners (gitleaks, bidi-check) deliberately do not
 # consume check_paths. Their whole point is to read human-written text,
@@ -78,7 +81,6 @@ jobs:
               - '!REVIEWS.md'
               - '!.vscode/*.weaudit'
               - '!.vscode/*.weaudit-shas.json'
-              - '!.vscode/review-scope.toml'
 
   # Smoke tier: everything below here runs on pull_request (and on
   # workflow_dispatch) and gates "Can enqueue".
