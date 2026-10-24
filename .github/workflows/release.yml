@@ -424,9 +424,14 @@ jobs:
     timeout-minutes: 15
     environment: release
     permissions:
+      contents: read
       id-token: write
       attestations: write
     steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
       - name: Download ryll wheel artifacts
         uses: actions/download-artifact@v8
         with:
