@@ -4,8 +4,8 @@
 //! scaffolding, event bus, surface mirror and optional control
 //! socket); the RDP side is `shakenfist_spice_rdp::serve`, which
 //! runs IronRDP on a thread of its own and reads the session through
-//! the mirror, the cursor relay, the clipboard and the input,
-//! mouse-mode and resize channels.
+//! the mirror, the cursor relay, the clipboard, the audio relay and
+//! the input, mouse-mode and resize channels.
 
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use shakenfist_spice_rdp::{
-    generate_password, serve, spawn_cursor_relay, Credentials, RdpConfig, RdpSecurity,
+    generate_password, serve, spawn_cursor_relay, AudioRelay, Credentials, RdpConfig, RdpSecurity,
     SessionHandles, SingleSession, TlsIdentity,
 };
 use tracing::{info, warn};
@@ -38,14 +38,6 @@ const RESIZE_CHANNEL_CAPACITY: usize = 16;
 /// How long to wait for the RDP server thread, and then for the
 /// SPICE connection, to finish once asked to stop.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// The playback output for `--rdp`: the guest's audio is discarded
-/// rather than played on this host, which is not where the user is.
-struct DiscardPlayback;
-
-impl shakenfist_spice_renderer::PlaybackSink for DiscardPlayback {
-    fn on_opus_packet(&self, _packet: &[u8], _samples_in_packet: u32) {}
-}
 
 /// The names a generated self-signed certificate carries: the
 /// listen address, then `localhost`. A wildcard bind address is never
@@ -210,7 +202,11 @@ pub fn run_rdp(
         let event_broadcast_tx = event_bus.sender();
         let surface_mirror = event_bus.mirror();
 
-        let playback = shakenfist_spice_renderer::PlaybackOutput::Sink(Arc::new(DiscardPlayback));
+        // The guest's audio goes to the RDP client, through a relay
+        // the client's audio channel listens to, rather than to this
+        // host, which is not where the user is.
+        let audio = Arc::new(AudioRelay::new());
+        let playback = shakenfist_spice_renderer::PlaybackOutput::Sink(audio.clone());
 
         // `run_connection` requires these even though nothing here
         // repaints a window or changes the volume.
@@ -234,6 +230,7 @@ pub fn run_rdp(
             resize_tx,
             cursor,
             clipboard: Some(clipboard.clone()),
+            audio: Some(audio),
             label: session_label,
         });
         let username = credentials.username.clone();

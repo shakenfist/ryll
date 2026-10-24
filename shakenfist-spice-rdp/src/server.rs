@@ -19,6 +19,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, warn};
 
+use crate::audio::SoundFactory;
 use crate::auth::ProviderValidator;
 use crate::clipboard::ClipboardFactory;
 use crate::display::ClientSize;
@@ -455,6 +456,7 @@ fn build_server(parts: ServerParts) -> RdpServer {
     let display = MirrorDisplay::new(slot.clone(), FALLBACK_DESKTOP_SIZE);
     let input = SpiceInputHandler::new(slot.clone());
     let clipboard = ClipboardFactory::new(slot.clone());
+    let sound = SoundFactory::new(slot.clone());
     let connections = ConnectionLog {
         slot,
         client_size: display.client_size(),
@@ -478,6 +480,8 @@ fn build_server(parts: ServerParts) -> RdpServer {
         .with_honor_client_desktop_size(true)
         // Always offered; a session with no clipboard ignores it.
         .with_cliprdr_factory(Some(Box::new(clipboard)))
+        // Always offered; a session with no audio declines every format.
+        .with_sound_factory(Some(Box::new(sound)))
         .with_connection_handler(Some(Box::new(connections)))
         .with_credential_validator(validator)
         .build();
@@ -628,6 +632,7 @@ mod tests {
             resize_tx,
             cursor,
             clipboard: None,
+            audio: None,
             label: "test".to_string(),
         })
     }
@@ -784,6 +789,7 @@ mod tests {
             resize_tx,
             cursor,
             clipboard: None,
+            audio: None,
             label: "test".to_string(),
         }));
         let mut input = SpiceInputHandler::new(slot.clone());
@@ -826,6 +832,7 @@ mod tests {
             resize_tx,
             cursor,
             clipboard: None,
+            audio: None,
             label: "test".to_string(),
         }));
         let mut input = SpiceInputHandler::new(slot.clone());

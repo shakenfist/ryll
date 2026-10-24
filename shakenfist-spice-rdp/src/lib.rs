@@ -15,7 +15,10 @@
 //! handler also sends the guest's cursor shape, which
 //! [`spawn_cursor_relay`] keeps from the session's event bus. A
 //! clipboard backend carries text both ways between the client's
-//! clipboard channel and the session's [`MemoryClipboard`].
+//! clipboard channel and the session's [`MemoryClipboard`], and a
+//! sound handler plays the guest's audio on the client from the
+//! session's [`AudioRelay`]: Opus passed through unchanged when the
+//! client accepts it, decoded PCM when it does not.
 //!
 //! IronRDP's server type is not `Send`, so it cannot be spawned on a
 //! multi-thread tokio runtime. The server therefore runs on an OS
@@ -42,6 +45,7 @@ use std::sync::{Arc, Mutex};
 use shakenfist_spice_renderer::{DisplaySize, InputEvent, MemoryClipboard, SurfaceMirror};
 use tokio::sync::{mpsc, watch};
 
+mod audio;
 mod auth;
 mod clipboard;
 mod cursor;
@@ -50,6 +54,7 @@ mod input;
 mod server;
 mod tls;
 
+pub use audio::AudioRelay;
 pub use auth::{generate_password, SingleSession};
 pub use cursor::{spawn_cursor_relay, CursorState};
 pub use display::MirrorDisplay;
@@ -92,6 +97,11 @@ pub struct SessionHandles {
     /// offered the clipboard channel either way; with `None` the
     /// client's copies are ignored and it is offered nothing.
     pub clipboard: Option<Arc<MemoryClipboard>>,
+    /// The session's audio, from the relay the session was given as
+    /// its playback sink, or `None` to play no audio. Every client is
+    /// offered the audio channel either way; with `None` every format
+    /// it accepts is declined, so it is sent nothing.
+    pub audio: Option<Arc<AudioRelay>>,
     /// A human-readable name for the session, for logs.
     pub label: String,
 }

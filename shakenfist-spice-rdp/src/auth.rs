@@ -181,6 +181,7 @@ mod tests {
             resize_tx,
             cursor,
             clipboard: None,
+            audio: None,
             label: "test".to_string(),
         })
     }

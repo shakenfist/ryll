@@ -793,6 +793,7 @@ mod tests {
             resize_tx,
             cursor,
             clipboard: None,
+            audio: None,
             label: String::from("test"),
         });
         let slot = SessionSlot::new();
@@ -1484,6 +1485,7 @@ mod tests {
             resize_tx: handles.resize_tx.clone(),
             cursor: second_cursor,
             clipboard: None,
+            audio: None,
             label: String::from("second"),
         }));
         assert_pointer(&next_pointer(&mut updates).await, 5, 3, [0x33, 0x66, 0x99]);

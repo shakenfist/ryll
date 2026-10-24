@@ -420,6 +420,7 @@ mod tests {
             resize_tx,
             cursor,
             clipboard,
+            audio: None,
             label: "test".to_string(),
         }));
         slot

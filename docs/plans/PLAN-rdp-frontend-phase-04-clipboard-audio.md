@@ -652,6 +652,30 @@ FreeRDP's version and the date:
   offers a Format List; the guest-copy task is spawned through
   `Handle::try_current` and logs rather than panicking without
   a runtime.
+- **Step 2** ran as planned (Opus, high). Fourteen mutants, all
+  killed (`p04/step2/run-tests.sh`). Departures, kept: the relay
+  holds 32 items rather than 16, because each Opus packet is
+  published twice (the packet and its decode), so it is still
+  about a third of a second; an `ironrdp-svc` dev-dependency
+  (an edge) lets the handler's tests drive IronRDP's real
+  `RdpsndServer` through the client handshake; Opus packets
+  from a mono stream are passed through, as a stereo Opus
+  decoder takes them; items that do not belong to the chosen
+  codec (Opus packets when PCM was chosen, and the reverse) are
+  dropped silently, being normal operation.
+- **Found in step 2's review: a stale wave can drop the next
+  client.** IronRDP's server events carry no connection
+  identity. A wave the forwarder queued just before a
+  connection ended is normally discarded by the accept loop,
+  but that loop `select!`s between draining events and
+  accepting (`ironrdp-server` `server.rs:936-955`), so with a
+  second client already waiting in the listen backlog it can
+  accept first. The new connection then dispatches the stale
+  wave before its audio channel has a format, which drops it;
+  the client's retry succeeds. Not fixable from this crate (the
+  receiver is IronRDP's), so recorded under *Future work*; the
+  clipboard has the same exposure only for a paste request or
+  data response sent in the last instant of a connection.
 
 ## Future work
 
@@ -660,6 +684,13 @@ FreeRDP's version and the date:
 - Line-ending conversion for CRLF guests, in the renderer (#624).
 - Rich clipboard formats and file copy, and the microphone
   (master plan *Future work*).
+- A wave or clipboard message queued as one connection ends can
+  drop a client that was waiting in the backlog (see *Execution
+  notes*). Worth raising with IronRDP: a channel message the
+  channel is not ready for could be dropped rather than ending
+  the connection, or server events could carry a connection
+  identity. Phase 5's takeover rule makes a waiting client more
+  common, so it should check this.
 
 ## Back brief
 
