@@ -159,7 +159,7 @@ split.
 
 | Phase | Plan | Status | Merged |
 |-------|------|--------|--------|
-| 1. Decoder hardening | This file, steps below | In progress | |
+| 1. Decoder hardening | This file, steps below | Complete | a167670 |
 | 2. Push audit | This file, below | Not started | |
 
 ### Phase 1: Decoder hardening
@@ -177,14 +177,13 @@ commit builds and passes `make test` on its own.
 | 4 | medium | opus | none | Complete | Renderer: #177, #173, #174, #182, as four commits. See brief 4. |
 | 5 | medium | sonnet | none | Complete | Documentation. See brief 5. |
 
-All six steps are complete on the `decoder-hardening` branch (PR
-#443); Step 1b ran after the branch was rebased onto #437. The phase
-stays `In progress` until the PR merges and its merge commit is
-recorded.
+All six steps landed on the `decoder-hardening` branch, merged as
+PR #443 (`a167670`) on 2026-10-04; Step 1b ran after the branch was
+rebased onto #437.
 
 Because `DecompressedImage::new`/`new_glz` now return `Option` and
-`MAX_DECODED_RGBA_BYTES` dropped from 1 GiB to 256 MiB, the next
-release must be a minor bump (0.2.0), not a patch; see
+`MAX_DECODED_RGBA_BYTES` dropped from 1 GiB to 256 MiB, the change
+shipped in a minor release, 0.2.0, rather than a patch; see
 [Choosing the version](../releasing.md#choosing-the-version).
 The kerbside proxy needs no bump: it depends only on
 `shakenfist-spice-protocol`, at a pinned git revision, and the only
