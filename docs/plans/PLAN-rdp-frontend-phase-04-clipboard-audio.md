@@ -638,7 +638,20 @@ FreeRDP's version and the date:
 
 ## Execution notes
 
-*To be filled during implementation.*
+- **Back brief, 2026-10-25 AEDT.** Mikal confirmed decisions 1
+  and 7; the management session may start the desktop guest for
+  step 4 and will ping Mikal to listen; this session may push
+  and open the pull request once the definition of done passes.
+- **Step 1** ran as planned (Opus, high). Eight mutants, all
+  killed by the expected tests (script in the session
+  scratchpad's `p04/step1/run-tests.sh`). Departures, kept: the
+  crate also depends on `ironrdp-core` 0.2 (an edge, not a
+  crate), because `CliprdrBackend` requires `AsAny` and nothing
+  re-exports it; a session with no clipboard answers a data
+  request with nothing rather than an error, since it never
+  offers a Format List; the guest-copy task is spawned through
+  `Handle::try_current` and logs rather than panicking without
+  a runtime.
 
 ## Future work
 

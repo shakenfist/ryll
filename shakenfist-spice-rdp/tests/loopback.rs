@@ -197,6 +197,7 @@ fn session() -> Session {
         mouse_mode,
         resize_tx,
         cursor,
+        clipboard: None,
         label: "loopback".to_string(),
     });
     Session {

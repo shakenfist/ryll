@@ -180,6 +180,7 @@ mod tests {
             mouse_mode,
             resize_tx,
             cursor,
+            clipboard: None,
             label: "test".to_string(),
         })
     }

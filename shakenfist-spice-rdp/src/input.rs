@@ -527,6 +527,7 @@ mod tests {
                 mouse_mode,
                 resize_tx,
                 cursor,
+                clipboard: None,
                 label: "test".to_string(),
             });
             let slot = SessionSlot::new();
@@ -906,6 +907,7 @@ mod tests {
             mouse_mode,
             resize_tx,
             cursor,
+            clipboard: None,
             label: "second".to_string(),
         }));
 

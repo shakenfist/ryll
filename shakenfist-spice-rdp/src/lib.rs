@@ -13,7 +13,9 @@
 //! [`SurfaceMirror`], and an input handler that turns RDP keyboard
 //! and mouse events into the renderer's [`InputEvent`]s. The display
 //! handler also sends the guest's cursor shape, which
-//! [`spawn_cursor_relay`] keeps from the session's event bus.
+//! [`spawn_cursor_relay`] keeps from the session's event bus. A
+//! clipboard backend carries text both ways between the client's
+//! clipboard channel and the session's [`MemoryClipboard`].
 //!
 //! IronRDP's server type is not `Send`, so it cannot be spawned on a
 //! multi-thread tokio runtime. The server therefore runs on an OS
@@ -37,10 +39,11 @@
 
 use std::sync::{Arc, Mutex};
 
-use shakenfist_spice_renderer::{DisplaySize, InputEvent, SurfaceMirror};
+use shakenfist_spice_renderer::{DisplaySize, InputEvent, MemoryClipboard, SurfaceMirror};
 use tokio::sync::{mpsc, watch};
 
 mod auth;
+mod clipboard;
 mod cursor;
 mod display;
 mod input;
@@ -82,6 +85,13 @@ pub struct SessionHandles {
     /// event bus before the session is spawned, or the first cursor
     /// shape is lost.
     pub cursor: watch::Receiver<CursorState>,
+    /// The session's clipboard, which the main channel ferries to and
+    /// from the guest's agent, or `None` to carry no clipboard. Text
+    /// the RDP client copies is stored in it as host text, and text the
+    /// guest copies is offered to the client from it. Every client is
+    /// offered the clipboard channel either way; with `None` the
+    /// client's copies are ignored and it is offered nothing.
+    pub clipboard: Option<Arc<MemoryClipboard>>,
     /// A human-readable name for the session, for logs.
     pub label: String,
 }

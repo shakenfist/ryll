@@ -44,6 +44,19 @@ ironrdp-server = { version = "0.13", default-features = false, features = ["rayo
 # not a crate.
 ironrdp-displaycontrol = "0.8"
 
+# The clipboard channel's backend and backend factory traits, the
+# messages a backend sends the server, and the clipboard PDU types,
+# none of which `ironrdp-server` re-exports. The version
+# `ironrdp-server` builds on, already in Cargo.lock through it, so
+# this adds an edge, not a crate.
+ironrdp-cliprdr = "0.7"
+
+# `AsAny`, which the clipboard backend trait requires of every
+# backend, and the `impl_as_any!` macro that implements it. The
+# version the other IronRDP crates build on, already in Cargo.lock
+# through them, so this adds an edge, not a crate.
+ironrdp-core = "0.2"
+
 # The IronRDP display and input handler traits are declared with
 # `#[async_trait::async_trait]`, and `ironrdp-server` does not
 # re-export the macro, so implementors annotate their own impls with

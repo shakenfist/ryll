@@ -4,8 +4,8 @@
 //! scaffolding, event bus, surface mirror and optional control
 //! socket); the RDP side is `shakenfist_spice_rdp::serve`, which
 //! runs IronRDP on a thread of its own and reads the session through
-//! the mirror, the cursor relay and the input, mouse-mode and resize
-//! channels.
+//! the mirror, the cursor relay, the clipboard and the input,
+//! mouse-mode and resize channels.
 
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -186,24 +186,13 @@ pub fn run_rdp(
         >(RESIZE_CHANNEL_CAPACITY);
         #[cfg(unix)]
         let resize_tx_for_control = resize_tx.clone();
-        // RDP clipboard redirection is not carried yet, but a control
-        // socket can carry clipboard text through an in-memory
-        // clipboard, made only when there is a socket, as in `--web`.
-        #[cfg(unix)]
-        let control_server = control_server.map(|server| {
-            (
-                server,
-                Arc::new(shakenfist_spice_renderer::MemoryClipboard::new()),
-            )
-        });
-        #[cfg(unix)]
-        let clipboard_for_conn = control_server.as_ref().map(|(_, clipboard)| {
-            clipboard.clone() as Arc<dyn shakenfist_spice_renderer::ClipboardBackend>
-        });
-        #[cfg(not(unix))]
-        let clipboard_for_conn: Option<
-            Arc<dyn shakenfist_spice_renderer::ClipboardBackend>,
-        > = None;
+        // One in-memory clipboard for the session, which the main
+        // channel ferries to and from the guest's agent. The RDP
+        // client's clipboard channel and, when there is one, a control
+        // socket both read and write it.
+        let clipboard = Arc::new(shakenfist_spice_renderer::MemoryClipboard::new());
+        let clipboard_for_conn =
+            Some(clipboard.clone() as Arc<dyn shakenfist_spice_renderer::ClipboardBackend>);
         drop(usb_tx);
         drop(webdav_tx);
 
@@ -244,6 +233,7 @@ pub fn run_rdp(
             mouse_mode: session_state_rx.mouse_mode.clone(),
             resize_tx,
             cursor,
+            clipboard: Some(clipboard.clone()),
             label: session_label,
         });
         let username = credentials.username.clone();
@@ -332,7 +322,7 @@ pub fn run_rdp(
         #[cfg(unix)]
         let control_cancel = shakenfist_spice_renderer::CancellationToken::new();
         #[cfg(unix)]
-        let control_handle = control_server.map(|(server, clipboard)| {
+        let control_handle = control_server.map(|server| {
             let status: Arc<dyn shakenfist_spice_renderer::control::StatusProvider> =
                 Arc::new(shakenfist_spice_renderer::SessionStatus::new(
                     spice_connected.clone(),
