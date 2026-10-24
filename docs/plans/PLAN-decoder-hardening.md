@@ -341,6 +341,91 @@ pull request.
 * The style guide, `docs/spice-protocol.md` and `AGENTS.md` describe
   the shared limit, and no prose quotes its value.
 
+### Items deferred from the push audit
+
+Phase 2 audited `a167670^1..a167670` (22 files, 1 889 insertions)
+and produced 30 findings once duplicates were merged. The triage
+table, with each finding located in current `develop`, is in
+[PLAN-decoder-hardening-phase-02-push-audit.md](PLAN-decoder-hardening-phase-02-push-audit.md).
+The security review found all nine issues closed. Nothing the
+audit found reopens one.
+
+**To fix in the findings pull request** (16):
+
+- Tests:
+  - **T1** (blocking): the #173 test's width is refused by the
+    per-side cap before the stride guard runs. Use 16384 x 1 at
+    stride 4, which the old code also panics on.
+  - **T2**: add an in-cap FromCache mismatch, a 3x3 descriptor over
+    a cached 2x2.
+  - **T3**: drive a ZlibGlzRgb image through `handle_message`.
+  - **T5**: add QUIC headers at the pixel cap and one over it.
+  - **T8**: add a cursor over the pixel cap with in-cap sides.
+- QUIC run guard:
+  - **Q1** and **T4**: fold the four run-overshoot guards into one
+    helper, so a single test covers all four loops, the tail loops
+    included.
+- Comments:
+  - **Q3** and **Q4**: cut the repeated and over-long comments to
+    their reasons.
+  - **Q6**: the LZ4 pixel-cap test uses sides that are both legal
+    (8192 x 8193).
+- Messages:
+  - **W1**: the pixmap refusal prints `{}x{}`.
+- Docs:
+  - **D1** and **D2**: trim the "Decode limits" paragraph to the
+    contract, and make the docs and `jpeg.rs` give one account of
+    how the platform JPEG backends are bounded.
+  - **D3**: drop the module-history sentence from `limits.rs`.
+- Security:
+  - **S3**: bound the zlib-GLZ inflate by the validated
+    `declared_glz_size`, not by the outer limit.
+  - **S4**: check the pure-Rust JPEG backend's dimensions from
+    `read_info()` before `decode()`.
+
+**Filed as issues, outside this plan** (5): problems that predate
+it, which the audit found in files it read.
+
+- **S1**, #626 (high): the LZ/GLZ back-reference one pixel before
+  the start panics.
+- **Q8/S2**, #627 (medium): surfaces skip the pixel cap and have no
+  count limit. **Q5**, the stale "1 GiB" comment, goes with that fix.
+- **W3/S5**, #628 (low): decode refusals log at message rate. The
+  compression crate has no `warn_once!`, so this is a design
+  question rather than an edit.
+- **Q9**, #629: `display.rs` is about 6 000 lines.
+
+**Declined** (8):
+
+- **W2**: the `pixmap:too_large` key's message names both limits,
+  so the log is accurate, and renaming a key breaks anyone grepping
+  for it.
+- **Q2**: one shared refusal type across nine sites, whose error
+  types differ (`anyhow`, `Option`, `warn_once!`), would cost more
+  churn than the uneven wording does. W1 fixes the one real
+  inconsistency.
+- **T6**: hand-packed QUIC bitstreams are the only practical way to
+  reach those states, and the tests document the model state they
+  rely on.
+- **T7**: an allocation that was never made cannot be observed
+  without an allocator hook. The LZ and GLZ tests do tell old code
+  from new. The LZ4 case is covered by `rgba_len`'s unit tests.
+- **D4**: the "Breaking changes" heading is a reviewer convention.
+  A pull request template is a repository-wide change, not this
+  plan's.
+- **D5**: the guest-driver claims about `QXL_IMAGE_CACHE` come from
+  the driver sources, which are not in this repository. Checking
+  them belongs to a docs audit.
+- **S7**: `runlen` overflow needs a 32-bit `usize`, ryll ships only
+  64-bit targets, and the run guard makes it harmless in release.
+- **Q10/S6**: `DecompressedImage`'s `pub` fields. Nothing mutates
+  them, and the security review found no path by which server data
+  could. Making them private is a breaking change, and 0.2.0 and
+  0.3.0 have both shipped since the plan's own break, so it would
+  need a release of its own.
+
+**No action** (1): **Q7**, already fixed by `df2f06b`.
+
 ### Future work
 
 * `decode_image_and_emit` (`display.rs`, the `no_image_data` guard
@@ -356,6 +441,8 @@ pull request.
   (`fuzz_lz4_decode`); QUIC, LZ, GLZ and the cursor decoder do
   not.
 * Per-channel message size caps (#436).
+* The four issues the push audit filed: #626, #627, #628 and #629
+  (see above).
 
 ### Bugs fixed during this work
 

@@ -249,3 +249,124 @@ the range being audited, the four judgment agents and their models,
 and how findings will be landed. Step 5's fold-in question (decision
 4) is raised with the operator, not settled by the management session
 alone.
+
+## Execution record: 2026-10-25 (AEDT)
+
+### Back brief answers
+
+The operator confirmed the plan as written. Findings land in a
+separate pull request after this one (decision 4 stands), and this
+session may push this branch and open its pull request once the
+definition of done passes.
+
+### Departures from the plan
+
+- The management session assembled the patch itself, because it is
+  one command, and checked the gate: `git diff --shortstat
+  a167670^1 a167670` reads 22 files, 1 889 insertions, 320
+  deletions. The Step 1 sub-agent ran only wave 1.
+- Steps 1 and 2 ran in parallel, and Step 3 started before wave 1
+  finished. Wave 2 mechanical only reads git, and the plan's risks
+  section already says a wave 1 failure on today's tree does not
+  block wave 2. Wave 1 then passed, so nothing was discarded.
+- Problems that predate the plan were filed as issues rather than
+  recorded as findings: #626, #627, #628 and #629. See Step 5.
+
+### Step 1: wave 1, exit 0
+
+`AUDIT_BASE=a167670^1 AUDIT_HEAD=a167670 tools/audit/wave1.sh`
+exited 0. pre-commit, rustfmt and clippy, and `cargo test
+--workspace` all passed (every `test result` line reads 0 failed).
+The `println!`/`eprintln!`, long-line and unguarded `log_message`
+checks reported no hits. The println scan takes its directories
+from the workspace `members`, which include both audited crates.
+
+### Step 2: wave 2 mechanical, exit 0, and style
+
+- No TODO/FIXME/HACK, no new `#[allow(dead_code)]` and no new
+  `unsafe`.
+- 31 new `#[test]` functions across 14 Rust files, and 7
+  documentation files touched.
+- 20 new `.unwrap()`/`.expect()` hits. The code-quality agent
+  confirmed all 20 are inside `#[cfg(test)]`.
+- The style review found no blocking items, and three advisory
+  ones (W1-W3 below).
+
+### Step 3: judgment agents
+
+| Agent | Model | Blocking | Advisory | Notes |
+|-------|-------|----------|----------|-------|
+| 2a code quality | sonnet, medium | 0 | 10 (Q1-Q10) | |
+| 2b tests | sonnet, medium | 1 (T1) | 7 (T2-T8) | Every issue has a regression test |
+| 2c docs | sonnet, medium | 0 | 5 (D1-D5) | No cap values quoted; no plan citations in code |
+| 2d security | opus, high | — | S1 high, S2 medium, S3-S5 low, S6-S7 info | All nine issues closed |
+
+The security agent's verdict was that #171-#177, #182 and #442 are
+all closed. The QUIC run guard matches `quic_tmpl.c` in all four
+loops, and the `melcstate` guard matches `quic.c`. No `rgba_len`
+result is multiplied again without a check, and every new
+`warn_once!` key is a static literal.
+
+The management session reproduced T1 and S1 against the code
+before accepting them. For T1: at `a167670`, and still today,
+`rgba_len` refuses the test's `width = 1_000_000` before
+`row_fits_stride` runs, so the #173 guard is never reached. For
+S1: in the LZ and GLZ block-copy path, a back-reference to one
+pixel before the image start wraps `src` to `usize::MAX - 3`, and
+`src + 4` wraps past the guard.
+
+### Step 4: triage against `develop` at `2edb002`
+
+The 34 raw findings merge into 30 rows: W3 with S5, Q8 with S2,
+and Q10 with S6 and the survey's in-hand finding. 29 are still
+present, and one, Q7, was fixed by `df2f06b`. The management
+session checked Q7 against today's `lz4.rs:76-80`. T1's test is
+byte-for-byte unchanged at `display.rs:5259`. Locations are on
+`develop`.
+
+| ID | Finding | Severity | Status | Predates plan | Location |
+|----|---------|----------|--------|---------------|----------|
+| W1 | Pixmap refusal prints `{} x {}`, unlike `{}x{}` elsewhere | advisory | present | no | display.rs:2459 |
+| W2 | `pixmap:too_large` key also covers zero and per-side refusals | advisory | present | no | display.rs:2458 |
+| W3/S5 | Refusals log with plain `warn!`, not `warn_once!` | low | present | mixed | lz4.rs:82; quic.rs:649, 1596; cursor.rs:624, 628; display.rs:2872 |
+| Q1 | QUIC run-overshoot guard pasted four times | advisory | present | no | quic.rs:950, 1034, 1351, 1424 |
+| Q2 | `rgba_len`-then-warn repeated at nine sites | advisory | present | no | lz.rs:63, glz.rs:272, lz4.rs:81, … |
+| Q3 | "only refuses outside the limits" comment repeated | advisory | present | no | lz.rs:176, glz.rs:531, lz4.rs:167, display.rs:2761, 2801 |
+| Q4 | Comments longer than the guards they explain | advisory | present | no | display.rs:363-378, 2449-2455, 2477-2482; quic.rs:643-647 |
+| Q5 | Stale "16384x16384x4 = 1 GiB" sentence | advisory | present | partly | surface.rs:14-18 |
+| Q6 | LZ4 test calls 16384x16385 "both sides legal" | advisory | present | no | lz4.rs:464 |
+| Q7 | LZ4 lost the `row_bytes` checked-multiply rationale | advisory | fixed (`df2f06b`) | no | lz4.rs:76-80 |
+| Q8/S2 | Surfaces skip the pixel cap and have no count limit | medium | present | yes | surface.rs:23, 48-67; surface_mirror.rs:102, 157 |
+| Q9 | display.rs, jpeg.rs, quic.rs over 1 500 lines | advisory | present | yes | display.rs is now 6 030 lines |
+| Q10/S6 | `DecompressedImage` fields are `pub` | info | present | yes | lib.rs:118-127 |
+| T1 | #173 test's width is refused by the side cap first | **blocking** | present | no | display.rs:5259-5273 |
+| T2 | #174 test is over the pixel cap; no in-cap mismatch | advisory | present | no | display.rs:5296-5320 |
+| T3 | No test drives ZlibGlzRgb through `handle_message` | advisory | present | no | display.rs:2595 |
+| T4 | QUIC tail run loops never exercised | advisory | present | no | quic.rs:1034, 1424 |
+| T5 | No QUIC at-cap or over-pixel-cap header test | advisory | present | no | quic.rs tests |
+| T6 | QUIC hand-packed tests reach into decoder internals | advisory | present | no | quic.rs:1745, 1846-1856 |
+| T7 | #175 tests tell old from new only by message wording | advisory | present | no | lz.rs:187, glz.rs:542, lz4.rs:456 |
+| T8 | No cursor test over the pixel cap with in-cap sides | advisory | present | no | cursor.rs:948-960 |
+| D1 | Decode-limits paragraph restates `jpeg.rs` internals | advisory | present | no | docs/spice-protocol.md:539-560 |
+| D2 | Docs and `jpeg.rs` disagree on how WIC/ImageIO are bounded | advisory | present | no | spice-protocol.md:545-549; compression README:52-55; jpeg.rs:58-59 |
+| D3 | `limits.rs` doc comments quote values and module history | advisory | present | no | limits.rs:6-32 |
+| D4 | "Breaking changes" PR heading has no template | advisory | present | no | docs/releasing.md:164 |
+| D5 | Guest-driver `QXL_IMAGE_CACHE` claims not checkable in-repo | advisory | present | no | spice-protocol.md:448-451 |
+| S1 | LZ/GLZ back-reference one pixel before start panics | **high** | present | yes | lz.rs:133, 151; glz.rs:381, 399 |
+| S3 | zlib-GLZ inflate bounded by limit, not declared size | low | present | no | display.rs:393-421 |
+| S4 | jpeg-decoder L8 path allocates before its dimension check | low | present | partly | jpeg.rs:234-235, 278 |
+| S7 | QUIC `runlen += melcorder` can overflow a 32-bit usize | info | present | yes | quic.rs:665 |
+
+### Step 5: decisions
+
+The decision for each row is recorded in the master plan, under
+*Items deferred from the push audit*. In summary:
+
+- 16 rows go to the findings pull request.
+- 8 are declined, each with its reason.
+- 5 go to issues and leave this plan's scope: the four problems
+  that predate it (#626 to #629), plus Q5, which #627 covers.
+- Q7 needs no action.
+
+Because rows need code changes, the plan stays `In progress`. The
+findings pull request sets it `Complete`.
