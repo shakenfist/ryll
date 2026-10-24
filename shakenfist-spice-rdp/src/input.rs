@@ -498,6 +498,8 @@ mod tests {
     use shakenfist_spice_renderer::SurfaceMirror;
     use tokio::sync::{mpsc, watch};
 
+    use crate::CursorState;
+
     const WIDTH: u32 = 640;
     const HEIGHT: u32 = 480;
 
@@ -516,6 +518,7 @@ mod tests {
         fn with_queue(mode: u32, capacity: usize) -> Self {
             let (input_tx, input_rx) = mpsc::channel(capacity);
             let (mode_tx, mouse_mode) = watch::channel(mode);
+            let (_, cursor) = watch::channel(CursorState::default());
             let (resize_tx, _resize_rx) = mpsc::channel(1);
             let mirror = SurfaceMirror::with_test_surface(0, 0, WIDTH, HEIGHT, &[]);
             let handles = Arc::new(SessionHandles {
@@ -523,6 +526,7 @@ mod tests {
                 input_tx,
                 mouse_mode,
                 resize_tx,
+                cursor,
                 label: "test".to_string(),
             });
             let slot = SessionSlot::new();
@@ -894,12 +898,14 @@ mod tests {
         // session on a fresh queue.
         let (input_tx, mut input_rx) = mpsc::channel(8);
         let (_mode_tx, mouse_mode) = watch::channel(MOUSE_MODE_SERVER);
+        let (_, cursor) = watch::channel(CursorState::default());
         let (resize_tx, _resize_rx) = mpsc::channel(1);
         h.handler.slot.set(Arc::new(SessionHandles {
             surface_mirror: Arc::clone(&h.handles.surface_mirror),
             input_tx,
             mouse_mode,
             resize_tx,
+            cursor,
             label: "second".to_string(),
         }));
 

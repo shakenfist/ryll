@@ -138,6 +138,8 @@ mod tests {
     use shakenfist_spice_renderer::SurfaceMirror;
     use tokio::sync::{mpsc, watch};
 
+    use crate::CursorState;
+
     /// The password the tests' session expects: minted once per test
     /// run rather than written into the source, so no literal
     /// password sits in the tree.
@@ -169,6 +171,7 @@ mod tests {
     fn handles() -> Arc<SessionHandles> {
         let (input_tx, _) = mpsc::channel(1);
         let (_, mouse_mode) = watch::channel(0);
+        let (_, cursor) = watch::channel(CursorState::default());
         let (resize_tx, _) = mpsc::channel(1);
         let mirror = SurfaceMirror::with_test_surface(0, 0, 16, 16, &[]);
         Arc::new(SessionHandles {
@@ -176,6 +179,7 @@ mod tests {
             input_tx,
             mouse_mode,
             resize_tx,
+            cursor,
             label: "test".to_string(),
         })
     }

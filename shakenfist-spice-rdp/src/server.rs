@@ -464,6 +464,16 @@ fn build_server(parts: ServerParts) -> RdpServer {
     let mut server = builder
         .with_input_handler(input)
         .with_display_handler(display)
+        // Negotiate the desktop size the client asks for in its Client
+        // Core Data rather than the surface's, so that the guest can be
+        // asked for it. IronRDP still builds the encoder at the
+        // surface's size, a mismatch that would drop the client; the
+        // display handler records the negotiated size and sends no
+        // bitmap until the two agree. Either the guest adopts the
+        // client's size, or, once a short grace period after accept has
+        // let the client's dynamic channels open, the display handler
+        // resizes the client to the surface's.
+        .with_honor_client_desktop_size(true)
         .with_connection_handler(Some(Box::new(connections)))
         .with_credential_validator(validator)
         .build();
@@ -483,9 +493,11 @@ fn build_server(parts: ServerParts) -> RdpServer {
 struct ConnectionLog {
     slot: SessionSlot,
     /// The display handler's record of the size the client was told.
-    /// Forgotten on accept, which runs before the server first asks
-    /// the display for the connection's size, so that ask records the
-    /// size this client is told.
+    /// Started afresh on accept, which runs before the server first
+    /// asks the display for the connection's size, so that ask records
+    /// afresh, the connection's first negotiated size is taken for the
+    /// size this client asked for, and the grace period before the
+    /// client is resized runs from the accept.
     client_size: ClientSize,
     /// The input handler's record of held keys and buttons, ended
     /// with each connection.
@@ -507,7 +519,7 @@ impl ConnectionHandler for ConnectionLog {
             return false;
         }
         info!(%peer, "RDP client connected");
-        self.client_size.forget();
+        self.client_size.start_connection();
         true
     }
 
@@ -577,7 +589,7 @@ mod tests {
     use shakenfist_spice_renderer::{InputEvent, SurfaceMirror};
     use tokio::sync::watch as tokio_watch;
 
-    use crate::{SessionHandles, SingleSession};
+    use crate::{CursorState, SessionHandles, SingleSession};
 
     const JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -602,6 +614,7 @@ mod tests {
     fn handles() -> Arc<SessionHandles> {
         let (input_tx, _) = mpsc::channel(1);
         let (_, mouse_mode) = tokio_watch::channel(0);
+        let (_, cursor) = tokio_watch::channel(CursorState::default());
         let (resize_tx, _) = mpsc::channel(1);
         let mirror = SurfaceMirror::with_test_surface(0, 0, 64, 48, &[]);
         Arc::new(SessionHandles {
@@ -609,6 +622,7 @@ mod tests {
             input_tx,
             mouse_mode,
             resize_tx,
+            cursor,
             label: "test".to_string(),
         })
     }
@@ -732,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn accepting_a_connection_forgets_the_client_size() {
+    fn accepting_a_connection_starts_the_client_size_afresh() {
         let client_size = ClientSize::default();
         client_size.set(FALLBACK_DESKTOP_SIZE);
         let mut connections = ConnectionLog {
@@ -744,14 +758,17 @@ mod tests {
             stopping: Arc::new(AtomicBool::new(false)),
         };
         let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 50000);
+        assert_eq!(client_size.resize_held_until(), None);
         assert!(connections.on_accept(peer));
         assert_eq!(client_size.get(), None);
+        assert!(client_size.resize_held_until().is_some());
     }
 
     #[test]
     fn a_disconnect_releases_held_input_before_emptying_the_slot() {
         let (input_tx, mut input_rx) = mpsc::channel(8);
         let (_mode_tx, mouse_mode) = tokio_watch::channel(0);
+        let (_, cursor) = tokio_watch::channel(CursorState::default());
         let (resize_tx, _resize_rx) = mpsc::channel(1);
         let mirror = SurfaceMirror::with_test_surface(0, 0, 64, 48, &[]);
         let slot = SessionSlot::new();
@@ -760,6 +777,7 @@ mod tests {
             input_tx,
             mouse_mode,
             resize_tx,
+            cursor,
             label: "test".to_string(),
         }));
         let mut input = SpiceInputHandler::new(slot.clone());
@@ -791,6 +809,7 @@ mod tests {
         // Room for one event: the first key-down fills the queue.
         let (input_tx, mut input_rx) = mpsc::channel(1);
         let (_mode_tx, mouse_mode) = tokio_watch::channel(0);
+        let (_, cursor) = tokio_watch::channel(CursorState::default());
         let (resize_tx, _resize_rx) = mpsc::channel(1);
         let mirror = SurfaceMirror::with_test_surface(0, 0, 64, 48, &[]);
         let slot = SessionSlot::new();
@@ -799,6 +818,7 @@ mod tests {
             input_tx,
             mouse_mode,
             resize_tx,
+            cursor,
             label: "test".to_string(),
         }));
         let mut input = SpiceInputHandler::new(slot.clone());

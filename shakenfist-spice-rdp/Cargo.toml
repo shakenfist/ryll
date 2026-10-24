@@ -37,6 +37,13 @@ workspace = true
 # pull is within deny.toml's licence allowlist.
 ironrdp-server = { version = "0.13", default-features = false, features = ["rayon", "helper"] }
 
+# The display-control monitor layout a client sends when its window
+# changes size, which `RdpServerDisplay::request_layout` takes and
+# `ironrdp-server` does not re-export. The version `ironrdp-server`
+# builds on, already in Cargo.lock through it, so this adds an edge,
+# not a crate.
+ironrdp-displaycontrol = "0.8"
+
 # The IronRDP display and input handler traits are declared with
 # `#[async_trait::async_trait]`, and `ironrdp-server` does not
 # re-export the macro, so implementors annotate their own impls with
