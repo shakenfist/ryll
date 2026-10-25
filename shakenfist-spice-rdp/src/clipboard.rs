@@ -23,7 +23,9 @@
 //! made before the client connected are not offered to it, only the
 //! ones made after the channel is Ready. Those are offered as a Format
 //! List naming `CF_UNICODETEXT`, and the text is read from the
-//! clipboard only when the client asks for it.
+//! clipboard only when the client asks for it. A guest copy of the text
+//! the client's clipboard already holds is not offered, which is what
+//! a guest that takes the clipboard again after a paste makes.
 //!
 //! `CF_UNICODETEXT` is Windows text, with CRLF line endings, while the
 //! session's host-side text has LF line endings, as on a Unix host.
@@ -33,6 +35,8 @@
 //! one clipboard message is dropped rather than stored.
 //!
 //! Only byte counts are logged, never the text.
+
+use std::sync::{Arc, Mutex};
 
 use ironrdp_cliprdr::backend::{ClipboardMessage, CliprdrBackend, CliprdrBackendFactory};
 use ironrdp_cliprdr::pdu::{
@@ -145,6 +149,33 @@ mod gate {
     }
 }
 
+/// What the client's clipboard is known to hold as text, as a hash of
+/// it so that the text itself is not kept: set when the client's text
+/// is stored and when a guest copy is offered to the client, and
+/// cleared when the client copies something that is not text. Shared
+/// by a connection's backend and its guest-copy task.
+#[derive(Clone, Default)]
+struct ClientText(Arc<Mutex<Option<u64>>>);
+
+impl ClientText {
+    fn get(&self) -> Option<u64> {
+        *self.lock()
+    }
+
+    fn set(&self, hash: Option<u64>) {
+        *self.lock() = hash;
+    }
+
+    /// Lock the hash. A panic while the lock was held cannot leave the
+    /// `Option` half-written, so a poisoned lock is recovered rather
+    /// than propagated.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<u64>> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 /// Where a connection's clipboard channel is.
 enum State {
     /// Before the channel is Ready. `None` if the server never gave
@@ -161,6 +192,7 @@ enum State {
 pub(crate) struct SessionClipboard {
     slot: SessionSlot,
     state: State,
+    client_text: ClientText,
     /// The task that offers each guest copy to the client, from when
     /// the channel is Ready until the backend is dropped with its
     /// connection.
@@ -172,6 +204,7 @@ impl SessionClipboard {
         Self {
             slot,
             state: State::Starting(events.map(gate::Unready::new)),
+            client_text: ClientText::default(),
             guest_copies: None,
         }
     }
@@ -206,7 +239,11 @@ impl SessionClipboard {
         // the guest's are not offered.
         match tokio::runtime::Handle::try_current() {
             Ok(runtime) => {
-                self.guest_copies = Some(runtime.spawn(offer_guest_copies(ready.clone(), copies)));
+                self.guest_copies = Some(runtime.spawn(offer_guest_copies(
+                    ready.clone(),
+                    self.client_text.clone(),
+                    copies,
+                )));
             }
             Err(_) => warn!("rdp clipboard: no runtime; the guest's copies are not offered"),
         }
@@ -238,11 +275,24 @@ impl std::fmt::Debug for SessionClipboard {
 
 ironrdp_core::impl_as_any!(SessionClipboard);
 
-/// Offer the client each guest copy reported on `copies`, until the
-/// clipboard or the server goes away.
-async fn offer_guest_copies(channel: gate::Ready, mut copies: watch::Receiver<Option<usize>>) {
+/// Offer the client each guest copy reported on `copies`, unless the
+/// client's clipboard already holds its text, until the clipboard or
+/// the server goes away.
+async fn offer_guest_copies(
+    channel: gate::Ready,
+    client_text: ClientText,
+    mut copies: watch::Receiver<Option<usize>>,
+) {
     while copies.changed().await.is_ok() {
         let bytes = *copies.borrow_and_update();
+        let hash = channel.clipboard().text().map(|text| hash_text(&text));
+        if hash.is_some() && client_text.get() == hash {
+            debug!(
+                ?bytes,
+                "rdp clipboard: the guest copied the text the client has; not offered"
+            );
+            continue;
+        }
         debug!(
             ?bytes,
             "rdp clipboard: the guest copied text; offering it to the client"
@@ -253,6 +303,7 @@ async fn offer_guest_copies(channel: gate::Ready, mut copies: watch::Receiver<Op
         if !offered {
             break;
         }
+        client_text.set(hash);
     }
 }
 
@@ -300,6 +351,7 @@ impl CliprdrBackend for SessionClipboard {
                 formats = available_formats.len(),
                 "rdp clipboard: the client copied no text"
             );
+            self.client_text.set(None);
             return;
         }
         channel.send(ClipboardMessage::SendInitiatePaste(
@@ -352,6 +404,7 @@ impl CliprdrBackend for SessionClipboard {
                     bytes = text.len(),
                     "rdp clipboard: storing the client's text for the guest"
                 );
+                self.client_text.set(Some(hash_text(&text)));
                 channel.clipboard().set_host_text(text);
             }
             Err(ClientTextError::Utf16TooLong(utf16_bytes)) => warn!(
@@ -420,6 +473,19 @@ fn client_text(response: &FormatDataResponse<'_>, limit: usize) -> Result<String
         return Err(ClientTextError::TooLong(text.len()));
     }
     Ok(text)
+}
+
+/// A hash of `text` as the main channel compares clipboard text: with
+/// CRLF and lone CR made LF and trailing whitespace trimmed, so text
+/// that a clipboard changed in either way on its round trip still
+/// matches.
+fn hash_text(text: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut hasher = DefaultHasher::new();
+    normalized.trim_end().hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Windows text from the client, with each CRLF turned into LF. A lone
@@ -602,6 +668,69 @@ mod tests {
         );
         // Nor is it offered back to the client.
         assert!(next_message(&mut h.events).await.is_none());
+    }
+
+    /// Wait for the offer a guest copy makes, failing on anything else.
+    async fn expect_offer(events: &mut mpsc::UnboundedReceiver<ServerEvent>) {
+        match next_message(events).await {
+            Some(ClipboardMessage::SendInitiateCopy(formats)) => {
+                assert_eq!(formats, [text_format()])
+            }
+            other => panic!("expected a format list, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_guest_copying_the_clients_text_back_is_not_offered() {
+        let mut h = harness(true);
+        h.backend.on_ready();
+        h.backend
+            .on_format_data_response(FormatDataResponse::new_unicode_string(
+                "pasted in the guest\r\n",
+            ));
+        // The guest takes the clipboard again with the text it was
+        // given, its line endings and trailing whitespace changed.
+        h.clipboard.set_text("pasted in the guest").unwrap();
+        assert!(next_message(&mut h.events).await.is_none());
+        h.clipboard.set_text("pasted in the guest\r\n \n").unwrap();
+        assert!(next_message(&mut h.events).await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_guest_copy_of_other_text_than_the_clients_is_offered() {
+        let mut h = harness(true);
+        h.backend.on_ready();
+        h.backend
+            .on_format_data_response(FormatDataResponse::new_unicode_string("the client's"));
+        h.clipboard.set_text("the guest's").unwrap();
+        expect_offer(&mut h.events).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_clients_text_is_offered_again_once_the_client_copies_something_else() {
+        let mut h = harness(true);
+        h.backend.on_ready();
+        h.backend
+            .on_format_data_response(FormatDataResponse::new_unicode_string("text"));
+        h.backend
+            .on_remote_copy(&[ClipboardFormat::new(ClipboardFormatId::CF_DIB)]);
+        h.clipboard.set_text("text").unwrap();
+        expect_offer(&mut h.events).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_guest_copy_already_offered_is_not_offered_again() {
+        let mut h = harness(true);
+        h.backend.on_ready();
+        h.clipboard.set_text("copied twice").unwrap();
+        expect_offer(&mut h.events).await;
+        h.clipboard.set_text("copied twice").unwrap();
+        assert!(next_message(&mut h.events).await.is_none());
+        // Until the client has text of its own.
+        h.backend
+            .on_format_data_response(FormatDataResponse::new_unicode_string("the client's"));
+        h.clipboard.set_text("copied twice").unwrap();
+        expect_offer(&mut h.events).await;
     }
 
     #[tokio::test(start_paused = true)]
