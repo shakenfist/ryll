@@ -19,7 +19,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, warn};
 
+use crate::audio::SoundFactory;
 use crate::auth::ProviderValidator;
+use crate::clipboard::ClipboardFactory;
 use crate::display::ClientSize;
 use crate::input::HeldInput;
 use crate::tls::TlsIdentity;
@@ -453,6 +455,8 @@ fn build_server(parts: ServerParts) -> RdpServer {
     let validator = validator.map(|v| v as Arc<dyn ironrdp_server::CredentialValidator>);
     let display = MirrorDisplay::new(slot.clone(), FALLBACK_DESKTOP_SIZE);
     let input = SpiceInputHandler::new(slot.clone());
+    let clipboard = ClipboardFactory::new(slot.clone());
+    let sound = SoundFactory::new(slot.clone());
     let connections = ConnectionLog {
         slot,
         client_size: display.client_size(),
@@ -474,6 +478,10 @@ fn build_server(parts: ServerParts) -> RdpServer {
         // let the client's dynamic channels open, the display handler
         // resizes the client to the surface's.
         .with_honor_client_desktop_size(true)
+        // Always offered; a session with no clipboard ignores it.
+        .with_cliprdr_factory(Some(Box::new(clipboard)))
+        // Always offered; a session with no audio declines every format.
+        .with_sound_factory(Some(Box::new(sound)))
         .with_connection_handler(Some(Box::new(connections)))
         .with_credential_validator(validator)
         .build();
@@ -623,6 +631,8 @@ mod tests {
             mouse_mode,
             resize_tx,
             cursor,
+            clipboard: None,
+            audio: None,
             label: "test".to_string(),
         })
     }
@@ -778,6 +788,8 @@ mod tests {
             mouse_mode,
             resize_tx,
             cursor,
+            clipboard: None,
+            audio: None,
             label: "test".to_string(),
         }));
         let mut input = SpiceInputHandler::new(slot.clone());
@@ -819,6 +831,8 @@ mod tests {
             mouse_mode,
             resize_tx,
             cursor,
+            clipboard: None,
+            audio: None,
             label: "test".to_string(),
         }));
         let mut input = SpiceInputHandler::new(slot.clone());

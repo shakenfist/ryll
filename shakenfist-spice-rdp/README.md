@@ -7,6 +7,9 @@ FreeRDP, and the RDP apps on macOS, iOS and Android — so a
 desktop can be reached from machines with no SPICE client. This
 is what backs ryll's `--rdp` mode.
 
+It serves the guest's display, keyboard and mouse input, cursor
+shapes, desktop resize, text clipboard (both ways) and audio.
+
 It is a reachability fallback, not a better path. The session
 is transcoded from SPICE to RDP on the serving side, which costs
 CPU there, and SPICE features such as USB redirection and folder

@@ -44,6 +44,26 @@ ironrdp-server = { version = "0.13", default-features = false, features = ["rayo
 # not a crate.
 ironrdp-displaycontrol = "0.8"
 
+# The clipboard channel's backend and backend factory traits, the
+# messages a backend sends the server, and the clipboard PDU types,
+# none of which `ironrdp-server` re-exports. The version
+# `ironrdp-server` builds on, already in Cargo.lock through it, so
+# this adds an edge, not a crate.
+ironrdp-cliprdr = "0.7"
+
+# The audio format and wave format types the sound handler offers its
+# formats in, and the negotiated format and error types its trait
+# methods take, none of which `ironrdp-server` re-exports. The version
+# `ironrdp-server` builds on, already in Cargo.lock through it, so
+# this adds an edge, not a crate.
+ironrdp-rdpsnd = "0.9"
+
+# `AsAny`, which the clipboard backend trait requires of every
+# backend, and the `impl_as_any!` macro that implements it. The
+# version the other IronRDP crates build on, already in Cargo.lock
+# through them, so this adds an edge, not a crate.
+ironrdp-core = "0.2"
+
 # The IronRDP display and input handler traits are declared with
 # `#[async_trait::async_trait]`, and `ironrdp-server` does not
 # re-export the macro, so implementors annotate their own impls with
@@ -108,6 +128,12 @@ tokio = { version = "1", features = ["test-util"] }
 # from it. Already in Cargo.lock through `ironrdp-server`, so this
 # adds an edge, not a crate.
 ironrdp-pdu = "0.9"
+
+# The static channel trait, through which the sound handler's tests
+# drive IronRDP's own audio channel through its handshake. Already in
+# Cargo.lock through `ironrdp-server`, so this adds an edge, not a
+# crate.
+ironrdp-svc = "0.8"
 
 # IronRDP's own client, which the loopback test (tests/loopback.rs)
 # drives against `serve` to prove the handshake without a desktop RDP
