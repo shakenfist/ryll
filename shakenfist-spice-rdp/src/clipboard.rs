@@ -29,6 +29,9 @@
 //! session's host-side text has LF line endings, as on a Unix host.
 //! The backend converts at this boundary in both directions.
 //!
+//! Text from the client longer than the guest's agent can be sent in
+//! one clipboard message is dropped rather than stored.
+//!
 //! Only byte counts are logged, never the text.
 
 use ironrdp_cliprdr::backend::{ClipboardMessage, CliprdrBackend, CliprdrBackendFactory};
@@ -38,11 +41,18 @@ use ironrdp_cliprdr::pdu::{
     OwnedFormatDataResponse,
 };
 use ironrdp_server::{CliprdrServerFactory, ServerEvent, ServerEventSender};
+use shakenfist_spice_protocol::messages::agent_stream::MAX_AGENT_MESSAGE_SIZE;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use crate::SessionSlot;
+
+/// The longest text taken from the client, in bytes once its line
+/// endings are LF: 100 MiB, the most the guest's agent can be sent in
+/// one clipboard message (whose budget adds 4 KiB for its headers), and
+/// the most the control socket's `clipboard_set` accepts.
+const MAX_CLIENT_TEXT_BYTES: usize = MAX_AGENT_MESSAGE_SIZE - 4096;
 
 /// Builds a [`SessionClipboard`] for each RDP connection.
 ///
@@ -336,16 +346,27 @@ impl CliprdrBackend for SessionClipboard {
             debug!("rdp clipboard: the client could not supply its text");
             return;
         }
-        match response.to_unicode_string() {
+        match client_text(&response, MAX_CLIENT_TEXT_BYTES) {
             Ok(text) => {
-                let text = crlf_to_lf(&text);
                 debug!(
                     bytes = text.len(),
                     "rdp clipboard: storing the client's text for the guest"
                 );
                 channel.clipboard().set_host_text(text);
             }
-            Err(error) => warn!(%error, "rdp clipboard: the client's text could not be decoded"),
+            Err(ClientTextError::Utf16TooLong(utf16_bytes)) => warn!(
+                utf16_bytes,
+                limit = MAX_CLIENT_TEXT_BYTES,
+                "rdp clipboard: the client's text is too long for the guest; dropped"
+            ),
+            Err(ClientTextError::TooLong(bytes)) => warn!(
+                bytes,
+                limit = MAX_CLIENT_TEXT_BYTES,
+                "rdp clipboard: the client's text is too long for the guest; dropped"
+            ),
+            Err(ClientTextError::Undecodable(error)) => {
+                warn!(%error, "rdp clipboard: the client's text could not be decoded")
+            }
         }
     }
 
@@ -364,6 +385,41 @@ impl CliprdrBackend for SessionClipboard {
     fn on_unlock(&mut self, _data_id: LockDataId) {
         debug!("rdp clipboard: unlock ignored");
     }
+}
+
+/// Why the client's text was not taken.
+#[derive(Debug)]
+enum ClientTextError {
+    /// Its UTF-16 data, this many bytes, could not decode to text short
+    /// enough.
+    Utf16TooLong(usize),
+    /// It decoded to this many bytes, more than the limit.
+    TooLong(usize),
+    /// It is not UTF-16.
+    Undecodable(ironrdp_core::DecodeError),
+}
+
+/// The client's `CF_UNICODETEXT` data as text with LF line endings, if
+/// that is at most `limit` bytes.
+///
+/// Data too long for any decode of it to fit is refused before it is
+/// decoded. A UTF-16 unit, two bytes, decodes to at least one byte, and
+/// a CRLF, two units, becomes one LF, so that is data more than four
+/// times the limit. Anything after a NUL is not text, and does not
+/// count.
+fn client_text(response: &FormatDataResponse<'_>, limit: usize) -> Result<String, ClientTextError> {
+    let utf16_bytes = response.data().len();
+    if utf16_bytes / 4 > limit {
+        return Err(ClientTextError::Utf16TooLong(utf16_bytes));
+    }
+    let text = response
+        .to_unicode_string()
+        .map_err(ClientTextError::Undecodable)?;
+    let text = crlf_to_lf(&text);
+    if text.len() > limit {
+        return Err(ClientTextError::TooLong(text.len()));
+    }
+    Ok(text)
 }
 
 /// Windows text from the client, with each CRLF turned into LF. A lone
@@ -654,6 +710,45 @@ mod tests {
         assert!(backend.ready().is_none());
         backend.on_format_data_response(FormatDataResponse::new_unicode_string("client"));
         assert_eq!(clipboard.text(), None);
+    }
+
+    #[test]
+    fn the_clients_text_is_taken_up_to_the_limit_once_its_line_endings_are_lf() {
+        // Seven UTF-16 units with the NUL, and five bytes once the CRLF
+        // is LF.
+        let response = FormatDataResponse::new_unicode_string("ab\r\ncd");
+        assert_eq!(client_text(&response, 5).unwrap(), "ab\ncd");
+        assert!(matches!(
+            client_text(&response, 4),
+            Err(ClientTextError::TooLong(5))
+        ));
+    }
+
+    #[test]
+    fn data_that_could_decode_to_text_that_fits_is_decoded() {
+        // Four bytes of UTF-16 for each LF it becomes, and the NUL.
+        let limit = 8;
+        let response = FormatDataResponse::new_unicode_string(&"\r\n".repeat(limit));
+        assert_eq!(response.data().len(), 4 * limit + 2);
+        assert_eq!(client_text(&response, limit).unwrap(), "\n".repeat(limit));
+    }
+
+    #[test]
+    fn data_too_long_for_any_decode_to_fit_is_refused_before_decoding() {
+        // Lone surrogates, which do not decode: only a refusal made
+        // before decoding says the data is too long.
+        let limit = 8;
+        let lone_surrogates = |units: usize| [0x00, 0xD8].repeat(units);
+        let longest = FormatDataResponse::new_data(lone_surrogates(2 * limit + 1));
+        assert!(matches!(
+            client_text(&longest, limit),
+            Err(ClientTextError::Undecodable(_))
+        ));
+        let too_long = FormatDataResponse::new_data(lone_surrogates(2 * limit + 2));
+        assert!(matches!(
+            client_text(&too_long, limit),
+            Err(ClientTextError::Utf16TooLong(36))
+        ));
     }
 
     #[test]

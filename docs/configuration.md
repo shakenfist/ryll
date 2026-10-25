@@ -94,9 +94,11 @@ connection whose size differs from the guest's sees a blank desktop for up to
 about 2 seconds at connect, before the client is resized to the guest's size.
 
 Text on the clipboard is shared both ways between the client and the guest
-(the guest needs vdagent); rich formats and files are not. The guest's
-audio plays on the client: as Opus when the client accepts it, and as 16-bit
-48 kHz stereo PCM otherwise, which is about 1.5 Mbit/s. ryll has no flag to
+(the guest needs vdagent); rich formats and files are not. Text the client
+copies that is longer than 100 MiB, the most ryll sends a guest's vdagent, is
+not shared, and a warning is logged. The guest's audio plays on the client:
+as Opus when the client accepts it, and as 16-bit 48 kHz stereo PCM
+otherwise, which is about 1.5 Mbit/s. ryll has no flag to
 turn either off; do it in the client. With FreeRDP, give `-clipboard`
 to disable the clipboard and leave out `/sound` to disable audio (or give
 `/sound:format:1` to force PCM). In mstsc, use the clipboard and remote
