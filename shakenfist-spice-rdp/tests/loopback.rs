@@ -137,6 +137,11 @@ const OPUS_PACKET: &[u8] = &[0xFC, 0xFF, 0xFE, 0x10, 0x32, 0x54, 0x76, 0x98];
 /// thread.
 const CLIPBOARD_POLL: Duration = Duration::from_millis(5);
 
+/// How often the test looks for the server's audio channel to be
+/// listening to the session's relay, which it starts doing on the
+/// server's thread once the client has confirmed its training.
+const AUDIO_POLL: Duration = Duration::from_millis(5);
+
 const USERNAME: &str = "ryll";
 /// The session password, minted once per run rather than written into
 /// the source; the server and the client read the same value.
@@ -1101,6 +1106,18 @@ async fn next_wave(client: &mut Client, what: &str) -> (usize, u32, Vec<u8>) {
     }
 }
 
+/// Wait until the server's audio channel is listening to `relay`, so
+/// that audio played from then on reaches the client rather than being
+/// dropped for want of a listener.
+async fn wait_for_listener(relay: &AudioRelay) {
+    step("the audio channel to listen", async {
+        while !relay.listening() {
+            tokio::time::sleep(AUDIO_POLL).await;
+        }
+    })
+    .await;
+}
+
 /// Play one packet of the guest's audio, as the playback channel hands
 /// a packet to the relay: the Opus packet, then what it decoded to.
 fn play_packet(relay: &AudioRelay) {
@@ -1137,18 +1154,13 @@ async fn ironrdp_client_shares_the_clipboard_and_hears_the_guest() {
     )
     .await;
 
-    // The server starts the audio channel when the client confirms its
-    // training, which the client sends as it reads the server's
-    // training request, and the server sends that before it stores the
-    // client's text. So by the time the client has read the guest's
-    // copy, which the server sent after storing that text, it has
-    // confirmed; and the server reads the confirmation before the
-    // paste that the client sent after it. Once the guest's text has
-    // arrived, the audio channel has started and is listening to the
-    // relay.
+    // The server starts the audio channel, and it starts listening to
+    // the relay, when the client confirms its training. Audio played
+    // before then is dropped, so the test waits for it.
     //
     // A client that accepts only PCM hears the decoded samples, as one
     // wave of little-endian 16-bit PCM, and not the Opus packet.
+    wait_for_listener(&relay).await;
     play_packet(&relay);
     let (format_no, timestamp, data) = next_wave(&mut client, "the PCM wave").await;
     assert_eq!(format_no, 0, "the wave is in the client's only format");
@@ -1183,6 +1195,9 @@ async fn ironrdp_client_shares_the_clipboard_and_hears_the_guest() {
         "the guest's second copy\n",
     )
     .await;
+    // The first connection's audio channel stopped with it, before
+    // the server accepted this one.
+    wait_for_listener(&relay).await;
     play_packet(&relay);
     let (_, timestamp, data) = next_wave(&mut client, "the Opus wave").await;
     assert_eq!(timestamp, 0, "the first wave starts the stream's clock");

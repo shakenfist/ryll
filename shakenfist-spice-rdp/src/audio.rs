@@ -189,6 +189,14 @@ impl AudioRelay {
         (*format, items, subscription)
     }
 
+    /// Whether an RDP client is listening: from when the client has
+    /// agreed a format and its audio channel has started, until the
+    /// channel stops. Audio the relay is given while no client is
+    /// listening is dropped.
+    pub fn listening(&self) -> bool {
+        self.wants(Codec::Opus) || self.wants(Codec::Pcm)
+    }
+
     /// Whether some forwarder sends `codec`, so that audio no one will
     /// hear is not copied.
     fn wants(&self, codec: Codec) -> bool {
@@ -978,11 +986,14 @@ mod tests {
             let (events_tx, _) = mpsc::unbounded_channel();
             SessionSound::new(session_slot(Some(relay.clone())), Some(events_tx))
         };
+        assert!(!relay.listening());
         let mut stopped = handler(&relay);
         stopped.begin(Codec::Pcm).unwrap();
         assert!(relay.wants(Codec::Pcm) && !relay.wants(Codec::Opus));
+        assert!(relay.listening());
         stopped.stop();
         assert!(!relay.wants(Codec::Pcm));
+        assert!(!relay.listening());
 
         let mut dropped = handler(&relay);
         dropped.begin(Codec::Opus).unwrap();
