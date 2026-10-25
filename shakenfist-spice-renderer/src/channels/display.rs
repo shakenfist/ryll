@@ -2474,12 +2474,10 @@ impl DisplayChannel {
                         return Ok(());
                     };
 
-                    // Each row copies width * 4 bytes from a multiple of
-                    // stride, so the needed_bytes check only covers the
-                    // copy when a row fits within its stride. Without
-                    // this a 4-byte stride with a million-pixel width
-                    // passes that check and the row slice runs past the
-                    // pixel data.
+                    // Each row copies width * 4 bytes, so a row must fit
+                    // its stride or the copy slices past the pixel data
+                    // even when stride * height fits it (a 4-byte stride
+                    // with a 16384-pixel width).
                     let row_fits_stride = width_usize
                         .checked_mul(4)
                         .is_some_and(|row_bytes| row_bytes <= stride);
@@ -5257,15 +5255,16 @@ mod tests {
 
     #[tokio::test]
     async fn pixmap_with_stride_narrower_than_a_row_is_refused() {
-        // #173: width 1_000_000 with stride 4 and four bytes of data
-        // passes the stride * height check, and the row copy then
-        // sliced 4_000_000 bytes out of four and panicked.
+        // #173: 16384 is the per-side cap, so this passes `rgba_len`.
+        // With stride 4 and four bytes of data it also passes the
+        // stride * height check, and the row copy then sliced 65536
+        // bytes out of four and panicked.
         let (mut channel, mut peers) = test_display_channel().await;
-        let image = pixmap_image(1, 0, 1_000_000, 1, 4, &[1, 2, 3, 4]);
+        let image = pixmap_image(1, 0, 16384, 1, 4, &[1, 2, 3, 4]);
         channel
             .handle_message(
                 display_server::DRAW_COPY,
-                &draw_copy_payload((0, 0, 1, 1_000_000), &[], &image),
+                &draw_copy_payload((0, 0, 1, 16384), &[], &image),
             )
             .await
             .expect("a refused pixmap is not an error");
