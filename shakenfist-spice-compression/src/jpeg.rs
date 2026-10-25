@@ -248,10 +248,10 @@ impl JpegDecoder for JpegDecoderRsDecoder {
         }
 
         let mut decoder = jpeg_decoder::Decoder::new(data);
-        // jpeg-decoder's own default limit is `usize::MAX`, so
-        // without this the crate allocates whatever the frame
-        // header claims before we ever get to inspect the
-        // dimensions. See MAX_DECODED_RGBA_BYTES for the unit.
+        // read_bounded_info refuses an oversized frame header; this
+        // is the backstop for anything else decode() allocates, as
+        // jpeg-decoder's own default limit is `usize::MAX`. See
+        // MAX_DECODED_RGBA_BYTES for the unit.
         decoder.set_max_decoding_buffer_size(MAX_DECODED_RGBA_BYTES);
         let info = read_bounded_info(&mut decoder)?;
         let pixels = match decoder.decode() {

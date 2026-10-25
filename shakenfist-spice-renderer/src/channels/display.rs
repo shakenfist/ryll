@@ -5069,20 +5069,26 @@ mod tests {
 
     #[test]
     fn inflate_glz_stream_stops_at_the_declared_size_not_the_limit() {
-        // A stored block of 100 bytes, then a block of the reserved type.
+        // Two full stored blocks, then a block of the reserved type.
         // Inflated whole, the stream is a zlib error; stopped one byte
         // past a declared size of 10, it never reaches the bad block and
-        // is refused as exceeding the declared size.
-        let mut zlib = vec![0x78, 0x01, 0x00, 100, 0, !100u8, 0xFF];
-        zlib.extend_from_slice(&[0u8; 100]);
+        // is refused as exceeding the declared size. The stored data is
+        // well over 32 KiB because miniz_oxide, flate2's default backend,
+        // inflates a window ahead of what the reader asks for.
+        let mut zlib = vec![0x78, 0x01];
+        for _ in 0..2 {
+            zlib.extend_from_slice(&[0x00, 0xFF, 0xFF, 0x00, 0x00]);
+            zlib.extend_from_slice(&[0u8; 0xFFFF]);
+        }
         zlib.push(0x07);
-        assert!(glz_stream_limit(256, 256).unwrap() > 100);
+        let stored = 2 * 0xFFFF;
+        assert!(glz_stream_limit(256, 256).unwrap() > stored);
         assert!(matches!(
             inflate_glz_stream(&zlib, 10, 256, 256),
             Err(InflateGlzError::ExceedsDeclared)
         ));
         assert!(matches!(
-            inflate_glz_stream(&zlib, 101, 256, 256),
+            inflate_glz_stream(&zlib, stored + 1, 256, 256),
             Err(InflateGlzError::Zlib(_))
         ));
     }

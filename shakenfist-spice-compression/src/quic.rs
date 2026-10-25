@@ -169,7 +169,7 @@ fn family_init(family: &mut Family, bpc: usize, limit: usize) {
 /// the server, and one that overshoots the segment is corrupt
 /// (upstream quic_tmpl.c reports "wrong RLE").
 fn checked_run_end(start: usize, run: usize, end: usize) -> Option<usize> {
-    (run <= end - start).then(|| start + run)
+    (run <= end.checked_sub(start)?).then(|| start + run)
 }
 
 fn quic_image_bpc(image_type: u32) -> u32 {
@@ -1871,6 +1871,7 @@ mod tests {
             Some(usize::MAX)
         );
         assert_eq!(checked_run_end(usize::MAX - 1, 2, usize::MAX), None);
+        assert_eq!(checked_run_end(9, 0, 8), None, "start past end");
     }
 
     #[test]
