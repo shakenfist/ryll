@@ -1748,6 +1748,33 @@ mod tests {
         assert_eq!(quic_decode(&data, 1, u32::MAX), None);
     }
 
+    #[test]
+    fn header_at_the_pixel_cap_is_accepted() {
+        // Both sides are within the per-side cap and the product is
+        // exactly the pixel cap. Only the header is parsed, so no
+        // pixel buffer is allocated; the per-channel row buffers are
+        // one row wide.
+        let side = (limits::MAX_IMAGE_PIXELS as f64).sqrt() as u32;
+        assert_eq!(side as usize * side as usize, limits::MAX_IMAGE_PIXELS);
+        let data = quic_stream(QUIC_IMAGE_TYPE_RGB32, side, side, "");
+        let mut decoder = QuicDecoder::new();
+        assert!(decoder.quic_decode_begin(&data));
+        assert_eq!(decoder.output_len, limits::MAX_IMAGE_PIXELS * 4);
+    }
+
+    #[test]
+    fn header_over_the_pixel_cap_is_refused() {
+        // Each side is legal on its own; only the product is over.
+        let side = (limits::MAX_IMAGE_PIXELS as f64).sqrt() as u32;
+        let data = quic_stream(QUIC_IMAGE_TYPE_RGB32, side, side + 1, "");
+        let mut decoder = QuicDecoder::new();
+        assert!(!decoder.quic_decode_begin(&data));
+        for channel in &decoder.channels {
+            assert_eq!(channel.correlate_row.row.capacity(), 0);
+        }
+        assert_eq!(quic_decode(&data, side, side + 1), None);
+    }
+
     /// A QUIC header (magic, version, type, width, height) followed
     /// by `bits` packed as the compressed image data.
     fn quic_stream(image_type: u32, width: u32, height: u32, bits: &str) -> Vec<u8> {
