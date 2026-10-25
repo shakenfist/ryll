@@ -7,7 +7,9 @@
 //! builds a [`SessionSound`] handler for every connection from the
 //! [`SoundFactory`] registered with the server; once the client has
 //! agreed a format, the handler subscribes to the session's relay and
-//! spawns a forwarder that turns the relay's audio into waves.
+//! spawns a forwarder that turns the relay's audio into waves. The
+//! relay copies only the audio some forwarder plays: Opus packets while
+//! one sends Opus, and PCM while one sends PCM.
 //!
 //! Each wave goes to the server's event sender, which the connection's
 //! loop applies to the channel with `?`: a wave the channel refuses
@@ -38,6 +40,7 @@
 //! end the connection. When the guest stops playing, the client stops
 //! receiving waves.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ironrdp_rdpsnd::pdu::{AudioFormat, WaveFormat};
@@ -51,12 +54,13 @@ use tracing::{debug, info};
 use crate::SessionSlot;
 
 /// How many items the relay holds for a forwarder that has fallen
-/// behind before it drops the oldest. Each Opus packet makes two items
-/// (the packet and its decoded samples), so this is about sixteen
-/// 20 ms packets: a third of a second. Audio that late is better
-/// dropped than played, and the forwarder only turns items into waves,
-/// so it falls behind only while the RDP server thread is stalled.
-const RELAY_CAPACITY: usize = 32;
+/// behind before it drops the oldest. Only the kind of audio the
+/// forwarder plays is published, one item for each SPICE packet, so
+/// this is about sixteen 20 ms packets: a third of a second. Audio that
+/// late is better dropped than played, and the forwarder only turns
+/// items into waves, so it falls behind only while the RDP server
+/// thread is stalled.
+const RELAY_CAPACITY: usize = 16;
 
 /// The sample rate of every format offered, and of decoded Opus.
 const SAMPLE_RATE_HZ: u32 = 48_000;
@@ -83,6 +87,7 @@ pub(crate) enum AudioItem {
         channels: u8,
     },
     /// Interleaved samples from a SPICE server that sends raw PCM.
+    /// Published with the decoded samples, to forwarders that send PCM.
     Raw {
         samples: Arc<[i16]>,
         rate_hz: u32,
@@ -108,6 +113,39 @@ pub struct AudioRelay {
     /// with its item sent while locked, so a subscriber sees either
     /// the old format and the change, or only the new format.
     format: Mutex<Option<PlaybackFormat>>,
+    wanted: Arc<Wanted>,
+}
+
+/// How many forwarders send each codec, so that the relay copies only
+/// the audio one of them plays.
+#[derive(Debug, Default)]
+struct Wanted {
+    opus: AtomicUsize,
+    pcm: AtomicUsize,
+}
+
+impl Wanted {
+    fn count(&self, codec: Codec) -> &AtomicUsize {
+        match codec {
+            Codec::Opus => &self.opus,
+            Codec::Pcm => &self.pcm,
+        }
+    }
+}
+
+/// A forwarder's claim on the audio its codec plays, from
+/// [`AudioRelay::subscribe`] until this is dropped.
+pub(crate) struct Subscription {
+    wanted: Arc<Wanted>,
+    codec: Codec,
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        self.wanted
+            .count(self.codec)
+            .fetch_sub(1, Ordering::Release);
+    }
 }
 
 impl AudioRelay {
@@ -117,6 +155,7 @@ impl AudioRelay {
         Self {
             items,
             format: Mutex::new(None),
+            wanted: Arc::default(),
         }
     }
 
@@ -126,17 +165,34 @@ impl AudioRelay {
         *self.lock_format()
     }
 
-    /// Listen from now on: the running stream's format, if any, and
-    /// every item published after it.
-    pub(crate) fn subscribe(&self) -> (Option<PlaybackFormat>, broadcast::Receiver<AudioItem>) {
+    /// Listen from now on for audio to send as `codec`: the running
+    /// stream's format, if any, and every item published after it. The
+    /// relay publishes that codec's audio until the subscription is
+    /// dropped.
+    pub(crate) fn subscribe(
+        &self,
+        codec: Codec,
+    ) -> (
+        Option<PlaybackFormat>,
+        broadcast::Receiver<AudioItem>,
+        Subscription,
+    ) {
         let format = self.lock_format();
-        (*format, self.items.subscribe())
+        let items = self.items.subscribe();
+        // Counted only once the receiver exists, so audio published by
+        // a thread that sees the count reaches it.
+        self.wanted.count(codec).fetch_add(1, Ordering::Release);
+        let subscription = Subscription {
+            wanted: Arc::clone(&self.wanted),
+            codec,
+        };
+        (*format, items, subscription)
     }
 
-    /// Whether anyone is listening, so that audio no one will hear is
-    /// not copied.
-    fn listening(&self) -> bool {
-        self.items.receiver_count() > 0
+    /// Whether some forwarder sends `codec`, so that audio no one will
+    /// hear is not copied.
+    fn wants(&self, codec: Codec) -> bool {
+        self.wanted.count(codec).load(Ordering::Acquire) > 0
     }
 
     /// Publish `item`. With no one listening it is dropped, which is
@@ -165,7 +221,7 @@ impl std::fmt::Debug for AudioRelay {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AudioRelay")
             .field("format", &self.format())
-            .field("listeners", &self.items.receiver_count())
+            .field("wanted", &self.wanted)
             .finish()
     }
 }
@@ -178,7 +234,7 @@ impl PlaybackSink for AudioRelay {
     }
 
     fn on_opus_packet(&self, packet: &[u8], samples_in_packet: u32) {
-        if self.listening() {
+        if self.wants(Codec::Opus) {
             self.publish(AudioItem::Opus {
                 packet: packet.into(),
                 frames: samples_in_packet,
@@ -187,7 +243,7 @@ impl PlaybackSink for AudioRelay {
     }
 
     fn on_decoded_pcm(&self, samples: &[i16], sample_rate_hz: u32, channels: u8) {
-        if self.listening() {
+        if self.wants(Codec::Pcm) {
             self.publish(AudioItem::Decoded {
                 samples: samples.into(),
                 rate_hz: sample_rate_hz,
@@ -197,12 +253,14 @@ impl PlaybackSink for AudioRelay {
     }
 
     fn on_pcm_samples(&self, samples: &[i16], sample_rate_hz: u32, channels: u8) {
-        if self.listening() {
+        if self.wants(Codec::Pcm) {
             self.publish(AudioItem::Raw {
                 samples: samples.into(),
                 rate_hz: sample_rate_hz,
                 channels,
             });
+        } else if self.wants(Codec::Opus) {
+            warn_raw_pcm_for_opus();
         }
     }
 
@@ -233,9 +291,18 @@ fn offered_formats() -> Vec<AudioFormat> {
     vec![format(WaveFormat::OPUS), format(WaveFormat::PCM)]
 }
 
+/// Raw PCM is not played to a client that chose Opus.
+fn warn_raw_pcm_for_opus() {
+    shakenfist_spice_protocol::warn_once!(
+        "rdp-audio:raw:opus-chosen",
+        "rdp audio: the SPICE server sends raw PCM but the client chose Opus, which ryll does not \
+         encode; not played"
+    );
+}
+
 /// What the client's waves carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Codec {
+pub(crate) enum Codec {
     /// SPICE's Opus packets, unchanged.
     Opus,
     /// 16-bit little-endian interleaved stereo PCM at 48 kHz.
@@ -345,18 +412,23 @@ enum State {
     /// factory a sender, which leaves nothing to send with.
     Waiting(Option<gate::Unstarted>),
     /// A forwarder is sending the session's audio. Held only to be
-    /// dropped, which aborts the forwarder.
+    /// dropped, which aborts the forwarder and ends its subscription.
     Streaming { _forwarder: Forwarding },
     /// The channel has been torn down, or it could not start.
     Stopped,
 }
 
-/// The forwarder task, aborted when this is dropped.
-struct Forwarding(JoinHandle<()>);
+/// The forwarder task, aborted when this is dropped, and its
+/// subscription to the relay, which ends with it then rather than when
+/// the runtime next gets to the aborted task.
+struct Forwarding {
+    task: JoinHandle<()>,
+    _subscription: Subscription,
+}
 
 impl Drop for Forwarding {
     fn drop(&mut self) {
-        self.0.abort();
+        self.task.abort();
     }
 }
 
@@ -408,11 +480,14 @@ impl SessionSound {
         // takes no waves and none are sent.
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| StartError("rdp audio: no runtime to stream on"))?;
-        let (stream, items) = relay.subscribe();
+        let (stream, items, subscription) = relay.subscribe(codec);
         debug!(?stream, "rdp audio: listening to the session's audio");
         let forwarder = Forwarder::new(unstarted.start(), codec);
         self.state = State::Streaming {
-            _forwarder: Forwarding(runtime.spawn(forward(forwarder, items))),
+            _forwarder: Forwarding {
+                task: runtime.spawn(forward(forwarder, items)),
+                _subscription: subscription,
+            },
         };
         info!(
             "rdp audio: streaming {} at {} Hz, {} channels, to the client",
@@ -517,9 +592,11 @@ impl Forwarder {
             (AudioItem::Opus { packet, frames }, Codec::Opus) => {
                 self.send(packet.to_vec(), u64::from(frames))
             }
-            // Played from its decoded samples instead.
+            // Published only while another forwarder sends the other
+            // codec. A PCM forwarder plays the packet's decoded samples
+            // instead, and an Opus one has sent the packet they came
+            // from.
             (AudioItem::Opus { .. }, Codec::Pcm) => true,
-            // The decode of a packet already sent.
             (AudioItem::Decoded { .. }, Codec::Opus) => true,
             (
                 AudioItem::Decoded {
@@ -542,12 +619,9 @@ impl Forwarder {
                     true
                 }
             }
+            // Published only while another forwarder sends PCM.
             (AudioItem::Raw { .. }, Codec::Opus) => {
-                shakenfist_spice_protocol::warn_once!(
-                    "rdp-audio:raw:opus-chosen",
-                    "rdp audio: the SPICE server sends raw PCM but the client chose Opus, which ryll \
-                     does not encode; not played"
-                );
+                warn_raw_pcm_for_opus();
                 true
             }
             (
@@ -798,7 +872,9 @@ mod tests {
     #[tokio::test]
     async fn the_relay_delivers_each_kind_of_item_in_order() {
         let relay = AudioRelay::new();
-        let (format, mut items) = relay.subscribe();
+        let (format, mut items, _opus) = relay.subscribe(Codec::Opus);
+        // With PCM wanted too, every kind is published.
+        let (_, _pcm_items, _pcm) = relay.subscribe(Codec::Pcm);
         assert_eq!(format, None);
         relay.on_start(opus_stream());
         relay.on_opus_packet(&[1, 2, 3], 960);
@@ -838,13 +914,89 @@ mod tests {
         // No one is listening, which is not an error.
         relay.on_start(opus_stream());
         relay.on_opus_packet(&[1], 960);
-        let (format, mut items) = relay.subscribe();
+        let (format, mut items, _subscription) = relay.subscribe(Codec::Opus);
         assert_eq!(format, Some(opus_stream()));
         assert_eq!(relay.format(), Some(opus_stream()));
         // Nothing from before the subscription is queued.
         assert!(items.try_recv().is_err());
         relay.on_stop();
-        assert_eq!(relay.subscribe().0, None);
+        assert_eq!(relay.subscribe(Codec::Opus).0, None);
+    }
+
+    /// The items `items` has been sent so far.
+    fn received(items: &mut broadcast::Receiver<AudioItem>) -> Vec<AudioItem> {
+        std::iter::from_fn(|| items.try_recv().ok()).collect()
+    }
+
+    #[test]
+    fn with_only_opus_wanted_no_pcm_is_published() {
+        let relay = AudioRelay::new();
+        let (_, mut items, _subscription) = relay.subscribe(Codec::Opus);
+        relay.on_start(opus_stream());
+        relay.on_decoded_pcm(&stereo(0, 960), 48_000, 2);
+        relay.on_pcm_samples(&stereo(0, 960), 48_000, 2);
+        relay.on_opus_packet(&[1, 2], 960);
+        relay.on_stop();
+        let items = received(&mut items);
+        assert!(
+            matches!(
+                items[..],
+                [AudioItem::Start(_), AudioItem::Opus { .. }, AudioItem::Stop]
+            ),
+            "{items:?}"
+        );
+    }
+
+    #[test]
+    fn with_only_pcm_wanted_no_opus_is_published() {
+        let relay = AudioRelay::new();
+        let (_, mut items, _subscription) = relay.subscribe(Codec::Pcm);
+        relay.on_start(opus_stream());
+        relay.on_opus_packet(&[1, 2], 960);
+        relay.on_decoded_pcm(&stereo(0, 960), 48_000, 2);
+        relay.on_pcm_samples(&stereo(0, 960), 48_000, 2);
+        relay.on_stop();
+        let items = received(&mut items);
+        assert!(
+            matches!(
+                items[..],
+                [
+                    AudioItem::Start(_),
+                    AudioItem::Decoded { .. },
+                    AudioItem::Raw { .. },
+                    AudioItem::Stop
+                ]
+            ),
+            "{items:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_codec_is_wanted_only_while_its_forwarder_runs() {
+        let relay = Arc::new(AudioRelay::new());
+        let handler = |relay: &Arc<AudioRelay>| {
+            let (events_tx, _) = mpsc::unbounded_channel();
+            SessionSound::new(session_slot(Some(relay.clone())), Some(events_tx))
+        };
+        let mut stopped = handler(&relay);
+        stopped.begin(Codec::Pcm).unwrap();
+        assert!(relay.wants(Codec::Pcm) && !relay.wants(Codec::Opus));
+        stopped.stop();
+        assert!(!relay.wants(Codec::Pcm));
+
+        let mut dropped = handler(&relay);
+        dropped.begin(Codec::Opus).unwrap();
+        assert!(relay.wants(Codec::Opus) && !relay.wants(Codec::Pcm));
+        drop(dropped);
+        assert!(!relay.wants(Codec::Opus));
+
+        // Torn down by IronRDP with its connection.
+        let mut h = Harness::started(true, vec![opus()]);
+        assert!(h.relay.wants(Codec::Opus));
+        drop(h.server);
+        assert!(!h.relay.wants(Codec::Opus));
+        h.relay.on_opus_packet(&[1], 960);
+        assert!(next_wave(&mut h.events).await.is_none());
     }
 
     #[tokio::test(start_paused = true)]
