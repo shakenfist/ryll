@@ -160,7 +160,7 @@ split.
 | Phase | Plan | Status | Merged |
 |-------|------|--------|--------|
 | 1. Decoder hardening | This file, steps below | Complete | a167670 |
-| 2. Push audit | [PLAN-decoder-hardening-phase-02-push-audit.md](PLAN-decoder-hardening-phase-02-push-audit.md) | In progress | |
+| 2. Push audit | [PLAN-decoder-hardening-phase-02-push-audit.md](PLAN-decoder-hardening-phase-02-push-audit.md) | Complete | 7d4abf5 |
 
 ### Phase 1: Decoder hardening
 
@@ -382,6 +382,17 @@ audit found reopens one.
     `declared_glz_size`, not by the outer limit.
   - **S4**: check the pure-Rust JPEG backend's dimensions from
     `read_info()` before `decode()`.
+
+The findings pull request fixed all 16, one commit per finding. Two
+of the new or changed tests prove less than intended. T2's in-cap
+mismatch is also refused by `DecompressedImage::new`, so removing
+the display channel's own pre-clone check fails no test; the test
+shows the mismatch is refused, not which layer refuses it. Q6's
+corrected sides make the LZ4 case say what it means, but a payload
+that small is refused whether or not the pixel cap applies, which
+is T7's declined point. The QUIC tail run loops (T4) are covered
+through the shared helper's unit test, not through the decoder: they
+only run on images over 2048 pixels, which cannot be hand-packed.
 
 **Filed as issues, outside this plan** (5): problems that predate
 it, which the audit found in files it read.
