@@ -56,8 +56,10 @@ pub struct DecodedJpeg {
 /// pure-Rust backend only honours the cap because
 /// `JpegDecoderRsDecoder::decode` passes
 /// [`MAX_DECODED_RGBA_BYTES`] to `set_max_decoding_buffer_size`
-/// first. The platform backends have no equivalent knob and are
-/// bounded by [`DecodedJpeg::zeroed`] instead.
+/// first. The platform backends have no equivalent knob:
+/// [`DecodedJpeg::zeroed`] bounds the RGBA output they produce,
+/// but the library's own intermediate buffers are not bounded
+/// by these caps.
 pub const MAX_DECODED_JPEG_DIMENSION: u32 = limits::MAX_IMAGE_DIMENSION;
 
 /// Byte ceiling implied by the shared limits: the largest length
