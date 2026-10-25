@@ -461,8 +461,8 @@ mod tests {
             (usize::MAX / 4, 2),
             (usize::MAX, 1),
             (65535, 65535),
-            // Just over the total-pixel cap with both sides legal.
-            (16384, 16385),
+            // Both sides legal; the product is one row over the pixel cap.
+            (8192, 8193),
         ] {
             assert!(
                 decompress_spice_lz4(&data, width, height).is_none(),
