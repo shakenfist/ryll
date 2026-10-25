@@ -960,6 +960,24 @@ mod tests {
     }
 
     #[test]
+    fn test_cursor_over_pixel_cap_returns_none() {
+        // Each side is within the per-side limit, but together they are
+        // over the pixel cap. Mono needs only 2 bits a pixel, so the
+        // data is complete and only the cap refuses it, before the
+        // 256 MiB of RGBA is allocated. 8192x8192 is exactly the cap
+        // and decodes from the same data.
+        let side = 8192u16;
+        assert_eq!(side as usize * side as usize, limits::MAX_IMAGE_PIXELS);
+        let data = vec![0u8; side as usize / 8 * (side as usize + 1) * 2];
+
+        let cursor = wire_cursor(cursor_type::MONO, side, side + 1, 0, &data);
+        assert!(decode(&cursor).is_none());
+
+        let cursor = wire_cursor(cursor_type::MONO, side, side, 0, &data);
+        assert!(decode(&cursor).is_some());
+    }
+
+    #[test]
     fn test_from_cache_flag_no_pixel_data() {
         let cursor = wire_cursor(cursor_type::ALPHA, 24, 24, cursor_flags::FROM_CACHE, &[]);
         assert!(cursor.has_flag(cursor_flags::FROM_CACHE));
