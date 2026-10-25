@@ -164,9 +164,7 @@ pub fn decompress_spice_lz4(data: &[u8], width: usize, height: usize) -> Option<
         rgba
     };
 
-    // `rgba_len` accepted these dimensions above, which caps each side
-    // at `MAX_IMAGE_DIMENSION`, so the casts cannot truncate and `new`
-    // cannot refuse a buffer it sized.
+    // `rgba_len` capped both sides, so the `u32` casts cannot truncate.
     DecompressedImage::new(width as u32, height as u32, rgba, 0)
 }
 
@@ -461,8 +459,8 @@ mod tests {
             (usize::MAX / 4, 2),
             (usize::MAX, 1),
             (65535, 65535),
-            // Just over the total-pixel cap with both sides legal.
-            (16384, 16385),
+            // Both sides legal; the product is one row over the pixel cap.
+            (8192, 8193),
         ] {
             assert!(
                 decompress_spice_lz4(&data, width, height).is_none(),

@@ -349,9 +349,9 @@ enum InflateGlzError {
     DimensionsRefused,
     /// The declared GLZ size exceeds the limit for the dimensions.
     DeclaredTooLarge,
-    /// The zlib stream inflated to more than the limit.
-    TooLarge,
-    /// The inflated length is not the declared GLZ size.
+    /// The zlib stream inflated past the declared GLZ size.
+    ExceedsDeclared,
+    /// The stream ended short of the declared GLZ size.
     SizeMismatch { inflated: usize },
     /// The zlib stream was malformed.
     Zlib(std::io::Error),
@@ -362,18 +362,10 @@ const GLZ_STREAM_FIXED_OVERHEAD: usize = 64;
 
 /// Upper bound on the inflated GLZ stream for a `width` x `height` image.
 ///
-/// The inflated data is a GLZ stream, not RGBA, so `rgba_len` alone is
-/// not quite the right bound. A stream can legitimately be a little
-/// larger than the pixels it describes: the server's GLZ encoder
-/// (spice/server/glz-encode.tmpl.c) emits a 33 byte header, one control
-/// byte per run of up to 32 literal pixels, and 3 bytes per literal
-/// RGB pixel. An RGBA image adds a second pass carrying the alpha
-/// byte, so incompressible RGBA costs about 4 + 2/32 bytes per pixel,
-/// slightly over the 4 bytes of the decoded output. Matches are only
-/// emitted when cheaper than the literals they replace, so nothing
-/// pushes the ratio much further. A quarter of the RGBA size plus a
-/// fixed allowance covers that with room to spare while still bounding
-/// the inflate to 1.25x the shared image cap.
+/// A GLZ stream can be slightly larger than the RGBA it decodes to:
+/// incompressible RGBA costs about 4 + 2/32 bytes a pixel plus a 33
+/// byte header (spice/server/glz-encode.tmpl.c). A quarter of the RGBA
+/// size plus a fixed allowance covers that.
 ///
 /// `None` when `rgba_len` refuses the dimensions.
 fn glz_stream_limit(width: usize, height: usize) -> Option<usize> {
@@ -389,7 +381,8 @@ fn glz_stream_limit(width: usize, height: usize) -> Option<usize> {
 /// image-encoders.cpp, and canvas_base.c in spice-common, which
 /// allocates exactly that many bytes for the inflate). It counts
 /// compressed GLZ bytes, not RGBA bytes. It must fit within the limit
-/// and match the inflated length.
+/// and match the inflated length, and the inflate stops one byte past
+/// it.
 fn inflate_glz_stream(
     zlib_data: &[u8],
     declared_glz_size: usize,
@@ -403,15 +396,16 @@ fn inflate_glz_stream(
 
     let mut decoder = ZlibDecoder::new(zlib_data);
     let mut glz_data = Vec::new();
-    // One byte past the limit is enough to tell "exactly at the limit"
-    // from "over it" without inflating any further.
+    // The declared size is exact and already within the limit, so one
+    // byte past it tells "exactly the size" from "over it" without
+    // inflating any further.
     decoder
         .by_ref()
-        .take(limit as u64 + 1)
+        .take(declared_glz_size as u64 + 1)
         .read_to_end(&mut glz_data)
         .map_err(InflateGlzError::Zlib)?;
-    if glz_data.len() > limit {
-        return Err(InflateGlzError::TooLarge);
+    if glz_data.len() > declared_glz_size {
+        return Err(InflateGlzError::ExceedsDeclared);
     }
     if glz_data.len() != declared_glz_size {
         return Err(InflateGlzError::SizeMismatch {
@@ -2446,17 +2440,13 @@ impl DisplayChannel {
                     let width_usize = width as usize;
                     let height_usize = height as usize;
 
-                    // A malicious server can send u32::MAX on any of these.
-                    // `rgba_len` refuses a zero side, a side over the shared
-                    // per-side limit and a pixel count over the shared cap,
-                    // and so also bounds the allocation below; the
-                    // stride * height product is guarded separately so the
-                    // short-data check cannot pass on a wrapped value and
-                    // let the blit loop index out of bounds.
+                    // A server can send u32::MAX on any of these. `rgba_len`
+                    // bounds the allocation below; stride * height is checked
+                    // separately so it cannot wrap past the short-data check.
                     let Some(expected_pixels) = limits::rgba_len(width_usize, height_usize) else {
                         warn_once!(
                             "display:decode_failure:pixmap:too_large",
-                            "display: pixmap {} x {} outside the {} pixel / {} per-side limits, skipping",
+                            "display: pixmap {}x{} outside the {} pixel / {} per-side limits, skipping",
                             width,
                             height,
                             limits::MAX_IMAGE_PIXELS,
@@ -2474,12 +2464,10 @@ impl DisplayChannel {
                         return Ok(());
                     };
 
-                    // Each row copies width * 4 bytes from a multiple of
-                    // stride, so the needed_bytes check only covers the
-                    // copy when a row fits within its stride. Without
-                    // this a 4-byte stride with a million-pixel width
-                    // passes that check and the row slice runs past the
-                    // pixel data.
+                    // Each row copies width * 4 bytes, so a row must fit
+                    // its stride or the copy slices past the pixel data
+                    // even when stride * height fits it (a 4-byte stride
+                    // with a 16384-pixel width).
                     let row_fits_stride = width_usize
                         .checked_mul(4)
                         .is_some_and(|row_bytes| row_bytes <= stride);
@@ -2526,9 +2514,6 @@ impl DisplayChannel {
                                 };
                             }
                         }
-                        // `rgba` was sized from these dimensions, so
-                        // this refuses only a zero side or a side over
-                        // the shared per-side limit.
                         let image = DecompressedImage::new(width, height, rgba, img_desc.image_id);
                         if image.is_none() {
                             warn_once!(
@@ -2643,12 +2628,11 @@ impl DisplayChannel {
                             );
                             None
                         }
-                        Err(InflateGlzError::TooLarge) => {
+                        Err(InflateGlzError::ExceedsDeclared) => {
                             warn_once!(
                                 "display:decode_failure:zlib_glz:inflate_too_large",
-                                "display: ZLIB_GLZ_RGB inflated past the limit for {}x{}",
-                                img_desc.width,
-                                img_desc.height
+                                "display: ZLIB_GLZ_RGB inflated past its declared GLZ size {}",
+                                declared_glz_size
                             );
                             None
                         }
@@ -2758,9 +2742,8 @@ impl DisplayChannel {
                     let decoded = self.jpeg_decoder.decode(jpeg_data).and_then(|dec| {
                         DecompressedImage::new(dec.width, dec.height, dec.rgba, img_desc.image_id)
                     });
-                    // `DecodedJpeg`'s constructors already apply
-                    // `rgba_len`, so `new` refusing here is a backstop,
-                    // not a distinct failure worth its own key.
+                    // `new` refusing is a backstop: `DecodedJpeg` already
+                    // applied `rgba_len`.
                     if decoded.is_none() {
                         warn_once!(
                             "display:decode_failure:jpeg:decode_failed",
@@ -2798,10 +2781,8 @@ impl DisplayChannel {
                                 img_desc.image_id,
                             )
                         });
-                    // `quic_decode` checks the header against these
-                    // dimensions and sizes its output with `rgba_len`,
-                    // so `new` refusing here is a backstop, not a
-                    // distinct failure worth its own key.
+                    // `new` refusing is a backstop: `quic_decode` already
+                    // applied `rgba_len`.
                     if decoded.is_none() {
                         warn_once!(
                             "display:decode_failure:quic:decode_failed",
@@ -5061,14 +5042,14 @@ mod tests {
     #[test]
     fn inflate_glz_stream_refuses_bomb_past_limit() {
         // A 1x1 image has a limit of 4 + 1 + 64 bytes. 1 MiB of zeros
-        // deflates to about a kilobyte and must be refused, whatever
-        // size the header claims.
+        // deflates to about a kilobyte and must be refused, even when
+        // the header claims the most the limit allows.
         let zlib = deflate(&vec![0u8; 1024 * 1024]);
         assert!(zlib.len() < 4096);
         let limit = glz_stream_limit(1, 1).unwrap();
         assert!(matches!(
             inflate_glz_stream(&zlib, limit, 1, 1),
-            Err(InflateGlzError::TooLarge)
+            Err(InflateGlzError::ExceedsDeclared)
         ));
     }
 
@@ -5082,7 +5063,33 @@ mod tests {
         let over = deflate(&vec![7u8; limit + 1]);
         assert!(matches!(
             inflate_glz_stream(&over, limit, 1, 1),
-            Err(InflateGlzError::TooLarge)
+            Err(InflateGlzError::ExceedsDeclared)
+        ));
+    }
+
+    #[test]
+    fn inflate_glz_stream_stops_at_the_declared_size_not_the_limit() {
+        // Two full stored blocks, then a block of the reserved type.
+        // Inflated whole, the stream is a zlib error; stopped one byte
+        // past a declared size of 10, it never reaches the bad block and
+        // is refused as exceeding the declared size. The stored data is
+        // well over 32 KiB because miniz_oxide, flate2's default backend,
+        // inflates a window ahead of what the reader asks for.
+        let mut zlib = vec![0x78, 0x01];
+        for _ in 0..2 {
+            zlib.extend_from_slice(&[0x00, 0xFF, 0xFF, 0x00, 0x00]);
+            zlib.extend_from_slice(&[0u8; 0xFFFF]);
+        }
+        zlib.push(0x07);
+        let stored = 2 * 0xFFFF;
+        assert!(glz_stream_limit(256, 256).unwrap() > stored);
+        assert!(matches!(
+            inflate_glz_stream(&zlib, 10, 256, 256),
+            Err(InflateGlzError::ExceedsDeclared)
+        ));
+        assert!(matches!(
+            inflate_glz_stream(&zlib, stored + 1, 256, 256),
+            Err(InflateGlzError::Zlib(_))
         ));
     }
 
@@ -5257,15 +5264,16 @@ mod tests {
 
     #[tokio::test]
     async fn pixmap_with_stride_narrower_than_a_row_is_refused() {
-        // #173: width 1_000_000 with stride 4 and four bytes of data
-        // passes the stride * height check, and the row copy then
-        // sliced 4_000_000 bytes out of four and panicked.
+        // #173: 16384 is the per-side cap, so this passes `rgba_len`.
+        // With stride 4 and four bytes of data it also passes the
+        // stride * height check, and the row copy then sliced 65536
+        // bytes out of four and panicked.
         let (mut channel, mut peers) = test_display_channel().await;
-        let image = pixmap_image(1, 0, 1_000_000, 1, 4, &[1, 2, 3, 4]);
+        let image = pixmap_image(1, 0, 16384, 1, 4, &[1, 2, 3, 4]);
         channel
             .handle_message(
                 display_server::DRAW_COPY,
-                &draw_copy_payload((0, 0, 1, 1_000_000), &[], &image),
+                &draw_copy_payload((0, 0, 1, 16384), &[], &image),
             )
             .await
             .expect("a refused pixmap is not an error");
@@ -5295,27 +5303,106 @@ mod tests {
     #[tokio::test]
     async fn from_cache_larger_than_the_cached_image_is_refused() {
         // #174: cache a 2x2 pixmap as id 42 (16 bytes), then draw it
-        // from the cache claiming 10000x10000 with source rect
-        // (0,0)-(100,1). Before the fix the crop sliced
-        // out_pixels[0..400] out of 16 bytes and panicked. The clip
-        // path indexed the same way, so also try a full-image source
-        // rect, which skips the crop, clipped to that same strip.
+        // from the cache claiming a larger size. Before the fix the
+        // crop sliced out of the 16 bytes and panicked, and the clip
+        // path indexed the same way, so each size is also tried with a
+        // full-image source rect, which skips the crop, clipped to a
+        // strip. 3x3 is inside the pixel cap, so only the cache-size
+        // check refuses it; 10000x10000 is over the cap and is
+        // refused earlier.
         let (mut channel, mut peers) = test_display_channel().await;
         cache_2x2_pixmap(&mut channel, &mut peers, 42).await;
 
-        let image = from_cache_image(ImageType::FromCache, 42, 10000, 10000);
-        let strip: WireRect = (0, 0, 1, 100);
-        let whole: WireRect = (0, 0, 10000, 10000);
-        for (src_rect, clip_rects) in [(strip, &[][..]), (whole, &[strip][..])] {
-            channel
-                .handle_message(
-                    display_server::DRAW_COPY,
-                    &draw_copy_payload(src_rect, clip_rects, &image),
-                )
-                .await
-                .expect("a refused cache hit is not an error");
-            assert!(drain_image_events(&mut peers).is_empty());
+        for size in [3u32, 10000] {
+            let image = from_cache_image(ImageType::FromCache, 42, size, size);
+            let strip: WireRect = (0, 0, 1, size);
+            let whole: WireRect = (0, 0, size, size);
+            for (src_rect, clip_rects) in [(strip, &[][..]), (whole, &[strip][..])] {
+                channel
+                    .handle_message(
+                        display_server::DRAW_COPY,
+                        &draw_copy_payload(src_rect, clip_rects, &image),
+                    )
+                    .await
+                    .expect("a refused cache hit is not an error");
+                assert!(
+                    drain_image_events(&mut peers).is_empty(),
+                    "{size}x{size} over a cached 2x2 must be refused"
+                );
+            }
         }
+    }
+
+    /// A 2x2 GLZ stream: the 33 byte header, then one control byte for
+    /// four literal BGR pixels. Decodes to the RGBA returned alongside.
+    fn glz_2x2_stream() -> (Vec<u8>, Vec<u8>) {
+        let mut stream = Vec::new();
+        stream.extend_from_slice(b"  ZL");
+        stream.extend_from_slice(&[0, 1, 0, 0]); // version 1.0
+        stream.push(0x10); // top down
+        stream.extend_from_slice(&2u32.to_be_bytes()); // width
+        stream.extend_from_slice(&2u32.to_be_bytes()); // height
+        stream.extend_from_slice(&8u32.to_be_bytes()); // stride
+        stream.extend_from_slice(&1u64.to_be_bytes()); // image id
+        stream.extend_from_slice(&0u32.to_be_bytes()); // window head dist
+        stream.push(3); // four literal pixels
+        let mut rgba = Vec::new();
+        for i in 0..4u8 {
+            let (b, g, r) = (i * 3 + 1, i * 3 + 2, i * 3 + 3);
+            stream.extend_from_slice(&[b, g, r]);
+            rgba.extend_from_slice(&[r, g, b, 255]);
+        }
+        (stream, rgba)
+    }
+
+    /// A 2x2 ZLIB_GLZ_RGB SpiceImage whose wire header claims
+    /// `declared_glz_size` bytes of GLZ stream.
+    fn zlib_glz_image(declared_glz_size: u32, glz_stream: &[u8]) -> SpiceImage {
+        let zlib = deflate(glz_stream);
+        let mut data = Vec::new();
+        data.extend_from_slice(&declared_glz_size.to_le_bytes());
+        data.extend_from_slice(&(zlib.len() as u32).to_le_bytes());
+        data.extend_from_slice(&zlib);
+        SpiceImage {
+            descriptor: image_descriptor(7, ImageType::ZlibGlzRgb, 0, 2, 2),
+            payload: ImagePayload::Other(data),
+        }
+    }
+
+    #[tokio::test]
+    async fn zlib_glz_image_is_inflated_decoded_and_drawn() {
+        let (mut channel, mut peers) = test_display_channel().await;
+        let (stream, rgba) = glz_2x2_stream();
+        let image = zlib_glz_image(stream.len() as u32, &stream);
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload((0, 0, 2, 2), &[], &image),
+            )
+            .await
+            .expect("draw_copy must not error");
+
+        let events = drain_image_events(&mut peers);
+        assert_eq!(events.len(), 1);
+        let (_, _, width, height, pixels) = &events[0];
+        assert_eq!((*width, *height), (2, 2));
+        assert_eq!(pixels, &rgba);
+    }
+
+    #[tokio::test]
+    async fn zlib_glz_image_with_a_wrong_declared_size_is_refused() {
+        let (mut channel, mut peers) = test_display_channel().await;
+        let (stream, _) = glz_2x2_stream();
+        let image = zlib_glz_image(stream.len() as u32 + 1, &stream);
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload((0, 0, 2, 2), &[], &image),
+            )
+            .await
+            .expect("a refused image is not an error");
+
+        assert!(drain_image_events(&mut peers).is_empty());
     }
 
     #[tokio::test]

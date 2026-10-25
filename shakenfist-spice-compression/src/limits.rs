@@ -9,9 +9,8 @@
 //! wrapping, and 17 GiB is a perfectly representable `usize`.
 //! Most of issues #171 to #177 are variations on that theme.
 //!
-//! Before this module each decoder picked its own limit, or had
-//! none. Decoders in this crate and in the renderer size their
-//! output buffers with [`rgba_len`], which applies both caps below
+//! Decoders in this crate and in the renderer size their output
+//! buffers with [`rgba_len`], which applies both caps below
 //! and so bounds any one decoded image to `MAX_IMAGE_PIXELS * 4`
 //! bytes. [`crate::DecompressedImage::new`] applies the same check
 //! to the buffer it is handed, so an image that escaped a decoder's

@@ -56,8 +56,10 @@ pub struct DecodedJpeg {
 /// pure-Rust backend only honours the cap because
 /// `JpegDecoderRsDecoder::decode` passes
 /// [`MAX_DECODED_RGBA_BYTES`] to `set_max_decoding_buffer_size`
-/// first. The platform backends have no equivalent knob and are
-/// bounded by [`DecodedJpeg::zeroed`] instead.
+/// first. The platform backends have no equivalent knob:
+/// [`DecodedJpeg::zeroed`] bounds the RGBA output they produce,
+/// but the library's own intermediate buffers are not bounded
+/// by these caps.
 pub const MAX_DECODED_JPEG_DIMENSION: u32 = limits::MAX_IMAGE_DIMENSION;
 
 /// Byte ceiling implied by the shared limits: the largest length
@@ -220,6 +222,25 @@ impl Default for JpegDecoderRsDecoder {
     }
 }
 
+/// Read a `jpeg-decoder` frame header and refuse it when its
+/// dimensions fall outside the shared limits, so the caller can
+/// decline before `decode()` allocates anything for the frame.
+fn read_bounded_info(
+    decoder: &mut jpeg_decoder::Decoder<&[u8]>,
+) -> Option<jpeg_decoder::ImageInfo> {
+    if let Err(e) = decoder.read_info() {
+        warn!("MJPEG header error: {}", e);
+        return None;
+    }
+    let info = decoder.info()?;
+    validated_dimensions(
+        "JpegDecoderRsDecoder",
+        info.width as usize,
+        info.height as usize,
+    )?;
+    Some(info)
+}
+
 impl JpegDecoder for JpegDecoderRsDecoder {
     fn decode(&self, data: &[u8]) -> Option<DecodedJpeg> {
         if !is_jpeg_payload("JpegDecoderRsDecoder", data) {
@@ -227,11 +248,12 @@ impl JpegDecoder for JpegDecoderRsDecoder {
         }
 
         let mut decoder = jpeg_decoder::Decoder::new(data);
-        // jpeg-decoder's own default limit is `usize::MAX`, so
-        // without this the crate allocates whatever the frame
-        // header claims before we ever get to inspect the
-        // dimensions. See MAX_DECODED_RGBA_BYTES for the unit.
+        // read_bounded_info refuses an oversized frame header; this
+        // is the backstop for anything else decode() allocates, as
+        // jpeg-decoder's own default limit is `usize::MAX`. See
+        // MAX_DECODED_RGBA_BYTES for the unit.
         decoder.set_max_decoding_buffer_size(MAX_DECODED_RGBA_BYTES);
+        let info = read_bounded_info(&mut decoder)?;
         let pixels = match decoder.decode() {
             Ok(p) => p,
             Err(e) => {
@@ -244,7 +266,6 @@ impl JpegDecoder for JpegDecoderRsDecoder {
                 return None;
             }
         };
-        let info = decoder.info()?;
         let width = info.width as usize;
         let height = info.height as usize;
 
@@ -2203,6 +2224,43 @@ mod dimension_guard_tests {
         assert_eq!(decoded.width, 32);
         assert_eq!(decoded.height, 32);
         assert_eq!(decoded.rgba.len(), 32 * 32 * 4);
+    }
+
+    /// The fixture with its SOF frame size rewritten, leaving
+    /// the entropy data alone: enough for `read_info`, which
+    /// stops at the first scan, but not for a real decode.
+    fn fixture_with_size(width: u16, height: u16) -> Vec<u8> {
+        let mut data = FIXTURE.to_vec();
+        let sof = data
+            .windows(2)
+            .position(|w| w[0] == 0xFF && (0xC0..=0xC2).contains(&w[1]))
+            .expect("fixture has a SOF marker");
+        // Marker, length(2), precision(1), then height, width.
+        data[sof + 5..sof + 7].copy_from_slice(&height.to_be_bytes());
+        data[sof + 7..sof + 9].copy_from_slice(&width.to_be_bytes());
+        data
+    }
+
+    fn header_accepted(data: &[u8]) -> bool {
+        let mut decoder = jpeg_decoder::Decoder::new(data);
+        read_bounded_info(&mut decoder).is_some()
+    }
+
+    /// The pure-Rust backend must refuse an oversized frame from
+    /// its header alone, before decode() allocates the pixel
+    /// buffers.
+    #[test]
+    fn jpeg_decoder_rs_header_check_applies_the_shared_limits() {
+        assert!(header_accepted(FIXTURE));
+        // At the pixel cap, and at the per-side cap.
+        assert!(header_accepted(&fixture_with_size(8192, 8192)));
+        assert!(header_accepted(&fixture_with_size(16384, 1)));
+        // Both sides legal, product one row over the pixel cap.
+        assert!(!header_accepted(&fixture_with_size(8192, 8193)));
+        // One over the per-side cap.
+        assert!(!header_accepted(&fixture_with_size(16385, 1)));
+        // The largest a JPEG header can claim.
+        assert!(!header_accepted(&fixture_with_size(65535, 65535)));
     }
 
     #[test]

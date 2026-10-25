@@ -52,7 +52,8 @@ checks them against these caps before allocating its RGBA output,
 and `rgba_len` is the checked way to size an RGBA buffer. Decoders
 that wrap a codec library (H.264, and the WIC and ImageIO JPEG
 backends) only learn the dimensions after the library has parsed
-the frame, so its intermediate buffers rely on its own limits.
+the frame. For the JPEG backends the RGBA output is still capped,
+but the library's own intermediate buffers rely on its own limits.
 
 ## Usage
 
