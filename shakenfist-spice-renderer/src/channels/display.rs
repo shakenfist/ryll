@@ -5294,26 +5294,33 @@ mod tests {
     #[tokio::test]
     async fn from_cache_larger_than_the_cached_image_is_refused() {
         // #174: cache a 2x2 pixmap as id 42 (16 bytes), then draw it
-        // from the cache claiming 10000x10000 with source rect
-        // (0,0)-(100,1). Before the fix the crop sliced
-        // out_pixels[0..400] out of 16 bytes and panicked. The clip
-        // path indexed the same way, so also try a full-image source
-        // rect, which skips the crop, clipped to that same strip.
+        // from the cache claiming a larger size. Before the fix the
+        // crop sliced out of the 16 bytes and panicked, and the clip
+        // path indexed the same way, so each size is also tried with a
+        // full-image source rect, which skips the crop, clipped to a
+        // strip. 3x3 is inside the pixel cap, so only the cache-size
+        // check refuses it; 10000x10000 is over the cap and is
+        // refused earlier.
         let (mut channel, mut peers) = test_display_channel().await;
         cache_2x2_pixmap(&mut channel, &mut peers, 42).await;
 
-        let image = from_cache_image(ImageType::FromCache, 42, 10000, 10000);
-        let strip: WireRect = (0, 0, 1, 100);
-        let whole: WireRect = (0, 0, 10000, 10000);
-        for (src_rect, clip_rects) in [(strip, &[][..]), (whole, &[strip][..])] {
-            channel
-                .handle_message(
-                    display_server::DRAW_COPY,
-                    &draw_copy_payload(src_rect, clip_rects, &image),
-                )
-                .await
-                .expect("a refused cache hit is not an error");
-            assert!(drain_image_events(&mut peers).is_empty());
+        for size in [3u32, 10000] {
+            let image = from_cache_image(ImageType::FromCache, 42, size, size);
+            let strip: WireRect = (0, 0, 1, size);
+            let whole: WireRect = (0, 0, size, size);
+            for (src_rect, clip_rects) in [(strip, &[][..]), (whole, &[strip][..])] {
+                channel
+                    .handle_message(
+                        display_server::DRAW_COPY,
+                        &draw_copy_payload(src_rect, clip_rects, &image),
+                    )
+                    .await
+                    .expect("a refused cache hit is not an error");
+                assert!(
+                    drain_image_events(&mut peers).is_empty(),
+                    "{size}x{size} over a cached 2x2 must be refused"
+                );
+            }
         }
     }
 
