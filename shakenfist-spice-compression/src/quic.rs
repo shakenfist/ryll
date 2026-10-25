@@ -164,6 +164,14 @@ fn family_init(family: &mut Family, bpc: usize, limit: usize) {
     }
 }
 
+/// End index of a run of `run` pixels starting at `start`, or
+/// `None` when it reaches past `end`. The run length comes from
+/// the server, and one that overshoots the segment is corrupt
+/// (upstream quic_tmpl.c reports "wrong RLE").
+fn checked_run_end(start: usize, run: usize, end: usize) -> Option<usize> {
+    (run <= end - start).then(|| start + run)
+}
+
 fn quic_image_bpc(image_type: u32) -> u32 {
     match image_type {
         QUIC_IMAGE_TYPE_GRAY => 8,
@@ -944,13 +952,9 @@ impl QuicDecoder {
                             Some(v) => v,
                             None => return false,
                         };
-                        // The run length comes from the server; one
-                        // that reaches past this segment is corrupt
-                        // (upstream quic_tmpl.c reports "wrong RLE").
-                        if run > end - i {
+                        let Some(run_end) = checked_run_end(i, run, end) else {
                             return false;
-                        }
-                        let run_end = i + run;
+                        };
 
                         while i < run_end {
                             let p = i * RGB32_PIXEL_SIZE;
@@ -1028,13 +1032,9 @@ impl QuicDecoder {
                         Some(v) => v,
                         None => return false,
                     };
-                    // The run length comes from the server; one
-                    // that reaches past this segment is corrupt
-                    // (upstream quic_tmpl.c reports "wrong RLE").
-                    if run > end - i {
+                    let Some(run_end) = checked_run_end(i, run, end) else {
                         return false;
-                    }
-                    let run_end = i + run;
+                    };
 
                     while i < run_end {
                         let p = i * RGB32_PIXEL_SIZE;
@@ -1345,13 +1345,9 @@ impl QuicDecoder {
                             Some(v) => v,
                             None => return false,
                         };
-                        // The run length comes from the server; one
-                        // that reaches past this segment is corrupt
-                        // (upstream quic_tmpl.c reports "wrong RLE").
-                        if run > end - i {
+                        let Some(run_end) = checked_run_end(i, run, end) else {
                             return false;
-                        }
-                        let run_end = i + run;
+                        };
                         while i < run_end {
                             let p = i * RGB32_PIXEL_SIZE;
                             let pm1 = (i - 1) * RGB32_PIXEL_SIZE;
@@ -1418,13 +1414,9 @@ impl QuicDecoder {
                         Some(v) => v,
                         None => return false,
                     };
-                    // The run length comes from the server; one
-                    // that reaches past this segment is corrupt
-                    // (upstream quic_tmpl.c reports "wrong RLE").
-                    if run > end - i {
+                    let Some(run_end) = checked_run_end(i, run, end) else {
                         return false;
-                    }
-                    let run_end = i + run;
+                    };
                     while i < run_end {
                         let p = i * RGB32_PIXEL_SIZE;
                         let pm1 = (i - 1) * RGB32_PIXEL_SIZE;
@@ -1840,6 +1832,20 @@ mod tests {
         );
         let data = quic_stream(QUIC_IMAGE_TYPE_RGBA, 8, 2, &bits);
         assert_eq!(quic_decode(&data, 8, 2), None);
+    }
+
+    #[test]
+    fn checked_run_end_bounds_a_run_by_the_segment_end() {
+        assert_eq!(checked_run_end(3, 5, 8), Some(8), "ends exactly at end");
+        assert_eq!(checked_run_end(3, 4, 8), Some(7));
+        assert_eq!(checked_run_end(3, 0, 8), Some(3));
+        assert_eq!(checked_run_end(3, 6, 8), None, "one past end");
+        assert_eq!(checked_run_end(3, usize::MAX, 8), None);
+        assert_eq!(
+            checked_run_end(usize::MAX - 1, 1, usize::MAX),
+            Some(usize::MAX)
+        );
+        assert_eq!(checked_run_end(usize::MAX - 1, 2, usize::MAX), None);
     }
 
     #[test]
