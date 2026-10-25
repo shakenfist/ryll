@@ -2456,7 +2456,7 @@ impl DisplayChannel {
                     let Some(expected_pixels) = limits::rgba_len(width_usize, height_usize) else {
                         warn_once!(
                             "display:decode_failure:pixmap:too_large",
-                            "display: pixmap {} x {} outside the {} pixel / {} per-side limits, skipping",
+                            "display: pixmap {}x{} outside the {} pixel / {} per-side limits, skipping",
                             width,
                             height,
                             limits::MAX_IMAGE_PIXELS,
