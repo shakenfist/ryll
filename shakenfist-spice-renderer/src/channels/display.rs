@@ -362,18 +362,10 @@ const GLZ_STREAM_FIXED_OVERHEAD: usize = 64;
 
 /// Upper bound on the inflated GLZ stream for a `width` x `height` image.
 ///
-/// The inflated data is a GLZ stream, not RGBA, so `rgba_len` alone is
-/// not quite the right bound. A stream can legitimately be a little
-/// larger than the pixels it describes: the server's GLZ encoder
-/// (spice/server/glz-encode.tmpl.c) emits a 33 byte header, one control
-/// byte per run of up to 32 literal pixels, and 3 bytes per literal
-/// RGB pixel. An RGBA image adds a second pass carrying the alpha
-/// byte, so incompressible RGBA costs about 4 + 2/32 bytes per pixel,
-/// slightly over the 4 bytes of the decoded output. Matches are only
-/// emitted when cheaper than the literals they replace, so nothing
-/// pushes the ratio much further. A quarter of the RGBA size plus a
-/// fixed allowance covers that with room to spare while still bounding
-/// the inflate to 1.25x the shared image cap.
+/// A GLZ stream can be slightly larger than the RGBA it decodes to:
+/// incompressible RGBA costs about 4 + 2/32 bytes a pixel plus a 33
+/// byte header (spice/server/glz-encode.tmpl.c). A quarter of the RGBA
+/// size plus a fixed allowance covers that.
 ///
 /// `None` when `rgba_len` refuses the dimensions.
 fn glz_stream_limit(width: usize, height: usize) -> Option<usize> {
@@ -2448,13 +2440,9 @@ impl DisplayChannel {
                     let width_usize = width as usize;
                     let height_usize = height as usize;
 
-                    // A malicious server can send u32::MAX on any of these.
-                    // `rgba_len` refuses a zero side, a side over the shared
-                    // per-side limit and a pixel count over the shared cap,
-                    // and so also bounds the allocation below; the
-                    // stride * height product is guarded separately so the
-                    // short-data check cannot pass on a wrapped value and
-                    // let the blit loop index out of bounds.
+                    // A server can send u32::MAX on any of these. `rgba_len`
+                    // bounds the allocation below; stride * height is checked
+                    // separately so it cannot wrap past the short-data check.
                     let Some(expected_pixels) = limits::rgba_len(width_usize, height_usize) else {
                         warn_once!(
                             "display:decode_failure:pixmap:too_large",
@@ -2526,9 +2514,6 @@ impl DisplayChannel {
                                 };
                             }
                         }
-                        // `rgba` was sized from these dimensions, so
-                        // this refuses only a zero side or a side over
-                        // the shared per-side limit.
                         let image = DecompressedImage::new(width, height, rgba, img_desc.image_id);
                         if image.is_none() {
                             warn_once!(
@@ -2757,9 +2742,8 @@ impl DisplayChannel {
                     let decoded = self.jpeg_decoder.decode(jpeg_data).and_then(|dec| {
                         DecompressedImage::new(dec.width, dec.height, dec.rgba, img_desc.image_id)
                     });
-                    // `DecodedJpeg`'s constructors already apply
-                    // `rgba_len`, so `new` refusing here is a backstop,
-                    // not a distinct failure worth its own key.
+                    // `new` refusing is a backstop: `DecodedJpeg` already
+                    // applied `rgba_len`.
                     if decoded.is_none() {
                         warn_once!(
                             "display:decode_failure:jpeg:decode_failed",
@@ -2797,10 +2781,8 @@ impl DisplayChannel {
                                 img_desc.image_id,
                             )
                         });
-                    // `quic_decode` checks the header against these
-                    // dimensions and sizes its output with `rgba_len`,
-                    // so `new` refusing here is a backstop, not a
-                    // distinct failure worth its own key.
+                    // `new` refusing is a backstop: `quic_decode` already
+                    // applied `rgba_len`.
                     if decoded.is_none() {
                         warn_once!(
                             "display:decode_failure:quic:decode_failed",
