@@ -5324,6 +5324,78 @@ mod tests {
         }
     }
 
+    /// A 2x2 GLZ stream: the 33 byte header, then one control byte for
+    /// four literal BGR pixels. Decodes to the RGBA returned alongside.
+    fn glz_2x2_stream() -> (Vec<u8>, Vec<u8>) {
+        let mut stream = Vec::new();
+        stream.extend_from_slice(b"  ZL");
+        stream.extend_from_slice(&[0, 1, 0, 0]); // version 1.0
+        stream.push(0x10); // top down
+        stream.extend_from_slice(&2u32.to_be_bytes()); // width
+        stream.extend_from_slice(&2u32.to_be_bytes()); // height
+        stream.extend_from_slice(&8u32.to_be_bytes()); // stride
+        stream.extend_from_slice(&1u64.to_be_bytes()); // image id
+        stream.extend_from_slice(&0u32.to_be_bytes()); // window head dist
+        stream.push(3); // four literal pixels
+        let mut rgba = Vec::new();
+        for i in 0..4u8 {
+            let (b, g, r) = (i * 3 + 1, i * 3 + 2, i * 3 + 3);
+            stream.extend_from_slice(&[b, g, r]);
+            rgba.extend_from_slice(&[r, g, b, 255]);
+        }
+        (stream, rgba)
+    }
+
+    /// A 2x2 ZLIB_GLZ_RGB SpiceImage whose wire header claims
+    /// `declared_glz_size` bytes of GLZ stream.
+    fn zlib_glz_image(declared_glz_size: u32, glz_stream: &[u8]) -> SpiceImage {
+        let zlib = deflate(glz_stream);
+        let mut data = Vec::new();
+        data.extend_from_slice(&declared_glz_size.to_le_bytes());
+        data.extend_from_slice(&(zlib.len() as u32).to_le_bytes());
+        data.extend_from_slice(&zlib);
+        SpiceImage {
+            descriptor: image_descriptor(7, ImageType::ZlibGlzRgb, 0, 2, 2),
+            payload: ImagePayload::Other(data),
+        }
+    }
+
+    #[tokio::test]
+    async fn zlib_glz_image_is_inflated_decoded_and_drawn() {
+        let (mut channel, mut peers) = test_display_channel().await;
+        let (stream, rgba) = glz_2x2_stream();
+        let image = zlib_glz_image(stream.len() as u32, &stream);
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload((0, 0, 2, 2), &[], &image),
+            )
+            .await
+            .expect("draw_copy must not error");
+
+        let events = drain_image_events(&mut peers);
+        assert_eq!(events.len(), 1);
+        let (_, _, width, height, pixels) = &events[0];
+        assert_eq!((*width, *height), (2, 2));
+        assert_eq!(pixels, &rgba);
+    }
+
+    #[tokio::test]
+    async fn zlib_glz_image_with_a_wrong_declared_size_is_refused() {
+        let (mut channel, mut peers) = test_display_channel().await;
+        let (stream, _) = glz_2x2_stream();
+        let image = zlib_glz_image(stream.len() as u32 + 1, &stream);
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload((0, 0, 2, 2), &[], &image),
+            )
+            .await
+            .expect("a refused image is not an error");
+
+        assert!(drain_image_events(&mut peers).is_empty());
+    }
+
     #[tokio::test]
     async fn draw_copy_with_a_million_duplicate_clip_rects_copies_once() {
         // #476: one DRAW_COPY of a cache hit with a million copies of a
