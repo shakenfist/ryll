@@ -528,6 +528,12 @@ cursor, resize, text clipboard and audio playback. Specifically:
    its reply. Phase 4 advertises Opus first and PCM second, and
    takes the first one the client also supports. mstsc is
    still untested.
+   - **Answer (phase 4):** FreeRDP 3.15.0 accepted Opus as
+     offered; with `/sound:format:1` it got PCM. Measured under
+     the video workload, ryll sent 1.36 Mbit/s with Opus and
+     2.78 Mbit/s with PCM. Audio was clean on both, with one
+     choppy episode on PCM that was not diagnosed. mstsc was
+     not tested.
 7. **Is a bitmap codec good enough?** Planar and RemoteFX are
    fine for desktops and terminals and poor for video, which
    ryll would decode and re-encode. **Recommendation:**

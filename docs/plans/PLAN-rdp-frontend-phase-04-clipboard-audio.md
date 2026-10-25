@@ -634,7 +634,66 @@ FreeRDP's version and the date:
 
 ## Results
 
-*To be filled by step 4.*
+### Manual test: FreeRDP against the desktop guest
+
+2026-10-25, about 11:00 to 13:35 AEDT, on the Kasm host, with
+Mikal driving and listening. Guest: `debian-xfce:13` under
+`tools/start-desktop-qemu.sh` (QXL, vdagent, Intel HDA through
+SPICE audio) on SPICE port 5910, with its own PID, QMP and OVMF
+variables paths. Server: a debug build of `ryll --rdp
+--rdp-port 0 --direct 127.0.0.1:5910 --verbose` at `245b961`.
+Client: `xfreerdp3` (FreeRDP 3.15.0, built with Opus) on the
+same host, `/dynamic-resolution /size:1280x800`, first with
+`/sound` and then, on a second connection, `/sound:format:1`.
+
+- **Audio format:** with `/sound`, ryll logged "streaming Opus at
+  48000 Hz, 2 channels": FreeRDP accepted the Opus format as
+  offered. With `/sound:format:1` it logged PCM. The guest's
+  stream was SPICE Opus (data mode 3), 48 kHz stereo.
+- **Audio heard:** Mikal heard the guest's audio clean over Opus,
+  from a test tone and a video in the guest's browser, and clean
+  over PCM. On the PCM connection it got choppy while Mousepad
+  was in the foreground over the video. IronRDP's log shows no
+  stale wave dropped and the relay never lagged on either
+  connection, so the gaps arose before the relay or after the
+  wire; not diagnosed (*Future work*).
+- **Audio under load:** 30 s of `tools/rdp-measure.sh` with the
+  video playing in a window: Opus 173.5% average CPU (255% peak),
+  1.36 Mbit/s; PCM 171.7% (262% peak), 2.78 Mbit/s. The
+  difference, about 1.4 Mbit/s, is PCM's 1.5 Mbit/s against
+  Opus's few tens of kbit/s. (Phase 2's 109 Mbit/s video row was
+  a full-screen 853x480 region; this window was smaller.)
+- **Clipboard, client to guest:** a single line, several lines
+  and non-ASCII text all pasted correctly in a guest terminal and
+  in Mousepad, line breaks intact.
+- **Clipboard, guest to client:** a copy from Mousepad reached
+  the host (16 bytes, offered and fetched within a millisecond).
+  The first attempts did not: for those copies the guest's agent
+  answered ryll's request with empty data (`size=8`, no text),
+  so there was nothing to offer. That is between the guest's
+  agent and the main channel, not RDP; whether the GUI sees the
+  same is unchecked (*Future work*). After a host-to-guest paste
+  the guest re-took the clipboard with the same text, which ryll
+  offered back to the client; harmless, since the text is the
+  client's own.
+- **Clipboard on connect: not observable with FreeRDP.** With
+  text on the host clipboard, FreeRDP's first Format List was
+  empty, so there was nothing to fetch; it announces only later
+  copies. The server side is covered by the loopback test.
+- **After a resize:** clipboard both ways and audio still worked
+  after a FreeRDP window resize.
+- **Reconnect:** after FreeRDP was closed and started again, the
+  second connection negotiated its audio and clipboard afresh,
+  and both clipboard directions and audio worked.
+- **mstsc: not tested** (none available).
+
+### Cells for phase 6's RDP column
+
+| Feature | RDP |
+|---|---|
+| Audio playback (PCM and Opus decoding) | available (Opus passed through when the client accepts it, decoded 48 kHz stereo PCM otherwise, about 1.5 Mbit/s; a SPICE stream of another shape is not played) |
+| Audio volume/mute persisted across reconnect | n/a (the client's own volume control) |
+| Clipboard sync with the guest (vdagent, CLIPBOARD selection, UTF-8 text) | available (text both ways through the RDP clipboard channel, with vdagent in the guest; line endings converted to CRLF for the client and LF for the guest) |
 
 ## Execution notes
 
@@ -691,6 +750,12 @@ FreeRDP's version and the date:
 - Server-side switches for the clipboard and audio, if an
   operator asks for one (decision 1).
 - Line-ending conversion for CRLF guests, in the renderer (#624).
+- Guest copies the guest's agent answers with empty data, seen
+  with `debian-xfce:13` for the first copies of the manual test;
+  check whether the GUI sees the same, and file it if so.
+- PCM audio choppy while another guest window is in front of the
+  video, with no wave dropped by IronRDP or the relay; not
+  diagnosed.
 - Rich clipboard formats and file copy, and the microphone
   (master plan *Future work*).
 - A wave or clipboard message queued as one connection ends can
