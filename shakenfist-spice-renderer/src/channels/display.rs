@@ -349,9 +349,9 @@ enum InflateGlzError {
     DimensionsRefused,
     /// The declared GLZ size exceeds the limit for the dimensions.
     DeclaredTooLarge,
-    /// The zlib stream inflated to more than the limit.
-    TooLarge,
-    /// The inflated length is not the declared GLZ size.
+    /// The zlib stream inflated past the declared GLZ size.
+    ExceedsDeclared,
+    /// The stream ended short of the declared GLZ size.
     SizeMismatch { inflated: usize },
     /// The zlib stream was malformed.
     Zlib(std::io::Error),
@@ -389,7 +389,8 @@ fn glz_stream_limit(width: usize, height: usize) -> Option<usize> {
 /// image-encoders.cpp, and canvas_base.c in spice-common, which
 /// allocates exactly that many bytes for the inflate). It counts
 /// compressed GLZ bytes, not RGBA bytes. It must fit within the limit
-/// and match the inflated length.
+/// and match the inflated length, and the inflate stops one byte past
+/// it.
 fn inflate_glz_stream(
     zlib_data: &[u8],
     declared_glz_size: usize,
@@ -403,15 +404,16 @@ fn inflate_glz_stream(
 
     let mut decoder = ZlibDecoder::new(zlib_data);
     let mut glz_data = Vec::new();
-    // One byte past the limit is enough to tell "exactly at the limit"
-    // from "over it" without inflating any further.
+    // The declared size is exact and already within the limit, so one
+    // byte past it tells "exactly the size" from "over it" without
+    // inflating any further.
     decoder
         .by_ref()
-        .take(limit as u64 + 1)
+        .take(declared_glz_size as u64 + 1)
         .read_to_end(&mut glz_data)
         .map_err(InflateGlzError::Zlib)?;
-    if glz_data.len() > limit {
-        return Err(InflateGlzError::TooLarge);
+    if glz_data.len() > declared_glz_size {
+        return Err(InflateGlzError::ExceedsDeclared);
     }
     if glz_data.len() != declared_glz_size {
         return Err(InflateGlzError::SizeMismatch {
@@ -2641,12 +2643,11 @@ impl DisplayChannel {
                             );
                             None
                         }
-                        Err(InflateGlzError::TooLarge) => {
+                        Err(InflateGlzError::ExceedsDeclared) => {
                             warn_once!(
                                 "display:decode_failure:zlib_glz:inflate_too_large",
-                                "display: ZLIB_GLZ_RGB inflated past the limit for {}x{}",
-                                img_desc.width,
-                                img_desc.height
+                                "display: ZLIB_GLZ_RGB inflated past its declared GLZ size {}",
+                                declared_glz_size
                             );
                             None
                         }
@@ -5059,14 +5060,14 @@ mod tests {
     #[test]
     fn inflate_glz_stream_refuses_bomb_past_limit() {
         // A 1x1 image has a limit of 4 + 1 + 64 bytes. 1 MiB of zeros
-        // deflates to about a kilobyte and must be refused, whatever
-        // size the header claims.
+        // deflates to about a kilobyte and must be refused, even when
+        // the header claims the most the limit allows.
         let zlib = deflate(&vec![0u8; 1024 * 1024]);
         assert!(zlib.len() < 4096);
         let limit = glz_stream_limit(1, 1).unwrap();
         assert!(matches!(
             inflate_glz_stream(&zlib, limit, 1, 1),
-            Err(InflateGlzError::TooLarge)
+            Err(InflateGlzError::ExceedsDeclared)
         ));
     }
 
@@ -5080,7 +5081,27 @@ mod tests {
         let over = deflate(&vec![7u8; limit + 1]);
         assert!(matches!(
             inflate_glz_stream(&over, limit, 1, 1),
-            Err(InflateGlzError::TooLarge)
+            Err(InflateGlzError::ExceedsDeclared)
+        ));
+    }
+
+    #[test]
+    fn inflate_glz_stream_stops_at_the_declared_size_not_the_limit() {
+        // A stored block of 100 bytes, then a block of the reserved type.
+        // Inflated whole, the stream is a zlib error; stopped one byte
+        // past a declared size of 10, it never reaches the bad block and
+        // is refused as exceeding the declared size.
+        let mut zlib = vec![0x78, 0x01, 0x00, 100, 0, !100u8, 0xFF];
+        zlib.extend_from_slice(&[0u8; 100]);
+        zlib.push(0x07);
+        assert!(glz_stream_limit(256, 256).unwrap() > 100);
+        assert!(matches!(
+            inflate_glz_stream(&zlib, 10, 256, 256),
+            Err(InflateGlzError::ExceedsDeclared)
+        ));
+        assert!(matches!(
+            inflate_glz_stream(&zlib, 101, 256, 256),
+            Err(InflateGlzError::Zlib(_))
         ));
     }
 
