@@ -164,9 +164,7 @@ pub fn decompress_spice_lz4(data: &[u8], width: usize, height: usize) -> Option<
         rgba
     };
 
-    // `rgba_len` accepted these dimensions above, which caps each side
-    // at `MAX_IMAGE_DIMENSION`, so the casts cannot truncate and `new`
-    // cannot refuse a buffer it sized.
+    // `rgba_len` capped both sides, so the `u32` casts cannot truncate.
     DecompressedImage::new(width as u32, height as u32, rgba, 0)
 }
 

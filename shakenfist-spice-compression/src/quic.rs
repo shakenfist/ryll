@@ -649,10 +649,8 @@ impl QuicDecoder {
             return false;
         }
 
-        // The dimensions come from the server. Refuse them before
-        // reset_channels sizes each channel's row buffer from the
-        // width, or a header claiming a 4 Gi pixel row allocates
-        // 16 GiB per channel before any pixel data is read.
+        // Refuse before reset_channels sizes the row buffers from the
+        // server's width.
         let Some(output_len) = limits::rgba_len(self.width, self.height) else {
             warn!("quic: dimensions refused: {}x{}", self.width, self.height);
             return false;

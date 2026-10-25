@@ -528,8 +528,6 @@ pub async fn decompress_glz(data: &[u8], dictionary: &GlzDictionary) -> Result<D
         output = flipped;
     }
 
-    // `output` was sized from these dimensions above, so this only
-    // refuses dimensions outside the shared limits.
     DecompressedImage::new_glz(width, height, output, image_id, win_head_dist)
         .ok_or_else(|| anyhow!("GLZ image dimensions refused: {}x{}", width, height))
 }
