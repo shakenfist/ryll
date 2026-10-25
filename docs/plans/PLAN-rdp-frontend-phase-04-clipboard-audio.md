@@ -604,32 +604,32 @@ FreeRDP's version and the date:
 
 ## Definition of done
 
-- [ ] `grep -n 'with_cliprdr_factory\|with_sound_factory' shakenfist-spice-rdp/src/server.rs`
+- [x] `grep -n 'with_cliprdr_factory\|with_sound_factory' shakenfist-spice-rdp/src/server.rs`
       finds both, and `grep -n 'DiscardPlayback' ryll/src/rdp.rs`
       finds nothing.
-- [ ] `SessionHandles` has `clipboard` and `audio` fields, and
+- [x] `SessionHandles` has `clipboard` and `audio` fields, and
       `ryll/src/rdp.rs` makes the `MemoryClipboard` outside any
       `control_server` branch.
-- [ ] Unit tests prove nothing is sent on either channel before
+- [x] Unit tests prove nothing is sent on either channel before
       it can take it (decision 6), and the line-ending and PCM
       byte-order conversions, under `make test`.
-- [ ] The loopback test's new case passes, and fails when
+- [x] The loopback test's new case passes, and fails when
       either factory is unregistered (mutation, management
       session).
-- [ ] Every mutation listed in briefs 1-3 is killed; the
+- [x] Every mutation listed in briefs 1-3 is killed; the
       scripts' paths and counts are in *Execution notes*.
-- [ ] `make build`, `make test`, `make lint`, `make
+- [x] `make build`, `make test`, `make lint`, `make
       check-windows`, `make package-check` and `pre-commit run
       --all-files` pass.
-- [ ] *Results* records every item listed under *Step 4*, with
+- [x] *Results* records every item listed under *Step 4*, with
       FreeRDP's version and the date, and says plainly which
       were not tested.
-- [ ] The master plan's open question 6 has an answer citing
+- [x] The master plan's open question 6 has an answer citing
       step 4, and `docs/multi-mode-parity.md`'s RDP row (`:26`)
       names clipboard and audio.
-- [ ] `git grep -n -i 'phase 4\|decision [0-9]\|survey item' -- shakenfist-spice-rdp shakenfist-spice-renderer/src ryll/src docs ':!docs/plans'`
+- [x] `git grep -n -i 'phase 4\|decision [0-9]\|survey item' -- shakenfist-spice-rdp shakenfist-spice-renderer/src ryll/src docs ':!docs/plans'`
       finds nothing.
-- [ ] `git grep -n -i 'clipboard\|text' -- shakenfist-spice-rdp/src/clipboard.rs | grep -i 'info!\|debug!\|warn!'`
+- [x] `git grep -n -i 'clipboard\|text' -- shakenfist-spice-rdp/src/clipboard.rs | grep -i 'info!\|debug!\|warn!'`
       shows no log line that formats the clipboard text itself.
 
 ## Results
@@ -744,6 +744,28 @@ same host, `/dynamic-resolution /size:1280x800`, first with
   server's list while the server (correctly, per MS-RDPEA)
   numbers it by the client's; the test asserts the number and
   the bytes instead.
+- **Step 4** ran as planned; see *Results*. The verbose server
+  log reached 1 GB over the two and a half hours, which is worth
+  knowing before running `--verbose` that long again.
+- **Step 5** ran as planned (Sonnet, medium); the management
+  session checked its FreeRDP option claims against `xfreerdp3
+  /help` and the test run.
+- **Definition of done, checked 2026-10-25 AEDT** at `4ef222b`:
+  `make build`, `make test` (1665 passed, 0 failed), `make
+  lint`, `make check-windows` (its warnings are in `session.rs`
+  and `bugreport.rs`, which this phase does not touch) and
+  `make package-check` exit 0, and `pre-commit run --all-files`
+  passes. Both factories are registered in `server.rs` and
+  `DiscardPlayback` is gone; `SessionHandles` has `clipboard`
+  and `audio`, and `ryll/src/rdp.rs` makes the clipboard outside
+  the control-socket branch (`:185`). Steps 1-3's 25 mutants are
+  all killed by their expected tests; the management session
+  re-ran "sound factory not registered" on a copy and the new
+  loopback test failed as expected. The citation grep finds
+  nothing, and no clipboard log line formats the text.
+  *Results* covers every step 4 item, saying which could not be
+  observed (clipboard on connect, with FreeRDP) or tested
+  (mstsc).
 
 ## Future work
 
