@@ -41,6 +41,16 @@ OVMF_CODE := /usr/share/OVMF/OVMF_CODE_4M.fd
 OVMF_VARS := /usr/share/OVMF/OVMF_VARS_4M.fd
 QEMU_VARS_COPY := /tmp/ryll-test-ovmf-vars.fd
 
+# The RDP smoke lane (`make rdp-smoke`; see "The RDP smoke lane" in
+# docs/ci.md). Its image carries QEMU, OVMF, Xvfb and FreeRDP so the
+# devcontainer does not have to. The lane runs its own QEMU inside that
+# container, on a port and paths of its own, never the test-qemu ones
+# above. RDP_SMOKE_LOGS is where the driver's logs land; CI points it
+# outside the checkout.
+RDP_SMOKE_IMAGE := ryll-rdp-smoke
+RDP_SMOKE_DIR := target/rdp-smoke
+RDP_SMOKE_LOGS ?= $(RDP_SMOKE_DIR)/logs
+
 # Desktop test guest, used for manual --web verification. Unlike the
 # UEFI latency guest above this is a real XFCE desktop with
 # spice-vdagent, an audio device and a cursor, which is what makes
@@ -115,7 +125,7 @@ DOCKER_RUN_OFFLINE := docker run --rm --network none $(DOCKER_BASE_ARGS) $(CACHE
 	deb rpm kasm-image web-smoke web-smoke-tls fuzz-fmt-check fuzz-fmt package-check publish-crates \
 	test-qemu test-qemu-usb test-qemu-desktop test-qemu-stop test-k1-idle \
 	macos-prereqs macos-build macos-release \
-	build-tokio-console check-windows
+	build-tokio-console check-windows release-rdp rdp-smoke-image rdp-smoke
 
 all: build
 
@@ -137,6 +147,9 @@ help:
 	@echo "  make kasm-image             - Build a Kasm Workspaces image from the .deb"
 	@echo "  make web-smoke              - Smoke-test ryll --web (plain HTTP)"
 	@echo "  make web-smoke-tls          - Smoke-test ryll --web (TLS)"
+	@echo "  make release-rdp            - Build release ryll with the rdp feature"
+	@echo "  make rdp-smoke-image        - Build the RDP smoke lane's image (QEMU, Xvfb, FreeRDP)"
+	@echo "  make rdp-smoke              - Run the RDP smoke lane: FreeRDP against the UEFI guest"
 	@echo "  make devcontainer           - Build the development container"
 	@echo "  make fuzz-devcontainer      - Build the fuzzing container (nightly + cargo-fuzz)"
 	@echo "  make fuzz-fmt-check         - Format-check the detached fuzz workspace"
@@ -220,6 +233,18 @@ release: fetch
 		-e RYLL_GIT_SHA="$(RYLL_GIT_SHA)" \
 		$(RYLL_IMAGE) \
 		cargo build --release --frozen -p ryll
+
+# Build release ryll with the default-off `rdp` feature, for the RDP
+# smoke lane. Offline and read-only, as `release` is. The binary is
+# copied out of target/release, which this build shares with `release`
+# so the dependencies compile once, so that a later `make release`
+# (which leaves `rdp` off) cannot swap it under the lane.
+release-rdp: fetch
+	$(DOCKER_RUN_OFFLINE) \
+		-e RYLL_GIT_SHA="$(RYLL_GIT_SHA)" \
+		$(RYLL_IMAGE) \
+		sh -c "cargo build --release --frozen -p ryll --features rdp && \
+			mkdir -p $(RDP_SMOKE_DIR) && cp target/release/ryll $(RDP_SMOKE_DIR)/ryll"
 
 # Cheap smoke-tier proxy for the Windows builds that run in the merge
 # tier: `cargo check` against the gnu triple, which mingw-w64 lets us
@@ -336,6 +361,29 @@ web-smoke-tls: release
 	$(DOCKER_RUN) \
 		$(RYLL_IMAGE) \
 		tools/web-smoke.sh --tls target/release/ryll
+
+# The RDP smoke lane's image: Debian with QEMU, OVMF, Xvfb, FreeRDP,
+# xdotool and xwd. The build context is its directory alone.
+rdp-smoke-image:
+	docker build -t $(RDP_SMOKE_IMAGE) tools/rdp-smoke
+
+# Run the RDP smoke lane: tools/rdp-smoke.py, in the image above, drives
+# FreeRDP against `ryll --rdp` against the UEFI latency guest, which it
+# boots in its own QEMU. --network none: everything talks over the
+# container's loopback, so nothing on this host's ports is touched.
+# /dev/kvm is passed in, with its group, when the host has one; without
+# it QEMU falls back to TCG. --init reaps whatever the driver leaves.
+rdp-smoke: release-rdp rdp-smoke-image $(QEMU_TEST_IMAGE)
+	mkdir -p "$(RDP_SMOKE_LOGS)"
+	docker run --rm --init --network none \
+		$$(test -c /dev/kvm && echo --device /dev/kvm --group-add $$(stat -c %g /dev/kvm)) \
+		-u $(UID):$(GID) \
+		-v "$(CURDIR)/tools/rdp-smoke.py":/smoke/rdp-smoke.py:ro \
+		-v "$(CURDIR)/$(RDP_SMOKE_DIR)/ryll":/smoke/ryll:ro \
+		-v "$(abspath $(QEMU_TEST_IMAGE))":/smoke/guest.qcow2:ro \
+		-v "$(abspath $(RDP_SMOKE_LOGS))":/smoke/logs \
+		$(RDP_SMOKE_IMAGE) \
+		python3 /smoke/rdp-smoke.py --ryll /smoke/ryll --guest /smoke/guest.qcow2 --workdir /smoke/logs
 
 # Build the fuzzing container: the base devcontainer plus the
 # nightly toolchain and cargo-fuzz.

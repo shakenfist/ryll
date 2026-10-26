@@ -29,6 +29,15 @@
 //! wave in the format the two sides agreed: 16-bit PCM, unchanged
 //! sample for sample, for a client that accepts only PCM, and the
 //! guest's Opus packet, unchanged, for one that accepts Opus too.
+//!
+//! The rest follow clients through the server's connection lifecycle:
+//! a client served after the one before it left; a second client with
+//! the password taking the session over, which disconnects the first
+//! and releases what it held; a client with the wrong password, over
+//! TLS and over NLA, and a client of another session, each leaving the
+//! client being served alone; a connection that never authenticates
+//! being dropped once its time is up, having kept the next client
+//! waiting no longer than that; and a stop with clients connected.
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
@@ -63,8 +72,8 @@ use ironrdp_svc::{SvcProcessor, SvcProcessorMessages};
 use ironrdp_tokio::{FramedWrite as _, NetworkClient, TokioFramed};
 use shakenfist_spice_protocol::MOUSE_MODE_SERVER;
 use shakenfist_spice_rdp::{
-    serve, AudioRelay, Credentials, CursorState, RdpConfig, RdpSecurity, SessionHandles,
-    SingleSession, TlsIdentity,
+    serve, AudioRelay, Credentials, CursorState, RdpConfig, RdpSecurity, Rejected, SessionHandles,
+    SessionProvider, SingleSession, TlsIdentity, DEFAULT_HANDSHAKE_TIMEOUT,
 };
 use shakenfist_spice_renderer::{
     ClipboardBackend as _, CursorImage, DisplaySize, InputEvent, MemoryClipboard,
@@ -108,6 +117,11 @@ const BLOCK_COLOUR: [u8; 3] = [250, 120, 10];
 /// RemoteFX converts to YCbCr and quantises, which costs a unit or
 /// two in flat areas; channels swapped or misplaced are off by tens.
 const TOLERANCE: u8 = 8;
+
+/// How long a client has to authenticate in the test that lets one
+/// run out of time: short, so the test is quick, and long enough that
+/// a client served without waiting for it is told apart.
+const SHORT_HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// The longest any one step may take before the test fails, so a hang
 /// is a failure rather than a stuck CI job. The longest wait is for the
@@ -290,6 +304,7 @@ fn session_with(
     let (input_tx, input_rx) = mpsc::channel(16);
     let (_mouse_mode_tx, mouse_mode) = watch::channel(MOUSE_MODE_SERVER);
     let (cursor_tx, cursor) = watch::channel(CursorState::default());
+    let (_, spice_up) = watch::channel(true);
     let (resize_tx, resize_rx) = mpsc::channel(1);
     let handles = Arc::new(SessionHandles {
         surface_mirror: Arc::new(tokio::sync::Mutex::new(mirror)),
@@ -297,6 +312,7 @@ fn session_with(
         mouse_mode,
         resize_tx,
         cursor,
+        spice_up,
         clipboard,
         audio,
         label: "loopback".to_string(),
@@ -318,29 +334,83 @@ fn server_credentials() -> Credentials {
 }
 
 fn server_config(handles: Arc<SessionHandles>) -> RdpConfig {
+    server_config_with(
+        RdpSecurity::Tls,
+        Arc::new(SingleSession::new(server_credentials(), handles)),
+    )
+}
+
+fn server_config_with(security: RdpSecurity, provider: Arc<dyn SessionProvider>) -> RdpConfig {
     RdpConfig {
         host: IpAddr::V4(Ipv4Addr::LOCALHOST),
         port: Some(0),
-        security: RdpSecurity::Tls,
+        security,
         identity: TlsIdentity::self_signed(&["127.0.0.1".to_string(), "localhost".to_string()])
             .expect("self-signed identity"),
         credentials: server_credentials(),
-        provider: Arc::new(SingleSession::new(server_credentials(), handles)),
+        provider,
+        handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
     }
 }
 
-/// A TLS-only client asking for a `width` x `height` desktop. It
-/// presents a domain, as mstsc does, which the server must ignore. It
-/// advertises IronRDP's default codecs, which is RemoteFX alone.
-fn client_config(width: u16, height: u16, channels: &Channels) -> ironrdp_connector::Config {
+/// What a client presents, and how.
+#[derive(Clone)]
+struct Login {
+    username: String,
+    password: String,
+    /// NLA (CredSSP inside TLS) rather than TLS alone.
+    nla: bool,
+}
+
+impl Login {
+    /// The session's username and password, over TLS alone.
+    fn tls() -> Self {
+        Self {
+            username: USERNAME.to_string(),
+            password: PASSWORD.clone(),
+            nla: false,
+        }
+    }
+
+    /// The session's username and password, over NLA.
+    fn nla() -> Self {
+        Self {
+            nla: true,
+            ..Self::tls()
+        }
+    }
+
+    /// The same, with a password of the same length that differs in
+    /// its first character.
+    fn with_wrong_password(mut self) -> Self {
+        let first = if self.password.starts_with('x') {
+            "y"
+        } else {
+            "x"
+        };
+        self.password.replace_range(0..1, first);
+        self
+    }
+}
+
+/// A client asking for a `width` x `height` desktop and presenting
+/// `login`. It presents a domain, as mstsc does, which the server must
+/// ignore. It advertises IronRDP's default codecs, which is RemoteFX
+/// alone.
+fn client_config(
+    width: u16,
+    height: u16,
+    channels: &Channels,
+    login: &Login,
+) -> ironrdp_connector::Config {
     ironrdp_connector::Config {
         desktop_size: ClientDesktopSize { width, height },
         desktop_scale_factor: 0,
         enable_tls: true,
-        enable_credssp: false,
+        enable_credssp: login.nla,
         credentials: ironrdp_connector::Credentials::UsernamePassword {
-            username: USERNAME.to_string(),
-            password: PASSWORD.clone(),
+            username: login.username.clone(),
+            password: login.password.clone(),
         },
         domain: Some("WORKGROUP".to_string()),
         client_build: 0,
@@ -548,11 +618,27 @@ impl Client {
     /// security negotiation, the TLS upgrade, the settings and
     /// capability exchanges, and the finalization.
     async fn connect(addr: SocketAddr, width: u16, height: u16, channels: Channels) -> Self {
-        let tcp = TcpStream::connect(addr).await.expect("TCP connect");
+        Self::connect_as(addr, width, height, channels, &Login::tls())
+            .await
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// As [`Self::connect`], presenting `login`, and returning why the
+    /// connection sequence failed rather than failing the test.
+    async fn connect_as(
+        addr: SocketAddr,
+        width: u16,
+        height: u16,
+        channels: Channels,
+        login: &Login,
+    ) -> Result<Self, String> {
+        let tcp = TcpStream::connect(addr)
+            .await
+            .map_err(|error| format!("TCP connect: {error}"))?;
         let client_addr = tcp.local_addr().expect("client address");
         let mut framed = TokioFramed::new(tcp);
         let mut connector =
-            ClientConnector::new(client_config(width, height, &channels), client_addr);
+            ClientConnector::new(client_config(width, height, &channels, login), client_addr);
         let (events, channel_events) = std::sync::mpsc::channel();
         if let Channels::ClipboardAndAudio(formats) = channels {
             let clipboard = ClipboardRecorder(events.clone());
@@ -563,10 +649,10 @@ impl Client {
 
         let should_upgrade = ironrdp_tokio::connect_begin(&mut framed, &mut connector)
             .await
-            .expect("security negotiation");
+            .map_err(|error| format!("security negotiation: {error}"))?;
         let (tls, certificate) = ironrdp_tls::upgrade(framed.into_inner_no_leftover(), "127.0.0.1")
             .await
-            .expect("TLS upgrade");
+            .map_err(|error| format!("TLS upgrade: {error}"))?;
         let upgraded = ironrdp_tokio::mark_as_upgraded(should_upgrade, &mut connector);
         let mut framed = TokioFramed::new(tls);
         let server_public_key = ironrdp_tls::extract_tls_server_public_key(&certificate)
@@ -583,7 +669,7 @@ impl Client {
             None,
         )
         .await
-        .expect("connection sequence");
+        .map_err(|error| format!("connection sequence: {error}"))?;
 
         let stage = ActiveStageBuilder {
             static_channels: result.static_channels,
@@ -602,7 +688,7 @@ impl Client {
             result.desktop_size.height,
         );
 
-        Self {
+        Ok(Self {
             framed,
             stage,
             activation: result.activation_factory,
@@ -610,7 +696,7 @@ impl Client {
             desktop_size: result.desktop_size,
             pending: VecDeque::new(),
             channel_events,
-        }
+        })
     }
 
     /// Read and decode PDUs until the server does something the test
@@ -797,6 +883,13 @@ impl Client {
     /// connection.
     async fn wait_closed(&mut self) {
         while !matches!(self.next_event().await, Event::Closed) {}
+    }
+
+    /// Read, without decoding, until the server closes the connection.
+    /// For a client the server has refused: the error it is sent last
+    /// is a PDU this client's active stage cannot decode.
+    async fn wait_refused(&mut self) {
+        while self.framed.read_pdu().await.is_ok() {}
     }
 
     /// The decoded RGB value at (`x`, `y`).
@@ -1173,8 +1266,17 @@ async fn ironrdp_client_shares_the_clipboard_and_hears_the_guest() {
 
     // The client disconnects, and one that accepts Opus as well
     // connects. Its clipboard works as the first one's did, and it
-    // hears the guest's Opus packet unchanged.
+    // hears the guest's Opus packet unchanged. The first connection's
+    // audio channel stops once the server has seen it end, which can
+    // be after the next client is accepted; until then it would pass
+    // for the second client's channel listening.
     drop(client);
+    step("the first client's audio channel to stop", async {
+        while relay.listening() {
+            tokio::time::sleep(AUDIO_POLL).await;
+        }
+    })
+    .await;
     let mut client = step(
         "the second connection sequence",
         Client::connect(
@@ -1195,8 +1297,6 @@ async fn ironrdp_client_shares_the_clipboard_and_hears_the_guest() {
         "the guest's second copy\n",
     )
     .await;
-    // The first connection's audio channel stopped with it, before
-    // the server accepted this one.
     wait_for_listener(&relay).await;
     play_packet(&relay);
     let (_, timestamp, data) = next_wave(&mut client, "the Opus wave").await;
@@ -1212,4 +1312,350 @@ async fn ironrdp_client_shares_the_clipboard_and_hears_the_guest() {
     server
         .join(Duration::ZERO)
         .expect("the server stops cleanly");
+}
+
+/// Serves each of two sessions to a username of its own, both with
+/// the session password.
+struct TwoSessions {
+    sessions: [(&'static str, Arc<SessionHandles>); 2],
+}
+
+impl SessionProvider for TwoSessions {
+    fn session(&self, credentials: &Credentials) -> Result<Arc<SessionHandles>, Rejected> {
+        if credentials.password != *PASSWORD {
+            return Err(Rejected);
+        }
+        self.sessions
+            .iter()
+            .find(|(username, _)| *username == credentials.username)
+            .map(|(_, handles)| Arc::clone(handles))
+            .ok_or(Rejected)
+    }
+}
+
+/// Connect a client presenting `login` that asks for the surface's own
+/// size, so it is never resized, and read until it has the whole
+/// surface.
+async fn connect_served(addr: SocketAddr, login: &Login, what: &str) -> Client {
+    let mut client = step(
+        what,
+        Client::connect_as(addr, WIDTH, HEIGHT, Channels::None, login),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{what}: {error}"));
+    expect_whole_surface(&mut client, what).await;
+    client
+}
+
+/// Read until `client` is sent the whole surface, passing over pointer
+/// updates, and check it decoded.
+async fn expect_whole_surface(client: &mut Client, what: &str) {
+    step(what, async {
+        loop {
+            match client.next_event().await {
+                Event::Pointer(_) | Event::DefaultPointer | Event::HiddenPointer => {}
+                Event::Graphics(rect) => {
+                    assert_eq!(rect, whole_desktop(), "{what}: the first drawing");
+                    break;
+                }
+                other => panic!("{what}: expected the whole surface, got {other:?}"),
+            }
+        }
+    })
+    .await;
+    client.assert_colour(WIDTH / 4, HEIGHT / 4, TOP_LEFT, what);
+}
+
+/// Draw the block on `handles`' mirror and check that `client` is sent
+/// it.
+async fn expect_block(client: &mut Client, handles: &SessionHandles, what: &str) {
+    handles
+        .surface_mirror
+        .lock()
+        .await
+        .primary_surface_mut()
+        .expect("primary surface")
+        .blit(
+            u32::from(BLOCK_LEFT),
+            u32::from(BLOCK_TOP),
+            u32::from(BLOCK_SIDE),
+            u32::from(BLOCK_SIDE),
+            &block_pixels(),
+        );
+    step(what, async {
+        loop {
+            match client.next_event().await {
+                Event::Pointer(_) | Event::DefaultPointer | Event::HiddenPointer => {}
+                Event::Graphics(_) => break,
+                other => panic!("{what}: expected the block's update, got {other:?}"),
+            }
+        }
+    })
+    .await;
+    client.assert_colour(
+        BLOCK_LEFT + BLOCK_SIDE / 2,
+        BLOCK_TOP + BLOCK_SIDE / 2,
+        BLOCK_COLOUR,
+        what,
+    );
+}
+
+/// The next input the session was sent, passing over lock-key
+/// synchronizes, which clients send as they connect.
+async fn next_key(input_rx: &mut mpsc::Receiver<InputEvent>, what: &str) -> InputEvent {
+    loop {
+        match step(what, input_rx.recv()).await {
+            Some(InputEvent::KeyModifiers(_)) => {}
+            Some(event) => return event,
+            None => panic!("{what}: the session's input queue closed"),
+        }
+    }
+}
+
+/// Press and release A on `client`, and check both reach the session.
+async fn expect_typing(client: &mut Client, input_rx: &mut mpsc::Receiver<InputEvent>, what: &str) {
+    client
+        .send_input(&[
+            FastPathInputEvent::KeyboardEvent(KeyboardFlags::empty(), KEY_A),
+            FastPathInputEvent::KeyboardEvent(KeyboardFlags::RELEASE, KEY_A),
+        ])
+        .await;
+    let pressed = next_key(input_rx, what).await;
+    assert!(
+        matches!(pressed, InputEvent::KeyDown(0x1E)),
+        "{what}: expected KeyDown(0x1E), got {pressed:?}"
+    );
+    let released = next_key(input_rx, what).await;
+    assert!(
+        matches!(released, InputEvent::KeyUp(0x9E)),
+        "{what}: expected KeyUp(0x9E), got {released:?}"
+    );
+}
+
+/// Stop `server`, check `client` is disconnected, and wait for the
+/// server to finish.
+async fn stop(server: shakenfist_spice_rdp::RdpServerHandle, client: &mut Client) {
+    server.shutdown();
+    step("the client to be disconnected", client.wait_closed()).await;
+    step("the server thread to finish", server.stopped()).await;
+    server
+        .join(Duration::ZERO)
+        .expect("the server stops cleanly");
+}
+
+#[tokio::test]
+async fn a_client_is_served_after_the_one_before_it_leaves() {
+    install_crypto_provider();
+    let Session {
+        handles,
+        mut input_rx,
+        ..
+    } = session();
+    let server = serve(server_config(Arc::clone(&handles))).expect("serve");
+
+    let mut first = connect_served(server.local_addr(), &Login::tls(), "the first client").await;
+    expect_typing(&mut first, &mut input_rx, "the first client's typing").await;
+    drop(first);
+
+    let mut second = connect_served(server.local_addr(), &Login::tls(), "the second client").await;
+    expect_block(&mut second, &handles, "the block, on the second client").await;
+    expect_typing(&mut second, &mut input_rx, "the second client's typing").await;
+    stop(server, &mut second).await;
+}
+
+#[tokio::test]
+async fn a_second_client_with_the_password_takes_the_session_over() {
+    install_crypto_provider();
+    let Session {
+        handles,
+        mut input_rx,
+        ..
+    } = session();
+    let server = serve(server_config(Arc::clone(&handles))).expect("serve");
+
+    // The first client is served, and is holding A down when the
+    // second connects.
+    let mut first = connect_served(server.local_addr(), &Login::tls(), "the first client").await;
+    first
+        .send_input(&[FastPathInputEvent::KeyboardEvent(
+            KeyboardFlags::empty(),
+            KEY_A,
+        )])
+        .await;
+    let pressed = next_key(&mut input_rx, "the first client's key press").await;
+    assert!(
+        matches!(pressed, InputEvent::KeyDown(0x1E)),
+        "expected KeyDown(0x1E), got {pressed:?}"
+    );
+
+    let mut second = connect_served(server.local_addr(), &Login::tls(), "the second client").await;
+
+    // The first client is disconnected, and the key it held is
+    // released, before anything the second client types.
+    step("the first client to be disconnected", first.wait_closed()).await;
+    let released = next_key(&mut input_rx, "the first client's key release").await;
+    assert!(
+        matches!(released, InputEvent::KeyUp(0x9E)),
+        "expected the held key to be released, got {released:?}"
+    );
+
+    // The second client is served the session.
+    expect_block(&mut second, &handles, "the block, on the second client").await;
+    expect_typing(&mut second, &mut input_rx, "the second client's typing").await;
+    stop(server, &mut second).await;
+}
+
+/// A second client presenting the wrong password, over `security`,
+/// leaves the client being served alone.
+async fn wrong_password_leaves_the_served_client_alone(security: RdpSecurity, login: Login) {
+    install_crypto_provider();
+    let Session {
+        handles,
+        mut input_rx,
+        ..
+    } = session();
+    let provider = Arc::new(SingleSession::new(
+        server_credentials(),
+        Arc::clone(&handles),
+    ));
+    let server = serve(server_config_with(security, provider)).expect("serve");
+    let mut first = connect_served(server.local_addr(), &login, "the first client").await;
+
+    // NLA refuses the client during the connection sequence. TLS lets
+    // the sequence finish and then refuses the client's credentials,
+    // ending its connection.
+    let refused = step(
+        "the wrong password's connection",
+        Client::connect_as(
+            server.local_addr(),
+            WIDTH,
+            HEIGHT,
+            Channels::None,
+            &login.with_wrong_password(),
+        ),
+    )
+    .await;
+    if let Ok(mut refused) = refused {
+        step(
+            "the refused client to be disconnected",
+            refused.wait_refused(),
+        )
+        .await;
+    }
+
+    expect_block(&mut first, &handles, "the block, on the first client").await;
+    expect_typing(&mut first, &mut input_rx, "the first client's typing").await;
+    stop(server, &mut first).await;
+}
+
+#[tokio::test]
+async fn a_second_client_with_the_wrong_password_over_tls_leaves_the_first_alone() {
+    wrong_password_leaves_the_served_client_alone(RdpSecurity::Tls, Login::tls()).await;
+}
+
+#[tokio::test]
+async fn a_second_client_with_the_wrong_password_over_nla_leaves_the_first_alone() {
+    wrong_password_leaves_the_served_client_alone(RdpSecurity::Nla, Login::nla()).await;
+}
+
+#[tokio::test]
+async fn a_client_of_another_session_leaves_the_first_alone() {
+    install_crypto_provider();
+    let Session {
+        handles: alice,
+        input_rx: mut alice_rx,
+        ..
+    } = session();
+    let Session {
+        handles: bob,
+        input_rx: mut bob_rx,
+        ..
+    } = session();
+    let provider = Arc::new(TwoSessions {
+        sessions: [("alice", Arc::clone(&alice)), ("bob", Arc::clone(&bob))],
+    });
+    let server = serve(server_config_with(RdpSecurity::Tls, provider)).expect("serve");
+    let login = |username: &str| Login {
+        username: username.to_string(),
+        ..Login::tls()
+    };
+
+    let mut first = connect_served(server.local_addr(), &login("alice"), "alice's client").await;
+    let mut second = connect_served(server.local_addr(), &login("bob"), "bob's client").await;
+
+    // Both are served their own session.
+    expect_block(&mut first, &alice, "the block, on alice's client").await;
+    expect_typing(&mut first, &mut alice_rx, "alice's typing").await;
+    expect_block(&mut second, &bob, "the block, on bob's client").await;
+    expect_typing(&mut second, &mut bob_rx, "bob's typing").await;
+
+    server.shutdown();
+    step("bob's client to be disconnected", second.wait_closed()).await;
+    stop(server, &mut first).await;
+}
+
+#[tokio::test]
+async fn a_client_that_never_authenticates_is_dropped_in_time() {
+    install_crypto_provider();
+    let Session { handles, .. } = session();
+    let mut config = server_config(Arc::clone(&handles));
+    config.handshake_timeout = SHORT_HANDSHAKE_TIMEOUT;
+    let server = serve(config).expect("serve");
+
+    // A client that connects and says nothing holds the one place for
+    // a client that has not yet authenticated, so the next client
+    // waits, unaccepted, until it is dropped.
+    let opened = tokio::time::Instant::now();
+    let mut stalled = TcpStream::connect(server.local_addr())
+        .await
+        .expect("TCP connect");
+    let mut client = connect_served(server.local_addr(), &Login::tls(), "the next client").await;
+    assert!(
+        opened.elapsed() >= SHORT_HANDSHAKE_TIMEOUT,
+        "the next client was served after {:?}, before the stalled one's time was up",
+        opened.elapsed()
+    );
+
+    // The server closed the stalled connection.
+    let mut byte = [0u8; 1];
+    let read = step(
+        "the stalled connection to be closed",
+        tokio::io::AsyncReadExt::read(&mut stalled, &mut byte),
+    )
+    .await;
+    assert!(
+        matches!(read, Ok(0) | Err(_)),
+        "the stalled connection was sent {read:?}"
+    );
+    stop(server, &mut client).await;
+}
+
+#[tokio::test]
+async fn a_stop_ends_every_client_and_the_server() {
+    install_crypto_provider();
+    let Session { handles, .. } = session();
+    let server = serve(server_config(Arc::clone(&handles))).expect("serve");
+    let mut client = connect_served(server.local_addr(), &Login::tls(), "the client").await;
+    // A second connection that has not authenticated, and never will.
+    let mut stalled = TcpStream::connect(server.local_addr())
+        .await
+        .expect("TCP connect");
+
+    server.shutdown();
+    step("the client to be disconnected", client.wait_closed()).await;
+    let mut byte = [0u8; 1];
+    let read = step(
+        "the stalled connection to be closed",
+        tokio::io::AsyncReadExt::read(&mut stalled, &mut byte),
+    )
+    .await;
+    assert!(
+        matches!(read, Ok(0) | Err(_)),
+        "the stalled connection was sent {read:?}"
+    );
+    // `join` blocks, so it runs off the test's runtime thread.
+    let joined = tokio::task::spawn_blocking(move || server.join(STEP_TIMEOUT))
+        .await
+        .expect("the join task");
+    joined.expect("the server stops cleanly");
 }

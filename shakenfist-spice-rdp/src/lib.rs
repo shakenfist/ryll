@@ -24,7 +24,9 @@
 //! multi-thread tokio runtime. The server therefore runs on an OS
 //! thread of its own with a current-thread runtime, and talks to the
 //! SPICE session through the `Send` handles in [`SessionHandles`].
-//! [`serve`] starts it and returns an [`RdpServerHandle`].
+//! [`serve`] starts it and returns an [`RdpServerHandle`]. A client
+//! that authenticates takes its session over from the client already
+//! served it.
 //!
 //! # Crypto provider
 //!
@@ -59,7 +61,9 @@ pub use auth::{generate_password, SingleSession};
 pub use cursor::{spawn_cursor_relay, CursorState};
 pub use display::MirrorDisplay;
 pub use input::SpiceInputHandler;
-pub use server::{serve, RdpConfig, RdpSecurity, RdpServerHandle, DEFAULT_RDP_PORT};
+pub use server::{
+    serve, RdpConfig, RdpSecurity, RdpServerHandle, DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_RDP_PORT,
+};
 pub use tls::TlsIdentity;
 
 /// The username, password and domain an RDP client presents, as
@@ -90,6 +94,16 @@ pub struct SessionHandles {
     /// event bus before the session is spawned, or the first cursor
     /// shape is lost.
     pub cursor: watch::Receiver<CursorState>,
+    /// Whether the SPICE session is up. While it is `false` the client
+    /// is shown the last frame at half brightness, and once it is
+    /// `true` again it is sent the whole surface, so a caller that
+    /// reconnects SPICE behind the same handles should publish `false`
+    /// when the session is lost and `true` once the new session's
+    /// primary surface is in the mirror. A caller that never
+    /// reconnects passes a receiver that is always `true`, such as one
+    /// whose sender has been dropped: a closed watch keeps its last
+    /// value.
+    pub spice_up: watch::Receiver<bool>,
     /// The session's clipboard, which the main channel ferries to and
     /// from the guest's agent, or `None` to carry no clipboard. Text
     /// the RDP client copies is stored in it as host text, and text the
@@ -108,11 +122,14 @@ pub struct SessionHandles {
 
 /// The session the RDP adapters currently serve, if any.
 ///
-/// The display and input handlers are fixed when the server is
-/// built, before any client has connected, so they hold a slot
-/// rather than a session. The credential check fills the slot with
-/// the session a [`SessionProvider`] chose; the handlers read it on
-/// each use. Clones share the same slot.
+/// The display and input handlers are fixed when a connection's
+/// server is built, before its client has presented any credentials,
+/// so they hold a slot rather than a session. Each connection has a
+/// slot of its own. Its credential check fills the slot with the
+/// session a [`SessionProvider`] chose, and it is emptied when
+/// another client takes that session over and when the connection
+/// ends; the handlers read it on each use, so an emptied slot stops
+/// them at once. Clones share the same slot.
 #[derive(Clone, Default)]
 pub struct SessionSlot(Arc<Mutex<Option<Arc<SessionHandles>>>>);
 
@@ -154,14 +171,20 @@ impl SessionSlot {
 /// credential check of a TLS-mode server; returning [`Rejected`]
 /// refuses the connection. An NLA server calls it once instead, with
 /// the configured pair, when it starts: CredSSP checks the password
-/// itself and IronRDP offers no hook after that check, so every NLA
+/// itself and IronRDP passes nothing on from that check, so every NLA
 /// client is served the session chosen then, and a rejection stops
 /// the server from starting.
 ///
+/// The server does learn when a client has authenticated, in either
+/// mode, because IronRDP first asks the display handler for its
+/// update stream then. That is when the client takes its session
+/// over from any client already served it; it carries no credentials
+/// to choose a session by.
+///
 /// # Limits of this seam
 ///
-/// IronRDP 0.13 asks the display handler for the desktop size before
-/// the security handshake, so before any credentials are seen. A
+/// IronRDP 0.13 first asks the display handler for the desktop size
+/// before the security handshake, so before any credentials are seen. A
 /// provider can therefore choose only between sessions whose primary
 /// surfaces are the same size as the one the server announced. A
 /// provider holding sessions of different sizes must either have the

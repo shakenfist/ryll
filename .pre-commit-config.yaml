@@ -94,6 +94,17 @@ repos:
         pass_filenames: false
         files: ^tools/(test-)?proxmox-smoke
 
+      # And the RDP smoke lane's driver: the pixel reads, colour
+      # comparisons, ryll output lines and password scrub that decide its
+      # pass and fail. The lane itself needs QEMU, Xvfb and FreeRDP, so
+      # only these pure parts run here. Python 3 only.
+      - id: rdp-smoke-test
+        name: RDP smoke lane driver unit tests
+        entry: ./tools/test-rdp-smoke.py
+        language: script
+        pass_filenames: false
+        files: ^tools/(test-)?rdp-smoke
+
   - repo: local
     hooks:
       - id: bidi-check

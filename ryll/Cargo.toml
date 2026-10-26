@@ -229,6 +229,9 @@ url = "2"
 
 [dev-dependencies]
 tempfile = "3"
+# Paused time for the `--rdp` reconnect tests, which walk the retry
+# backoff without sleeping in real time.
+tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 # Self-signed cert generation for the --web TLS integration tests.
 rcgen = "0.14"
