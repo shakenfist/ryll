@@ -93,10 +93,6 @@
       "sha": "789383eaa2b614b16b52dda69a909dedf5559a9f",
       "date": "2026-10-22"
     },
-    "docs/ci.md": {
-      "sha": "3c511eb859d30365b5ae4b2c16ae97404e46b789",
-      "date": "2026-10-22"
-    },
     "docs/development-macos.md": {
       "sha": "9fef25179d5ec56bb52e4a5b5edeecadcff74097",
       "date": "2026-09-17"
@@ -115,10 +111,6 @@
     },
     "docs/portability.md": {
       "sha": "dc06c44e9d9a0e7fe4888d35adb50908ab37fc7d",
-      "date": "2026-10-16"
-    },
-    "docs/session-lifecycle.md": {
-      "sha": "23ff3796f6fa89602535c7708fdfface65e69594",
       "date": "2026-10-16"
     },
     "docs/web-frontend.md": {
@@ -147,10 +139,6 @@
     },
     "ryll/src/app/notification_snapshots.rs": {
       "sha": "76c732cf34ff7fb901bd042373fd699b8bac1d1f",
-      "date": "2026-10-17"
-    },
-    "ryll/src/app/reconnect.rs": {
-      "sha": "6134d2847cf1c6f82354b3da75c3bd4bc089330a",
       "date": "2026-10-17"
     },
     "ryll/src/app/resize.rs": {

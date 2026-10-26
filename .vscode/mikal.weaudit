@@ -568,10 +568,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/session-lifecycle.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/web-frontend.md",
       "author": "mikal"
     },
@@ -585,10 +581,6 @@
     },
     {
       "path": "ryll/src/app/notification_snapshots.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/app/reconnect.rs",
       "author": "mikal"
     },
     {
@@ -697,10 +689,6 @@
     },
     {
       "path": "docs/channel-diagnostics-audit.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/ci.md",
       "author": "mikal"
     }
   ],
