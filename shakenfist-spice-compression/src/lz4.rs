@@ -11,8 +11,9 @@
 //! the first decoded row is the top one only when the top-down flag
 //! is set. The framing was confirmed against spice-server 0.15.2
 //! captures; see docs/spice-protocol.md.
-use tracing::{debug, warn};
+use tracing::debug;
 
+use crate::log_once::warn_once;
 use crate::{limits, DecompressedImage};
 
 /// The `SPICE_BITMAP_FMT_*` values an LZ4 image can carry
@@ -50,7 +51,11 @@ const LZ4_MAX_DISTANCE: usize = 64 * 1024;
 /// to tell that had happened.
 pub fn decompress_spice_lz4(data: &[u8], width: usize, height: usize) -> Option<DecompressedImage> {
     let [top_down, format, blocks @ ..] = data else {
-        warn!("display: LZ4 data too short: {} bytes", data.len());
+        warn_once!(
+            "lz4:short_data",
+            "display: LZ4 data too short: {} bytes",
+            data.len()
+        );
         return None;
     };
     let top_down = *top_down != 0;
@@ -68,7 +73,11 @@ pub fn decompress_spice_lz4(data: &[u8], width: usize, height: usize) -> Option<
         bitmap_fmt::BIT24 => 3,
         bitmap_fmt::BIT32 | bitmap_fmt::RGBA => 4,
         other => {
-            warn!("display: LZ4 unsupported bitmap format: {}", other);
+            warn_once!(
+                "lz4:format_unsupported",
+                "display: LZ4 unsupported bitmap format: {}",
+                other
+            );
             return None;
         }
     };
@@ -79,15 +88,17 @@ pub fn decompress_spice_lz4(data: &[u8], width: usize, height: usize) -> Option<
     // RGBA one, but `width` and `height` come off the wire, so it
     // gets its own checked multiply rather than leaning on that.
     let Some(rgba_size) = limits::rgba_len(width, height) else {
-        warn!(
+        warn_once!(
+            "lz4:dimensions_refused",
             "display: LZ4 image dimensions refused: {}x{}",
-            width, height
+            width,
+            height
         );
         return None;
     };
     let row_bytes = width.checked_mul(bpp)?;
     if blocks.is_empty() {
-        warn!("display: LZ4 image has no blocks");
+        warn_once!("lz4:no_blocks", "display: LZ4 image has no blocks");
         return None;
     }
     let mut decoded = vec![0u8; row_bytes.checked_mul(height)?];
@@ -95,7 +106,8 @@ pub fn decompress_spice_lz4(data: &[u8], width: usize, height: usize) -> Option<
     let mut pos = 0usize;
     while !blocks.is_empty() {
         let Some((len, rest)) = blocks.split_first_chunk::<4>() else {
-            warn!(
+            warn_once!(
+                "lz4:block_length_truncated",
                 "display: LZ4 block length truncated after {} decoded bytes",
                 pos
             );
@@ -103,7 +115,8 @@ pub fn decompress_spice_lz4(data: &[u8], width: usize, height: usize) -> Option<
         };
         let len = u32::from_be_bytes(*len) as usize;
         let Some((block, rest)) = rest.split_at_checked(len) else {
-            warn!(
+            warn_once!(
+                "lz4:block_overruns_data",
                 "display: LZ4 block of {} bytes runs past the data ({} left)",
                 len,
                 rest.len()
@@ -113,7 +126,10 @@ pub fn decompress_spice_lz4(data: &[u8], width: usize, height: usize) -> Option<
         blocks = rest;
 
         if pos == decoded.len() {
-            warn!("display: LZ4 block after the image is complete");
+            warn_once!(
+                "lz4:block_after_image",
+                "display: LZ4 block after the image is complete"
+            );
             return None;
         }
         // The dictionary is the output so far and the block decodes
@@ -125,16 +141,19 @@ pub fn decompress_spice_lz4(data: &[u8], width: usize, height: usize) -> Option<
         match lz4_flex::block::decompress_into_with_dict(block, tail, dict) {
             Ok(n) => pos += n,
             Err(e) => {
-                warn!(
+                warn_once!(
+                    "lz4:block_failed",
                     "display: LZ4 block decompression failed after {} decoded bytes: {}",
-                    pos, e
+                    pos,
+                    e
                 );
                 return None;
             }
         }
     }
     if pos != decoded.len() {
-        warn!(
+        warn_once!(
+            "lz4:size_mismatch",
             "display: LZ4 blocks decoded {} bytes, expected {}",
             pos,
             decoded.len()
@@ -391,6 +410,9 @@ mod tests {
         assert!(decompress_spice_lz4(&[], 1, 1).is_none());
         assert!(decompress_spice_lz4(&[1], 1, 1).is_none());
         assert!(decompress_spice_lz4(&[1, 8], 1, 1).is_none());
+        // Refusals log once a process, not once an image.
+        assert!(crate::log_once::seen("lz4:short_data"));
+        assert!(crate::log_once::seen("lz4:no_blocks"));
     }
 
     #[test]

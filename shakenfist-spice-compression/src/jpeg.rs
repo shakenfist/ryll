@@ -19,9 +19,10 @@ use std::sync::Arc;
 
 #[cfg(all(target_os = "linux", feature = "mozjpeg"))]
 use tracing::debug;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::limits;
+use crate::log_once::warn_once;
 
 /// A decoded JPEG frame: RGBA pixels plus width/height.
 ///
@@ -107,7 +108,8 @@ impl DecodedJpeg {
     pub fn from_rgba(backend: &str, width: usize, height: usize, rgba: Vec<u8>) -> Option<Self> {
         let (width, height, expected) = validated_dimensions(backend, width, height)?;
         if rgba.len() != expected {
-            warn!(
+            warn_once!(
+                "jpeg:buffer_size_mismatch",
                 "{}: decoded buffer is {} bytes, expected {} for {}x{}, dropping frame",
                 backend,
                 rgba.len(),
@@ -136,7 +138,8 @@ impl DecodedJpeg {
 /// test. See `dimension_guard_tests` below.
 fn validated_dimensions(backend: &str, width: usize, height: usize) -> Option<(u32, u32, usize)> {
     let Some(len) = limits::rgba_len(width, height) else {
-        warn!(
+        warn_once!(
+            "jpeg:dimensions_refused",
             "{}: implausible dimensions {}x{}, dropping frame (caps: {} per side, {} pixels)",
             backend,
             width,
@@ -168,7 +171,8 @@ fn is_jpeg_payload(backend: &str, data: &[u8]) -> bool {
     if data.starts_with(&[0xFF, 0xD8]) {
         return true;
     }
-    warn!(
+    warn_once!(
+        "jpeg:no_soi_marker",
         "{}: {} byte payload does not open with the JPEG SOI marker, dropping frame: header={:02x?}",
         backend,
         data.len(),
@@ -229,7 +233,7 @@ fn read_bounded_info(
     decoder: &mut jpeg_decoder::Decoder<&[u8]>,
 ) -> Option<jpeg_decoder::ImageInfo> {
     if let Err(e) = decoder.read_info() {
-        warn!("MJPEG header error: {}", e);
+        warn_once!("jpeg:header_error", "MJPEG header error: {}", e);
         return None;
     }
     let info = decoder.info()?;
@@ -257,7 +261,8 @@ impl JpegDecoder for JpegDecoderRsDecoder {
         let pixels = match decoder.decode() {
             Ok(p) => p,
             Err(e) => {
-                warn!(
+                warn_once!(
+                    "jpeg:decode_error",
                     "MJPEG decode error: {}, data_len={}, header={:02x?}",
                     e,
                     data.len(),
@@ -306,7 +311,11 @@ impl JpegDecoder for JpegDecoderRsDecoder {
                 out
             }
             other => {
-                warn!("MJPEG decode: unsupported pixel format {:?}", other);
+                warn_once!(
+                    "jpeg:pixel_format_unsupported",
+                    "MJPEG decode: unsupported pixel format {:?}",
+                    other
+                );
                 return None;
             }
         };
@@ -387,7 +396,8 @@ impl JpegDecoder for MozJpegDecoder {
         match result {
             Ok(opt) => opt,
             Err(_) => {
-                warn!(
+                warn_once!(
+                    "jpeg:mozjpeg:panic",
                     "MozJpegDecoder: panic during decode, data_len={}, header={:02x?}",
                     data.len(),
                     &data[..data.len().min(16)]
@@ -489,7 +499,10 @@ impl JpegDecoder for ImageIoDecoder {
         // Safety: count and image_at_index are unsafe for the same
         // reason (no typed options dict).
         if unsafe { source.count() } == 0 {
-            warn!("ImageIoDecoder: CGImageSource produced 0 frames");
+            warn_once!(
+                "jpeg:imageio:no_frames",
+                "ImageIoDecoder: CGImageSource produced 0 frames"
+            );
             return None;
         }
         let cg_image = unsafe { source.image_at_index(0, None) }?;
@@ -681,12 +694,12 @@ fn ensure_com_initialised() {
             // STA too, so log and proceed.
             const RPC_E_CHANGED_MODE: i32 = 0x8001_0106_u32 as i32;
             if hr.0 == RPC_E_CHANGED_MODE {
-                warn!(
+                tracing::warn!(
                     "WicDecoder: CoInitializeEx returned RPC_E_CHANGED_MODE; \
                      proceeding with the existing apartment model"
                 );
             } else {
-                warn!(
+                tracing::warn!(
                     "WicDecoder: CoInitializeEx failed with HRESULT {:#010x}; \
                      WIC calls may still succeed if COM was init'd elsewhere",
                     hr.0 as u32
@@ -729,7 +742,10 @@ impl JpegDecoder for WicDecoder {
             {
                 Ok(f) => f,
                 Err(e) => {
-                    warn!("WicDecoder: CoCreateInstance(WICImagingFactory) failed: {e}");
+                    warn_once!(
+                        "jpeg:wic:create_factory_failed",
+                        "WicDecoder: CoCreateInstance(WICImagingFactory) failed: {e}"
+                    );
                     return None;
                 }
             };
@@ -754,7 +770,10 @@ impl JpegDecoder for WicDecoder {
         let stream = match unsafe { factory.CreateStream() } {
             Ok(s) => s,
             Err(e) => {
-                warn!("WicDecoder: IWICImagingFactory::CreateStream failed: {e}");
+                warn_once!(
+                    "jpeg:wic:create_stream_failed",
+                    "WicDecoder: IWICImagingFactory::CreateStream failed: {e}"
+                );
                 return None;
             }
         };
@@ -769,7 +788,10 @@ impl JpegDecoder for WicDecoder {
         // no other reference to its buffer exists while the stream
         // holds one.
         if let Err(e) = unsafe { stream.InitializeFromMemory(&mut owned) } {
-            warn!("WicDecoder: IWICStream::InitializeFromMemory failed: {e}");
+            warn_once!(
+                "jpeg:wic:stream_init_failed",
+                "WicDecoder: IWICStream::InitializeFromMemory failed: {e}"
+            );
             return None;
         }
 
@@ -788,7 +810,10 @@ impl JpegDecoder for WicDecoder {
         } {
             Ok(d) => d,
             Err(e) => {
-                warn!("WicDecoder: CreateDecoderFromStream(JPEG) failed: {e}");
+                warn_once!(
+                    "jpeg:wic:create_decoder_failed",
+                    "WicDecoder: CreateDecoderFromStream(JPEG) failed: {e}"
+                );
                 return None;
             }
         };
@@ -798,7 +823,10 @@ impl JpegDecoder for WicDecoder {
         let frame = match unsafe { decoder.GetFrame(0) } {
             Ok(f) => f,
             Err(e) => {
-                warn!("WicDecoder: IWICBitmapDecoder::GetFrame(0) failed: {e}");
+                warn_once!(
+                    "jpeg:wic:get_frame_failed",
+                    "WicDecoder: IWICBitmapDecoder::GetFrame(0) failed: {e}"
+                );
                 return None;
             }
         };
@@ -808,7 +836,10 @@ impl JpegDecoder for WicDecoder {
         // converter+copy step on implausible inputs.
         let (mut width, mut height): (u32, u32) = (0, 0);
         if let Err(e) = unsafe { frame.GetSize(&mut width, &mut height) } {
-            warn!("WicDecoder: IWICBitmapFrameDecode::GetSize failed: {e}");
+            warn_once!(
+                "jpeg:wic:get_size_failed",
+                "WicDecoder: IWICBitmapFrameDecode::GetSize failed: {e}"
+            );
             return None;
         }
         // Bounds the dimensions and allocates the zeroed output
@@ -824,7 +855,10 @@ impl JpegDecoder for WicDecoder {
         let converter = match unsafe { factory.CreateFormatConverter() } {
             Ok(c) => c,
             Err(e) => {
-                warn!("WicDecoder: CreateFormatConverter failed: {e}");
+                warn_once!(
+                    "jpeg:wic:create_converter_failed",
+                    "WicDecoder: CreateFormatConverter failed: {e}"
+                );
                 return None;
             }
         };
@@ -848,7 +882,10 @@ impl JpegDecoder for WicDecoder {
                 WICBitmapPaletteTypeCustom,
             )
         } {
-            warn!("WicDecoder: IWICFormatConverter::Initialize(RGBA) failed: {e}");
+            warn_once!(
+                "jpeg:wic:converter_init_failed",
+                "WicDecoder: IWICFormatConverter::Initialize(RGBA) failed: {e}"
+            );
             return None;
         }
 
@@ -864,7 +901,10 @@ impl JpegDecoder for WicDecoder {
         if let Err(e) =
             unsafe { converter.CopyPixels(std::ptr::null(), stride as u32, &mut decoded.rgba) }
         {
-            warn!("WicDecoder: IWICBitmapSource::CopyPixels failed: {e}");
+            warn_once!(
+                "jpeg:wic:copy_pixels_failed",
+                "WicDecoder: IWICBitmapSource::CopyPixels failed: {e}"
+            );
             return None;
         }
 
@@ -2150,6 +2190,8 @@ mod dimension_guard_tests {
         // would most plausibly claim.
         assert!(validated_dimensions("t", 65535, 65535).is_none());
         assert!(validated_dimensions("t", usize::MAX, usize::MAX).is_none());
+        // Refusals log once a process, not once a frame.
+        assert!(crate::log_once::seen("jpeg:dimensions_refused"));
     }
 
     #[test]
@@ -2186,6 +2228,7 @@ mod dimension_guard_tests {
         assert!(DecodedJpeg::from_rgba("t", 3, 2, vec![0; 3 * 2 * 4 - 4]).is_none());
         assert!(DecodedJpeg::from_rgba("t", 3, 2, vec![0; 3 * 2 * 4 + 4]).is_none());
         assert!(DecodedJpeg::from_rgba("t", 3, 2, Vec::new()).is_none());
+        assert!(crate::log_once::seen("jpeg:buffer_size_mismatch"));
     }
 
     #[test]
@@ -2208,6 +2251,7 @@ mod dimension_guard_tests {
         assert!(!is_jpeg_payload("t", b"MM\0*\0\0\0\0"));
         assert!(!is_jpeg_payload("t", b"RIFF\0\0\0\0WEBP"));
         assert!(!is_jpeg_payload("t", b"\x89PNG\r\n\x1a\n"));
+        assert!(crate::log_once::seen("jpeg:no_soi_marker"));
     }
 
     /// The pure-Rust backend had no dimension bound at all
