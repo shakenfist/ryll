@@ -644,8 +644,31 @@ To be filled in by step 6.
   in the mirror while the watch is `false` is sent darkened, so
   the mirror reset belongs just before the new session starts.
   Eight mutants, all killed (`.../p05/step3/mutate.py`).
+- **Step 4** (Opus, high effort) gave each attempt its own
+  channels and connected them to the fixed ones the RDP server
+  and control socket hold through a `SessionLink`. Input and
+  resize requests are dropped and counted while no session
+  exists, rather than queued. The first attempt is routed to from
+  the start, as before, so a client's early desktop-size request
+  still reaches the guest. It went outside the brief to fix
+  `run_connection` in the renderer: an early return, or dropping
+  its future, left the spawned channel tasks running. The GUI
+  never noticed, because it drops each attempt's runtime; `--rdp`
+  runs every attempt on one runtime. A drop guard now aborts
+  them, and has its own test. The management session's review
+  made running out of retries always exit non-zero, since
+  `run_connection` usually returns `Ok` and the run would
+  otherwise exit 0 after failing to reconnect. Twelve mutants,
+  all killed (`.../p05/step4/mutate.py`). A live check against
+  QEMU on port 5921 saw a loss, a refused retry, a reconnect with
+  a new surface, and Ctrl+C exiting in 0.03 s. It also found that
+  `make test-qemu` takes its port and paths as make arguments,
+  not environment variables, which steps 5 and 6 rely on.
 
 ## Future work
+
+- Sending an RDP client's resize request made during an outage
+  again once SPICE is back; it is dropped today.
 
 - SPICE reconnect for `--web` and `--headless`, on the retry
   rules this phase shares.

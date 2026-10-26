@@ -182,7 +182,10 @@ impl crate::control::StatusProvider for SessionStatus {
 /// channel. Returns when every channel task exits — either on
 /// graceful disconnect, on error, or aborted by the `cancel`
 /// flag (a fresh reconnect superseding this attempt, or a
-/// host-side Ctrl+C bridge raising the same flag).
+/// host-side Ctrl+C bridge raising the same flag). If it returns
+/// early with an error, or its future is dropped, the channel tasks
+/// it has spawned are aborted, so a host may run one attempt after
+/// another on the same runtime.
 ///
 /// `session_state` is where the main channel publishes mouse mode and
 /// agent state. The caller subscribes to it before calling this, and
@@ -314,8 +317,14 @@ pub async fn run_connection(
         mm_clock.clone(),
     );
 
-    // Spawn main channel task
-    let main_handle = tokio::spawn(async move { main_channel.run().await });
+    // Spawn main channel task. From here on every channel task is in
+    // `handles`, so an early return below aborts the ones already
+    // running.
+    let mut handles = ChannelTasks::default();
+    handles.push((
+        ChannelType::Main,
+        tokio::spawn(async move { main_channel.run().await }),
+    ));
 
     let session_id = session_init_rx
         .await
@@ -331,10 +340,6 @@ pub async fn run_connection(
     );
 
     // Connect other channels
-    let mut handles: Vec<(
-        ChannelType,
-        tokio::task::JoinHandle<Result<(), anyhow::Error>>,
-    )> = vec![(ChannelType::Main, main_handle)];
     let mut input_rx = Some(input_rx);
     #[cfg(feature = "usbredir")]
     let mut usb_rx = Some(usb_rx);
@@ -522,7 +527,11 @@ pub async fn run_connection(
     // polls at 100 ms; that latency is well inside human reaction
     // time and avoids adding any awaitable signalling primitive.
     let cancel_watcher = {
-        let abort_handles: Vec<_> = handles.iter().map(|(_, h)| h.abort_handle()).collect();
+        let abort_handles: Vec<_> = handles
+            .tasks
+            .iter()
+            .map(|(_, h)| h.abort_handle())
+            .collect();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -539,9 +548,11 @@ pub async fn run_connection(
             }
         })
     };
+    handles.helpers.push(cancel_watcher.abort_handle());
 
     // Wait for all channel tasks
-    for (channel_type, handle) in handles {
+    for (channel_type, handle) in handles.tasks.iter_mut() {
+        let channel_type = *channel_type;
         match handle.await {
             Err(e) if e.is_cancelled() => {
                 // Aborted by the cancel watcher; not an error.
@@ -569,6 +580,46 @@ pub async fn run_connection(
     cancel_watcher.abort();
 
     Ok(())
+}
+
+/// A session's channel tasks, aborted if this is dropped before they
+/// finish.
+///
+/// `run_connection` returns early when a secondary channel will not
+/// link, and a host can drop its future mid-session, for instance when
+/// it stops waiting on Ctrl+C. Either way no channel task is left
+/// running on the host's runtime, holding the session's sockets and
+/// event sender. Aborting a task that has finished does nothing, so
+/// dropping this once the tasks have all been awaited is a no-op.
+#[derive(Default)]
+struct ChannelTasks {
+    tasks: Vec<ChannelTask>,
+    /// Tasks that serve the channel tasks and would outlive them
+    /// otherwise: the cancel watcher, which polls until it fires.
+    helpers: Vec<tokio::task::AbortHandle>,
+}
+
+/// A channel task, and the channel it runs.
+type ChannelTask = (
+    ChannelType,
+    tokio::task::JoinHandle<Result<(), anyhow::Error>>,
+);
+
+impl ChannelTasks {
+    fn push(&mut self, task: ChannelTask) {
+        self.tasks.push(task);
+    }
+}
+
+impl Drop for ChannelTasks {
+    fn drop(&mut self) {
+        for (_, task) in &self.tasks {
+            task.abort();
+        }
+        for helper in &self.helpers {
+            helper.abort();
+        }
+    }
 }
 
 /// Spawn a control-socket server for a session.
@@ -1440,5 +1491,34 @@ mod tests {
         .await;
         let err = connection_outcome(Some(join)).unwrap_err();
         assert!(err.to_string().contains("panicked"), "{}", err);
+    }
+
+    #[tokio::test]
+    async fn dropping_channel_tasks_aborts_them_and_their_helpers() {
+        // Each task holds a sender it never uses, so its receiver
+        // closes only when the task is gone.
+        let (task_tx, mut task_rx) = mpsc::channel::<()>(1);
+        let (helper_tx, mut helper_rx) = mpsc::channel::<()>(1);
+        let mut tasks = ChannelTasks::default();
+        tasks.push((
+            ChannelType::Main,
+            tokio::spawn(async move {
+                let _held = task_tx;
+                std::future::pending::<Result<()>>().await
+            }),
+        ));
+        let helper = tokio::spawn(async move {
+            let _held = helper_tx;
+            std::future::pending::<()>().await
+        });
+        tasks.helpers.push(helper.abort_handle());
+
+        drop(tasks);
+        let closed = Duration::from_secs(5);
+        assert_eq!(tokio::time::timeout(closed, task_rx.recv()).await, Ok(None));
+        assert_eq!(
+            tokio::time::timeout(closed, helper_rx.recv()).await,
+            Ok(None)
+        );
     }
 }
