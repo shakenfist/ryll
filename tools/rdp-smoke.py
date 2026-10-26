@@ -128,8 +128,8 @@ RETRY_MARGIN = 3.0
 # that, with QEMU's restart, the outage stays inside RETRY_WINDOW.
 DARK_BOUND = 8.0
 # After QEMU restarts, the new guest's frame must reach the client within
-# this long. ryll retries after 1, 4 and 16 s (RECONNECT_BACKOFF_SECS in
-# ryll/src/reconnect_policy.rs), and the guest must boot again.
+# this long: ryll's next retry (see RETRY_WINDOW), then the guest booting
+# again.
 RECOVER_BOUND = GUEST_BOOT_BOUND + 30.0
 # ryll must exit within this long of SIGINT.
 STOP_BOUND = 5.0

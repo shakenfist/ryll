@@ -932,9 +932,12 @@ record:
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 ```
 
-GitHub keeps at most one pending run per concurrency group whatever
-the flag says, so two nightlies queued behind a starved `l` pool
-still collapse into one.
+The flag governs running jobs only. GitHub keeps at most one
+pending run per concurrency group whatever it says, so a new run on
+`develop` still replaces a queued one: two nightlies queued behind a
+starved `l` pool collapse into one, and a dispatch replaces a queued
+nightly (or a nightly a queued dispatch). On other refs, dispatches
+no longer cancel each other's running jobs.
 
 ## Build network isolation
 
