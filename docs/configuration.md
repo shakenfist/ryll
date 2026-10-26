@@ -106,7 +106,7 @@ audio settings on the "Local Resources" tab.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--rdp` | false | Run as a SPICE → RDP server. A reachability fallback for users with no SPICE client: it loses SPICE features such as USB redirection and folder sharing. Serves one client at a time; a second client waits until the first disconnects. Prints the address, username, password and certificate fingerprint at launch. Mutually exclusive with `--web` and `--headless`; `--control-socket` works with it |
+| `--rdp` | false | Run as a SPICE → RDP server. A reachability fallback for users with no SPICE client: it loses SPICE features such as USB redirection and folder sharing. Serves one client per session: a new client that authenticates takes the session over and the one connected is disconnected, while a client that fails to authenticate leaves it connected. Prints the address, username, password and certificate fingerprint at launch. Mutually exclusive with `--web` and `--headless`; `--control-socket` works with it |
 | `--rdp-host <ADDR>` | `127.0.0.1` | Bind address for the RDP listener. Use `0.0.0.0` for LAN access |
 | `--rdp-port <PORT>` | 3389, or an ephemeral port if 3389 is taken | TCP port to listen on. The port actually bound is printed at launch. A port given explicitly is used or the launch fails; `0` asks for an ephemeral port |
 | `--rdp-user <NAME>` | `ryll` | Username RDP clients log in with |

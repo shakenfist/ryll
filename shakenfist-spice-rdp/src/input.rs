@@ -39,22 +39,24 @@ const LOCK_KEYS: u16 =
     keyboard_modifiers::SCROLL_LOCK | keyboard_modifiers::NUM_LOCK | keyboard_modifiers::CAPS_LOCK;
 
 /// The keys and buttons a client has pressed and not yet released,
-/// shared between the input handler and the connection handler.
+/// shared between the input handler and the server.
 ///
 /// An RDP client can vanish mid-press (a dropped network, a killed
 /// client window), and its releases then never arrive, so the guest
 /// would hold the key or button until some later client happened to
-/// release it. The connection handler ends each connection with
+/// release it. The server ends each connection, and each connection
+/// another client takes the session over from, with
 /// [`end_connection`](Self::end_connection), which hands back the
 /// releases for whatever is still held and starts a new connection,
 /// so the next client's pointer starts clean even when it is served
 /// the same session. Clones share the same record.
 ///
 /// The record is per connection, not per session: it relies on one
-/// connection serving one session, which holds because the slot is
-/// filled once per TLS connection by the credential check, or once
-/// at startup for NLA. A provider that switched sessions within a
-/// connection would need to release to the old session first.
+/// connection serving one session, which holds because every
+/// connection has a slot of its own, filled once by its credential
+/// check in TLS mode, or when the connection is accepted for NLA. A
+/// provider that switched sessions within a connection would need to
+/// release to the old session first.
 #[derive(Clone, Default)]
 pub(crate) struct HeldInput(Arc<HeldShared>);
 
@@ -147,8 +149,8 @@ impl HeldInput {
 /// IronRDP calls the handler synchronously from its connection task,
 /// so events are queued on the session's input sender with
 /// `try_send` rather than awaited. An event that cannot be queued
-/// (the queue is full or closed, no session has been chosen yet, or
-/// the surface mirror is busy when a relative move needs its size) is
+/// (the queue is full or closed, the slot holds no session, or the
+/// surface mirror is busy when a relative move needs its size) is
 /// dropped and counted in [`dropped`](Self::dropped), and a full or
 /// closed queue is logged once.
 ///
@@ -192,8 +194,8 @@ impl SpiceInputHandler {
         }
     }
 
-    /// The handler's record of held keys and buttons, for the
-    /// connection handler to end each connection with.
+    /// The handler's record of held keys and buttons, for the server
+    /// to end each connection with.
     pub(crate) fn held(&self) -> HeldInput {
         self.held.clone()
     }
@@ -210,12 +212,13 @@ impl SpiceInputHandler {
     }
 
     /// The session to send to, or `None` (counting the drop) when no
-    /// session has been chosen. A session other than the last one, or
-    /// a new connection, resets the pointer and wheel state.
+    /// session has been chosen, or another client has taken it over. A
+    /// session other than the last one, or a new connection, resets
+    /// the pointer and wheel state.
     fn session(&mut self) -> Option<Arc<SessionHandles>> {
         let Some(session) = self.slot.current() else {
             self.count_drop();
-            debug!("RDP input: no session chosen yet; dropping an input event");
+            debug!("RDP input: no session to send to; dropping an input event");
             return None;
         };
         let connection = self.held.connection();

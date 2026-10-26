@@ -139,8 +139,14 @@ so a later step need not.
 7. **The display handler's `updates()` is the first call after
    authentication in both security modes.** `client_loop` calls
    it first (`server.rs:1236`), after the acceptor has finished
-   CredSSP (NLA) or the credential validator (TLS). `size()` and
-   `request_initial_size()` come earlier, before any credential.
+   CredSSP (NLA) or the credential validator (TLS). Only the
+   first `size()` comes before any credential;
+   `request_initial_size()` and the encoder's `size()` follow
+   authentication but precede `updates()`. (Corrected by step 1,
+   which also found that `updates()` is called again after every
+   reactivation, so only its first call marks authentication, and
+   that input the acceptor queued reaches the input handler just
+   before it.)
    This corrects `SessionProvider`'s doc comment
    (`shakenfist-spice-rdp/src/lib.rs:150-156`), which says IronRDP
    offers no hook after CredSSP: there is none for credentials,
@@ -611,6 +617,18 @@ To be filled in by step 6.
   decision 7 and brief 5 are amended to match, keeping a
   `pull_request` trigger on the workflow file alone so the lane
   can run before it merges.
+- **Step 1** (Opus, high effort) corrected survey item 7 at its
+  source (above). It gave each connection its own `SessionSlot`,
+  so a client still authenticating cannot overwrite or clear the
+  served client's session, and made takeover clear the old
+  connection's slot, which its display and input handlers check
+  on every use, rather than add a generation counter. The
+  pre-auth deadline is a new public `RdpConfig::handshake_timeout`
+  field with an exported `DEFAULT_HANDSHAKE_TIMEOUT` of 30 s. It
+  also corrected `docs/configuration.md`'s "a second client waits"
+  sentence, which takeover made false. Six mutants, all killed:
+  `/tmp/claude-1000/-srv-kasm-profiles-mikal-vscode-src-shakenfist-ryll/a49e0447-bf0e-486b-a6d9-a7d93594be3f/scratchpad/p05/step1/mutate.py`
+  (session scratchpad, not kept).
 
 ## Future work
 

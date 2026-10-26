@@ -15,7 +15,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use shakenfist_spice_rdp::{
     generate_password, serve, spawn_cursor_relay, AudioRelay, Credentials, RdpConfig, RdpSecurity,
-    SessionHandles, SingleSession, TlsIdentity,
+    SessionHandles, SingleSession, TlsIdentity, DEFAULT_HANDSHAKE_TIMEOUT,
 };
 use tracing::{info, warn};
 
@@ -246,6 +246,7 @@ pub fn run_rdp(
             identity,
             credentials,
             provider,
+            handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
         })?;
         let local_addr = server.local_addr();
 

@@ -91,8 +91,7 @@ const FIRST_RESIZE_GRACE: Duration = Duration::from_secs(2);
 const BYTES_PER_PIXEL: usize = 4;
 
 /// The desktop size the connected client has been told, shared by the
-/// display handler, its update streams and the server's connection
-/// handler.
+/// display handler, its update streams and the server.
 ///
 /// IronRDP asks the display handler for the desktop size twice per
 /// connection: once before the handshake, and once after the
@@ -119,11 +118,10 @@ const BYTES_PER_PIXEL: usize = 4;
 /// `request_initial_size` only for a client that can be resized, so
 /// for any other client the first ask's size is all there is.
 ///
-/// The connection handler starts the record afresh when a connection
-/// is accepted, so the first ask of every connection records afresh,
-/// the first size negotiated on every connection is recognised as the
-/// one the client asked for, and the connection's grace period runs
-/// from then. Clones share the same record.
+/// The server starts the record when it accepts the connection, so
+/// the first ask records afresh, the first size negotiated is
+/// recognised as the one the client asked for, and the connection's
+/// grace period runs from then. Clones share the same record.
 #[derive(Clone, Default)]
 pub(crate) struct ClientSize(Arc<Mutex<ClientSizeRecord>>);
 
@@ -201,6 +199,9 @@ pub struct MirrorDisplay {
     /// The size the connected client was told, which a new update
     /// stream starts from.
     client_size: ClientSize,
+    /// Called the first time the server asks for an update stream,
+    /// which is once the client has authenticated.
+    authenticated: Option<Box<dyn FnOnce() + Send + Sync>>,
 }
 
 impl MirrorDisplay {
@@ -212,14 +213,27 @@ impl MirrorDisplay {
             slot,
             fallback,
             client_size: ClientSize::default(),
+            authenticated: None,
         }
     }
 
     /// A shared handle on the record of the client's desktop size, for
-    /// the connection handler to start afresh when a new connection is
-    /// accepted.
+    /// the server to start when it accepts the connection.
     pub(crate) fn client_size(&self) -> ClientSize {
         self.client_size.clone()
+    }
+
+    /// Call `hook` once the connection's client has authenticated.
+    ///
+    /// IronRDP asks the display handler for its update stream first
+    /// once the connection sequence is complete, which is after the
+    /// TLS-mode credential check or NLA's CredSSP exchange, and before
+    /// the client is sent any pixels. It asks again after every
+    /// resize; only the first ask calls the hook. It asks for the
+    /// desktop size before the client has presented anything, so a
+    /// size ask is no sign of authentication.
+    pub(crate) fn when_authenticated(&mut self, hook: impl FnOnce() + Send + Sync + 'static) {
+        self.authenticated = Some(Box::new(hook));
     }
 
     /// The primary surface's size, or `fallback` when there is no
@@ -313,6 +327,9 @@ impl RdpServerDisplay for MirrorDisplay {
     }
 
     async fn updates(&mut self) -> Result<Box<dyn RdpServerDisplayUpdates>> {
+        if let Some(authenticated) = self.authenticated.take() {
+            authenticated();
+        }
         let announced = match self.client_size.get() {
             Some(size) => size,
             None => self.size().await,
@@ -1314,6 +1331,36 @@ mod tests {
         display.request_initial_size(asked).await;
         assert_eq!(display.client_size().get(), Some(asked));
         assert_eq!(requests(&mut resize), [DisplaySize::Requested(1024, 768)]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn authentication_is_signalled_by_the_first_update_stream_only() {
+        let (slot, _handles) = session_with_surface(64, 48);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut display = MirrorDisplay::new(slot, FALLBACK);
+        let counted = Arc::clone(&calls);
+        display.when_authenticated(move || {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        let calls = move || calls.load(std::sync::atomic::Ordering::SeqCst);
+
+        // The asks before the client has presented anything, and those
+        // between the credential check and the stream, are not it.
+        display.size().await;
+        display
+            .request_initial_size(DesktopSize {
+                width: 64,
+                height: 48,
+            })
+            .await;
+        display.size().await;
+        assert_eq!(calls(), 0);
+
+        display.updates().await.expect("updates");
+        assert_eq!(calls(), 1);
+        // A reactivation's stream is the same client's.
+        display.updates().await.expect("updates");
+        assert_eq!(calls(), 1);
     }
 
     #[tokio::test(start_paused = true)]
