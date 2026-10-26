@@ -731,8 +731,9 @@ ryll with C connected stopped ryll in 0.10 s and closed C.
   again, as phase 4's worktree had gone.
 - **Review round 1** (automated, 0 fix, 2 document, 5 consider)
   arrived after Mikal had queued #640, so what it took landed in
-  a follow-up pull request rather than on #640. Taken: the smoke lane's spice-reconnect check now reports a
-  QEMU restart that misses ryll's retry window as a harness
+  a follow-up pull request rather than on #640. Taken: the
+  smoke lane's spice-reconnect check now reports a QEMU restart
+  that misses ryll's retry window as a harness
   failure, not a ryll one, and its darkening bound is shortened
   to leave room inside that window; `rdp-smoke.yml` cancels in
   progress only for pull requests, so a dispatch on `develop`
