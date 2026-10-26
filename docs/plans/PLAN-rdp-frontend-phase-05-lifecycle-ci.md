@@ -248,14 +248,19 @@ Nothing else in the master plan's section was found wrong.
    dropped. Without these, a stream of half-open connections
    would each hold a TLS handshake and an encoder.
 7. **The smoke lane is an advisory workflow of its own.** A new
-   `.github/workflows/rdp-smoke.yml`, path-filtered to the RDP
-   code, the renderer, the lane's own files and the workflow,
-   runs on pull requests and `workflow_dispatch`, plus a nightly
-   schedule against `develop` so it builds a flake record even
-   when no pull request touches those paths. It is advisory for
-   the reason `docs/ci.md` gives for `proxmox-functional.yml`: a
-   required check that is path-filtered never reports on other
-   pull requests. It runs on `[self-hosted, vm, debian-13-docker,
+   `.github/workflows/rdp-smoke.yml` runs nightly against
+   `develop`, which builds the flake record, and on
+   `workflow_dispatch`. Its `pull_request` trigger is
+   path-filtered to the workflow file alone, so it runs on the
+   pull request that adds it and on later edits to the lane,
+   but not on pull requests that touch the RDP code (Mikal's
+   choice at the back brief, to keep `l` runners free). A new
+   workflow cannot be dispatched or scheduled until it is on
+   `develop`, so without that trigger its first run would come
+   after merge. It is advisory for the reason `docs/ci.md` gives
+   for `proxmox-functional.yml`: a required check that is
+   path-filtered never reports on other pull requests. It runs
+   on `[self-hosted, vm, debian-13-docker,
    l]` and inside an image of its own (`tools/rdp-smoke/Dockerfile`:
    Debian 13 with `qemu-system-x86`, `ovmf`, `freerdp3-x11`,
    `xvfb`, `xdotool`, `x11-apps` for `xwd`, and `python3`), so
@@ -498,8 +503,10 @@ Files: new `tools/rdp-smoke/Dockerfile`, `tools/rdp-smoke.py`,
   and `xfreerdp3 /cert:ignore` under Xvfb. The driver must
   clean up every process it started, on success and on failure,
   and must never leave QEMU running.
-- Workflow per decision 7, nightly at an hour the other nightly
-  lanes do not use (check `fuzz.yml`). Upload the driver's logs.
+- Workflow per decision 7: nightly at an hour the other
+  scheduled workflows do not use (check every `cron:` under
+  `.github/workflows/`), `workflow_dispatch`, and `pull_request`
+  filtered to `.github/workflows/rdp-smoke.yml` only. Upload the driver's logs.
   Do not add the job to `ci.yml` or any gate.
 - `docs/ci.md`: a section *The RDP smoke lane* beside *The
   Proxmox lane*, covering what it checks, why it is advisory,
@@ -596,7 +603,14 @@ To be filled in by step 6.
 
 ## Execution notes
 
-None yet.
+- **Back brief, 2026-10-26 (AEDT).** Mikal confirmed decisions 5
+  and 2, asked to be pinged for step 6's visual check, and gave
+  permission to push and open the pull request once the
+  definition of done passes. He chose a nightly-only lane over
+  running it on every pull request that touches the RDP code;
+  decision 7 and brief 5 are amended to match, keeping a
+  `pull_request` trigger on the workflow file alone so the lane
+  can run before it merges.
 
 ## Future work
 
