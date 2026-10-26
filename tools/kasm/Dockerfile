@@ -13,7 +13,7 @@
 # The layout follows Kasm's own single-application images (for
 # example kasmweb/remmina): set up the default profile as root, then
 # hand the image back to the unprivileged kasm-user.
-ARG KASM_BASE=kasmweb/core-debian-trixie:1.18.0
+ARG KASM_BASE=kasmweb/core-debian-trixie:1.19.0
 FROM ${KASM_BASE}
 USER root
 
