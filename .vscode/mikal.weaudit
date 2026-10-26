@@ -456,27 +456,11 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-compression/src/lz.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-compression/src/quic.rs",
-      "author": "mikal"
-    },
-    {
       "path": "MERGE-TEMPLATE.md",
       "author": "mikal"
     },
     {
       "path": ".github/workflows/codeql-analysis.yml",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-compression/src/glz.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-compression/src/jpeg.rs",
       "author": "mikal"
     },
     {
@@ -509,10 +493,6 @@
     },
     {
       "path": "shakenfist-spice-renderer/src/channels/agent_queue.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-compression/src/limits.rs",
       "author": "mikal"
     },
     {
@@ -637,14 +617,6 @@
     },
     {
       "path": "ryll/src/settings.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-compression/src/lz4.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-compression/README.md",
       "author": "mikal"
     },
     {
