@@ -18,7 +18,9 @@ use shakenfist_spice_protocol::messages::{
     Notify as NotifyMessage, Ping, ReceiveBuffer, SetAck, SpiceCursor, SpiceCursorRef, WireType,
 };
 use shakenfist_spice_protocol::reader::BoundedReader;
-use shakenfist_spice_protocol::{cursor_client, cursor_server, ChannelType, NotifySeverity};
+use shakenfist_spice_protocol::{
+    cursor_client, cursor_server, warn_once, ChannelType, NotifySeverity,
+};
 
 use super::{ChannelEvent, CursorImage, DisconnectReason, EventSink, MAX_MESSAGE_BODY};
 
@@ -406,7 +408,11 @@ impl CursorChannel {
         let cursor = match SpiceCursorRef::read(r) {
             Ok(c) => c,
             Err(e) => {
-                warn!("cursor: failed to parse SpiceCursor: {}", e);
+                warn_once!(
+                    "cursor:decode_failure:shape:malformed",
+                    "cursor: failed to parse SpiceCursor: {}",
+                    e
+                );
                 return;
             }
         };
@@ -438,7 +444,8 @@ impl CursorChannel {
                     .emit(ChannelEvent::CursorShape(img.clone()))
                     .await;
             } else {
-                warn!(
+                warn_once!(
+                    "cursor:decode_failure:shape:cache_miss",
                     "cursor: cache miss for id={} (cache has {} entries)",
                     header.unique_id,
                     self.cursor_cache.len()
@@ -609,9 +616,12 @@ fn decode_cursor_pixels(header: &CursorHeader, pixel_data: &[u8]) -> Option<Curs
 
     let Some(format) = CursorFormat::from_type(header.cursor_type) else {
         // COLOR8, and types spice.proto does not define.
-        warn!(
+        warn_once!(
+            "cursor:decode_failure:shape:type_unsupported",
             "cursor: unsupported cursor type {} ({}x{})",
-            header.cursor_type, w, h
+            header.cursor_type,
+            w,
+            h
         );
         return None;
     };
@@ -621,11 +631,17 @@ fn decode_cursor_pixels(header: &CursorHeader, pixel_data: &[u8]) -> Option<Curs
     // anything: a 65535x65535 header with no pixel data must not cost
     // 16 GiB.
     let (Some(rgba_size), Some(needed)) = (limits::rgba_len(w, h), format.data_len(w, h)) else {
-        warn!("cursor: dimensions refused: {}x{}", w, h);
+        warn_once!(
+            "cursor:decode_failure:shape:dimensions_refused",
+            "cursor: dimensions refused: {}x{}",
+            w,
+            h
+        );
         return None;
     };
     if pixel_data.len() < needed {
-        warn!(
+        warn_once!(
+            "cursor:decode_failure:shape:short_data",
             "cursor: {} data too short (have {}, need {})",
             format.name(),
             pixel_data.len(),
@@ -924,6 +940,7 @@ mod tests {
                 height
             );
         }
+        assert!(logging::warn_once_keys().contains(&"cursor:decode_failure:shape:short_data"));
     }
 
     #[test]
@@ -971,6 +988,9 @@ mod tests {
 
         let cursor = wire_cursor(cursor_type::MONO, side as u16, side as u16 + 1, 0, &data);
         assert!(decode(&cursor).is_none());
+        assert!(
+            logging::warn_once_keys().contains(&"cursor:decode_failure:shape:dimensions_refused")
+        );
     }
 
     #[test]
@@ -997,6 +1017,7 @@ mod tests {
             let cursor = wire_cursor(cursor_type, 2, 2, 0, &[0u8; 2048]);
             assert!(decode(&cursor).is_none(), "cursor type {}", cursor_type);
         }
+        assert!(logging::warn_once_keys().contains(&"cursor:decode_failure:shape:type_unsupported"));
     }
 
     // The masked colour formats. Each test builds a `width`x2 image in

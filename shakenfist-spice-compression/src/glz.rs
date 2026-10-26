@@ -11,6 +11,7 @@ use std::num::NonZeroUsize;
 use std::sync::Mutex;
 
 use crate::byte_bounded_lru::ByteBoundedLru;
+use crate::log_once::warn_once;
 use crate::{limits, DecompressedImage};
 
 const GLZ_MAGIC: &[u8; 4] = b"  ZL";
@@ -478,7 +479,8 @@ pub async fn decompress_glz(data: &[u8], dictionary: &GlzDictionary) -> Result<D
                         match resolved {
                             Some(p) => p,
                             None => {
-                                tracing::warn!(
+                                warn_once!(
+                                    "glz:cross_ref_timeout",
                                     "glz: cross-image ref to id {} not in dictionary \
                                      after {}ms timeout (current={}, dist={})",
                                     source_id,

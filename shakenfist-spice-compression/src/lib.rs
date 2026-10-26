@@ -24,6 +24,9 @@ mod dimensions;
 
 pub mod limits;
 
+#[cfg(any(feature = "glz", feature = "jpeg", feature = "lz4", feature = "quic"))]
+mod log_once;
+
 #[cfg(feature = "encode")]
 pub mod encode;
 

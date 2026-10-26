@@ -1,8 +1,9 @@
 #![allow(dead_code, clippy::needless_range_loop)]
 
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::limits;
+use crate::log_once::warn_once;
 
 const QUIC_IMAGE_TYPE_INVALID: u32 = 0;
 const QUIC_IMAGE_TYPE_GRAY: u32 = 1;
@@ -652,7 +653,12 @@ impl QuicDecoder {
         // Refuse before reset_channels sizes the row buffers from the
         // server's width.
         let Some(output_len) = limits::rgba_len(self.width, self.height) else {
-            warn!("quic: dimensions refused: {}x{}", self.width, self.height);
+            warn_once!(
+                "quic:dimensions_refused",
+                "quic: dimensions refused: {}x{}",
+                self.width,
+                self.height
+            );
             return false;
         };
         self.output_len = output_len;
@@ -1583,7 +1589,7 @@ pub fn quic_decode(data: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
     );
     let mut decoder = QuicDecoder::new();
     if !decoder.quic_decode_begin(data) {
-        warn!("quic: decode_begin failed");
+        warn_once!("quic:decode_begin_failed", "quic: decode_begin failed");
         return None;
     }
     debug!(
@@ -1595,14 +1601,22 @@ pub fn quic_decode(data: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
         && decoder.image_type != QUIC_IMAGE_TYPE_RGB24
         && decoder.image_type != QUIC_IMAGE_TYPE_RGBA
     {
-        warn!("quic: unsupported image type: {}", decoder.image_type);
+        warn_once!(
+            "quic:image_type_unsupported",
+            "quic: unsupported image type: {}",
+            decoder.image_type
+        );
         return None;
     }
 
     if decoder.width as u32 != width || decoder.height as u32 != height {
-        warn!(
+        warn_once!(
+            "quic:size_mismatch",
             "quic: size mismatch: quic={}x{} vs expected={}x{}",
-            decoder.width, decoder.height, width, height
+            decoder.width,
+            decoder.height,
+            width,
+            height
         );
         return None;
     }
@@ -1613,7 +1627,7 @@ pub fn quic_decode(data: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
     let stride = decoder.width * RGB32_PIXEL_SIZE;
     let mut native = vec![0u8; total];
     if !decoder.quic_decode(&mut native, stride) {
-        warn!("quic: decode failed");
+        warn_once!("quic:decode_failed", "quic: decode failed");
         return None;
     }
 
@@ -1771,6 +1785,9 @@ mod tests {
             assert_eq!(channel.correlate_row.row.capacity(), 0);
         }
         assert_eq!(quic_decode(&data, side, side + 1), None);
+        // Refusals log once a process, not once an image.
+        assert!(crate::log_once::seen("quic:dimensions_refused"));
+        assert!(crate::log_once::seen("quic:decode_begin_failed"));
     }
 
     /// A QUIC header (magic, version, type, width, height) followed

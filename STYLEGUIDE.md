@@ -157,7 +157,8 @@ The structured logging helpers (`logging::log_message`,
 |-------|---------|
 | `info!` | Session lifecycle (connect, disconnect, init), surface create/destroy |
 | `debug!` | Per-message details when not in verbose mode, draw operations |
-| `warn!` | Recoverable errors (malformed messages, decompression failures, cache misses) |
+| `warn_once!` | Anything a server can send again and again: malformed messages, decode failures, cache misses (see "warn_once for protocol gaps") |
+| `warn!` | Recoverable errors a server cannot repeat at will (a failed audio device, a local I/O error) |
 | `error!` | Only via `tracing::error!` in `ryll/src/app/` for fatal connection errors |
 
 ### Adding a new message type
@@ -215,6 +216,14 @@ remove-or-reset API. Tests query via `warn_once_keys()` and key off
 literal strings containing the test's own name to avoid
 cross-pollination (`cargo test` runs tests in parallel against the
 shared registry).
+
+`shakenfist-spice-compression` does not depend on the protocol crate,
+so it has a `warn_once!` of its own (`src/log_once.rs`) for the
+decoders' refusals. It takes only literal keys, shaped
+`"<codec>:<failure>"` (`"jpeg:<backend>:<failure>"` for one JPEG
+backend's own failures), and its registry is separate: the renderer
+still records each failed decode under its own
+`display:decode_failure:...` key.
 
 ## Protocol message structs
 
@@ -336,12 +345,13 @@ be skipped without buffering it, so the framing cannot recover.
 
 - **Channel handlers never panic.** All methods return `Result<()>`.
   Propagate errors with `?`.
-- **Malformed messages**: `warn!()` and return `Ok(())` -- don't crash
-  the channel for one bad message.
+- **Malformed messages**: `warn_once!()` with a static key and return
+  `Ok(())` -- don't crash the channel for one bad message, and don't
+  let a server that repeats it grow the log at its message rate.
 - **Decompression failures**: return `None` (not `Err`) from the match
   arm so the channel continues processing.
-- **Unknown message types**: log via `logging::log_unknown()` with a
-  hex dump, then continue.
+- **Unknown message types**: log via `logging::log_unknown_once()`,
+  which hex-dumps the first occurrence, then continue.
 
 ### unwrap() policy
 

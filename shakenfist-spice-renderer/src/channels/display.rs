@@ -2849,8 +2849,10 @@ impl DisplayChannel {
             decode_duration_us,
         });
 
+        // Each way of producing no pixels has already fired its own
+        // warn_once! above, so this per-image line stays at debug.
         if decompressed.is_none() {
-            info!(
+            debug!(
                 "display: {}: no pixels produced for type={:?}",
                 op_name, image_type
             );
