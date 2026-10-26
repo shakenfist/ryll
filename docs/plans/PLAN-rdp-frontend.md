@@ -571,7 +571,7 @@ cursor, resize, text clipboard and audio playback. Specifically:
 | 1. Renderer prep: damage, pointer translation, slim build, device-free audio | [PLAN-rdp-frontend-phase-01-renderer-prep.md](PLAN-rdp-frontend-phase-01-renderer-prep.md) | Complete | 4696a95 |
 | 2. RDP skeleton: `shakenfist-spice-rdp`, `--rdp`, display, keyboard, mouse, security | [PLAN-rdp-frontend-phase-02-rdp-skeleton.md](PLAN-rdp-frontend-phase-02-rdp-skeleton.md) | Complete | 7b389b1, c314094 |
 | 3. Cursor and resize | [PLAN-rdp-frontend-phase-03-cursor-resize.md](PLAN-rdp-frontend-phase-03-cursor-resize.md) | Complete | c9a763d |
-| 4. Clipboard and audio | [PLAN-rdp-frontend-phase-04-clipboard-audio.md](PLAN-rdp-frontend-phase-04-clipboard-audio.md) | In progress | |
+| 4. Clipboard and audio | [PLAN-rdp-frontend-phase-04-clipboard-audio.md](PLAN-rdp-frontend-phase-04-clipboard-audio.md) | Complete | fe563e1 |
 | 5. Lifecycle and CI: reconnect, takeover, an `rdp-smoke` lane | - | Not started | |
 | 6. Documentation and parity | - | Not started | |
 | 7. Push audit | - | Not started | |
