@@ -955,6 +955,7 @@ mod tests {
         let (input_tx, _) = mpsc::channel(1);
         let (_, mouse_mode) = tokio_watch::channel(0);
         let (_, cursor) = tokio_watch::channel(CursorState::default());
+        let (_, spice_up) = tokio_watch::channel(true);
         let (resize_tx, _) = mpsc::channel(1);
         let mirror = SurfaceMirror::with_test_surface(0, 0, 64, 48, &[]);
         Arc::new(SessionHandles {
@@ -963,6 +964,7 @@ mod tests {
             mouse_mode,
             resize_tx,
             cursor,
+            spice_up,
             clipboard: None,
             audio: None,
             label: "test".to_string(),
@@ -990,6 +992,7 @@ mod tests {
         let (input_tx, input_rx) = mpsc::channel(capacity);
         let (_mode_tx, mouse_mode) = tokio_watch::channel(0);
         let (_, cursor) = tokio_watch::channel(CursorState::default());
+        let (_, spice_up) = tokio_watch::channel(true);
         let (resize_tx, _resize_rx) = mpsc::channel(1);
         let mirror = SurfaceMirror::with_test_surface(0, 0, 64, 48, &[]);
         let handles = Arc::new(SessionHandles {
@@ -998,6 +1001,7 @@ mod tests {
             mouse_mode,
             resize_tx,
             cursor,
+            spice_up,
             clipboard: None,
             audio: None,
             label: "test".to_string(),

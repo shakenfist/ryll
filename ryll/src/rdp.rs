@@ -222,13 +222,18 @@ pub fn run_rdp(
         // cannot be bound or an unusable certificate fails the launch
         // with nothing to tear down. Until the first surface arrives
         // the display handler announces a fallback desktop size and
-        // resizes the client once the guest's is known.
+        // resizes the client once the guest's is known. The RDP server
+        // stops when the SPICE session ends, so the session is up for
+        // as long as a client can see it: the watch's sender is dropped
+        // at once, and a closed watch keeps its value.
+        let (_, spice_up) = tokio::sync::watch::channel(true);
         let handles = Arc::new(SessionHandles {
             surface_mirror: surface_mirror.clone(),
             input_tx,
             mouse_mode: session_state_rx.mouse_mode.clone(),
             resize_tx,
             cursor,
+            spice_up,
             clipboard: Some(clipboard.clone()),
             audio: Some(audio),
             label: session_label,

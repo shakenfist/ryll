@@ -23,6 +23,14 @@
 //! stream sends to the client as a resize like any other, except in
 //! the first moments of a connection, when a resize is held back (see
 //! [`FIRST_RESIZE_GRACE`]).
+//!
+//! While the SPICE session is down (see [`SessionHandles::spice_up`]),
+//! the client keeps its connection and is shown the last frame at half
+//! brightness, so the outage does not look like a hang. The stream
+//! sends that darkened frame once, as one whole-surface bitmap, and
+//! nothing from the mirror after it until the session is back; then it
+//! sends the whole surface, resizing the client first if the new
+//! session's surface is another size.
 
 use std::collections::VecDeque;
 use std::num::{NonZeroU16, NonZeroUsize};
@@ -394,6 +402,12 @@ fn layout_size(layout: &DisplayControlMonitorLayout) -> Option<(u32, u32)> {
 /// or, if the surface has become the client's size meanwhile, sends the
 /// whole surface with no resize. A stream built after the grace period,
 /// as every stream after a reactivation is, resizes at once.
+///
+/// While the session is down the stream sends the darkened frame once,
+/// resizing to the surface first as above, and then only pointer
+/// updates. A stream built during an outage, for a client that has
+/// just connected or reactivated, sends the darkened frame as its
+/// first bitmap.
 struct MirrorUpdates {
     slot: SessionSlot,
     /// Updated with every resize sent, since the reactivation that
@@ -415,20 +429,27 @@ struct MirrorUpdates {
     /// of a stream, and the first after a resize, must be the whole
     /// surface.
     seeded: bool,
-    /// The cursor watch of the session last polled, taken afresh when
-    /// the slot's session changes. `None` until the first poll with a
-    /// session.
-    cursor: Option<CursorWatch>,
+    /// Whether the SPICE session was up at the last poll.
+    spice_up: bool,
+    /// Whether the client has been sent the darkened frame of the
+    /// current outage at `sent_size`.
+    darkened: bool,
+    /// The cursor and liveness watches of the session last polled,
+    /// taken afresh when the slot's session changes. `None` until the
+    /// first poll with a session.
+    watches: Option<SessionWatches>,
     interval: Interval,
 }
 
-/// A session's cursor watch, and which session it belongs to.
-struct CursorWatch {
+/// A session's cursor and liveness watches, and which session they
+/// belong to.
+struct SessionWatches {
     /// Weak, so the stream does not keep a session alive; holding it
     /// keeps the allocation, so a later session cannot share its
     /// address.
     session: Weak<SessionHandles>,
-    state: watch::Receiver<CursorState>,
+    cursor: watch::Receiver<CursorState>,
+    spice_up: watch::Receiver<bool>,
 }
 
 impl MirrorUpdates {
@@ -443,40 +464,62 @@ impl MirrorUpdates {
             sent_size: announced,
             resize_held_until,
             seeded: false,
-            cursor: None,
+            spice_up: true,
+            darkened: false,
+            watches: None,
             interval,
         }
     }
 
-    /// Look at `session`'s cursor once, and queue a pointer update if
-    /// the client has not been sent its current state: when the watch
-    /// has changed, and whatever it says when the watch has just been
-    /// taken, for a new stream or a new session.
+    /// Look at `session`'s cursor and liveness watches once. Queue a
+    /// pointer update if the client has not been sent the cursor's
+    /// current state, and note whether the session is up. Each watch is
+    /// read when it has changed, and whatever it says when it has just
+    /// been taken, for a new stream or a new session.
     ///
-    /// Synchronous for the same reason as [`Self::poll_mirror`]: the
-    /// state read from the watch is in `pending` before this returns.
-    fn poll_cursor(&mut self, session: &Arc<SessionHandles>) {
-        let (cursor, taken) = match &mut self.cursor {
-            Some(cursor) if Weak::as_ptr(&cursor.session) == Arc::as_ptr(session) => {
-                (cursor, false)
+    /// A session found down after being up needs the darkened frame
+    /// sent; one found still down after its watch changed (it came back
+    /// and was lost again between polls) keeps the darkened frame the
+    /// client already has. A session found up after being down, or
+    /// after any change of its watch, which may be an outage too short
+    /// for a poll to have seen, needs the whole surface sent: the
+    /// client may be showing the darkened frame, and the mirror may
+    /// hold another session's surface.
+    ///
+    /// Synchronous for the same reason as [`Self::poll_mirror`]: what is
+    /// read from the watches is in `self` before this returns.
+    fn poll_session(&mut self, session: &Arc<SessionHandles>) {
+        let (watches, taken) = match &mut self.watches {
+            Some(watches) if Weak::as_ptr(&watches.session) == Arc::as_ptr(session) => {
+                (watches, false)
             }
             other => {
-                let cursor = other.insert(CursorWatch {
+                let watches = other.insert(SessionWatches {
                     session: Arc::downgrade(session),
-                    state: session.cursor.clone(),
+                    cursor: session.cursor.clone(),
+                    spice_up: session.spice_up.clone(),
                 });
-                (cursor, true)
+                (watches, true)
             }
         };
-        // A closed watch (the relay has ended with the session) still
-        // holds the last state, and will not change again.
-        let changed = cursor.state.has_changed().unwrap_or(false);
-        if !(changed || taken) {
-            return;
-        }
-        let state = cursor.state.borrow_and_update().clone();
-        if let Some(update) = pointer_update(&state) {
+        // A closed watch (the relay has ended with the session, or the
+        // caller never changes it) still holds the last value, and will
+        // not change again.
+        let cursor_changed = watches.cursor.has_changed().unwrap_or(false);
+        let cursor = (cursor_changed || taken).then(|| watches.cursor.borrow_and_update().clone());
+        let up_changed = watches.spice_up.has_changed().unwrap_or(false);
+        let up = (up_changed || taken).then(|| *watches.spice_up.borrow_and_update());
+
+        if let Some(update) = cursor.as_ref().and_then(pointer_update) {
             self.pending.push_back(update);
+        }
+        match up {
+            Some(false) if self.spice_up => self.darkened = false,
+            Some(true) if up_changed || !self.spice_up => self.seeded = false,
+            _ => {}
+        }
+        if let Some(up) = up {
+            self.spice_up = up;
         }
     }
 
@@ -547,6 +590,45 @@ impl MirrorUpdates {
         self.pending
             .extend(damage_bitmaps(surface, size, damage.rects()).map(DisplayUpdate::Bitmap));
     }
+
+    /// Look at the mirror once while the session is down, and queue the
+    /// darkened frame if the client has not had it: a resize if the
+    /// surface is not the size the client has (nothing at all while
+    /// that resize is held), then the whole surface at half brightness.
+    ///
+    /// The mirror is only read. Its damage stays for the whole-surface
+    /// update that follows the session's return, and while there is no
+    /// surface the client keeps whatever it shows.
+    fn poll_outage(&mut self, mirror: &SurfaceMirror) {
+        if self.darkened {
+            return;
+        }
+        let Some(surface) = mirror.primary_surface() else {
+            return;
+        };
+        let Some(size) = surface_desktop_size(surface) else {
+            return;
+        };
+
+        if size != self.sent_size {
+            if self.resize_held() {
+                return;
+            }
+            debug!(
+                "rdp display: surface is {}x{}, client has {}x{}; resizing for the outage frame",
+                size.width, size.height, self.sent_size.width, self.sent_size.height
+            );
+            self.pending.push_back(DisplayUpdate::Resize(size));
+            self.client_size.set(size);
+            self.sent_size = size;
+        }
+
+        if let Some(bitmap) = darkened_bitmap(surface, size) {
+            debug!("rdp display: the SPICE session is down; showing the client a darkened frame");
+            self.pending.push_back(DisplayUpdate::Bitmap(bitmap));
+            self.darkened = true;
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -580,9 +662,13 @@ impl RdpServerDisplayUpdates for MirrorUpdates {
                 self.seeded = false;
                 continue;
             };
-            self.poll_cursor(&session);
+            self.poll_session(&session);
             let mut mirror = session.surface_mirror.lock().await;
-            self.poll_mirror(&mut mirror);
+            if self.spice_up {
+                self.poll_mirror(&mut mirror);
+            } else {
+                self.poll_outage(&mirror);
+            }
         }
     }
 }
@@ -631,15 +717,37 @@ fn surface_desktop_size(surface: &DisplaySurface) -> Option<DesktopSize> {
 
 /// A bitmap of the whole desktop, from the surface's top-left corner.
 fn full_bitmap(surface: &DisplaySurface, size: DesktopSize) -> Option<BitmapUpdate> {
+    whole_desktop(surface, size, Bytes::copy_from_slice(surface.pixels()))
+}
+
+/// As [`full_bitmap`], at half brightness. The surface is not changed.
+fn darkened_bitmap(surface: &DisplaySurface, size: DesktopSize) -> Option<BitmapUpdate> {
+    whole_desktop(surface, size, Bytes::from(darken(surface.pixels())))
+}
+
+/// A bitmap of the whole desktop whose pixels are `data`, laid out as
+/// the surface's are.
+fn whole_desktop(surface: &DisplaySurface, size: DesktopSize, data: Bytes) -> Option<BitmapUpdate> {
     Some(BitmapUpdate {
         x: 0,
         y: 0,
         width: NonZeroU16::new(size.width)?,
         height: NonZeroU16::new(size.height)?,
         format: PixelFormat::RgbA32,
-        data: Bytes::copy_from_slice(surface.pixels()),
+        data,
         stride: NonZeroUsize::new(row_bytes(surface))?,
     })
+}
+
+/// RGBA `pixels` at half brightness: each colour channel halved, and
+/// alpha left as it is.
+fn darken(pixels: &[u8]) -> Vec<u8> {
+    pixels
+        .as_chunks::<BYTES_PER_PIXEL>()
+        .0
+        .iter()
+        .flat_map(|&[r, g, b, a]| [r / 2, g / 2, b / 2, a])
+        .collect()
 }
 
 /// One bitmap per damaged rectangle, each clipped to the desktop.
@@ -757,7 +865,7 @@ mod tests {
         height: u32,
         cursor: CursorState,
     ) -> (SessionSlot, Arc<SessionHandles>, watch::Sender<CursorState>) {
-        let (slot, handles, cursor_tx, _resize) = session(width, height, cursor);
+        let (slot, handles, cursor_tx, _resize, _up) = session(width, height, cursor, true);
         (slot, handles, cursor_tx)
     }
 
@@ -771,26 +879,43 @@ mod tests {
         Arc<SessionHandles>,
         mpsc::Receiver<DisplaySize>,
     ) {
-        let (slot, handles, _cursor, resize) = session(width, height, CursorState::default());
+        let (slot, handles, _cursor, resize, _up) =
+            session(width, height, CursorState::default(), true);
         (slot, handles, resize)
+    }
+
+    /// As [`session_with_surface`], with the session starting up or
+    /// down as `up` says, and the sending end of its liveness watch.
+    fn session_with_outage(
+        width: u32,
+        height: u32,
+        up: bool,
+    ) -> (SessionSlot, Arc<SessionHandles>, watch::Sender<bool>) {
+        let (slot, handles, _cursor, _resize, up_tx) =
+            session(width, height, CursorState::default(), up);
+        (slot, handles, up_tx)
     }
 
     /// How many requests a test session's resize queue holds.
     const RESIZE_QUEUE: usize = 4;
 
     /// A slot holding a session whose mirror has one `width` x `height`
-    /// primary surface of numbered pixels and whose cursor watch starts
-    /// at `cursor`, with the sending end of that watch and the
-    /// receiving end of the session's resize queue.
+    /// primary surface of numbered pixels, whose cursor watch starts at
+    /// `cursor` and whose liveness watch starts at `up`, with the
+    /// sending ends of those watches and the receiving end of the
+    /// session's resize queue. Callers that drop the liveness sender
+    /// leave the session up for good.
     fn session(
         width: u32,
         height: u32,
         cursor: CursorState,
+        up: bool,
     ) -> (
         SessionSlot,
         Arc<SessionHandles>,
         watch::Sender<CursorState>,
         mpsc::Receiver<DisplaySize>,
+        watch::Sender<bool>,
     ) {
         let mirror = SurfaceMirror::with_test_surface(
             0,
@@ -803,19 +928,21 @@ mod tests {
         let (_, mouse_mode) = watch::channel(0);
         let (resize_tx, resize_rx) = mpsc::channel(RESIZE_QUEUE);
         let (cursor_tx, cursor) = watch::channel(cursor);
+        let (up_tx, spice_up) = watch::channel(up);
         let handles = Arc::new(SessionHandles {
             surface_mirror: Arc::new(tokio::sync::Mutex::new(mirror)),
             input_tx,
             mouse_mode,
             resize_tx,
             cursor,
+            spice_up,
             clipboard: None,
             audio: None,
             label: String::from("test"),
         });
         let slot = SessionSlot::new();
         slot.set(Arc::clone(&handles));
-        (slot, handles, cursor_tx, resize_rx)
+        (slot, handles, cursor_tx, resize_rx, up_tx)
     }
 
     /// A display over `slot`'s session and its update stream, built as
@@ -1531,6 +1658,7 @@ mod tests {
             mouse_mode: handles.mouse_mode.clone(),
             resize_tx: handles.resize_tx.clone(),
             cursor: second_cursor,
+            spice_up: handles.spice_up.clone(),
             clipboard: None,
             audio: None,
             label: String::from("second"),
@@ -1726,5 +1854,158 @@ mod tests {
         );
         assert!(Instant::now() <= built + DAMAGE_POLL_INTERVAL);
         assert_geometry(&next_bitmap(&mut updates).await, 0, 0, 64, 48);
+    }
+
+    #[test]
+    fn darkening_halves_each_colour_and_keeps_alpha() {
+        assert_eq!(
+            darken(&[200, 101, 0, 255, 1, 2, 3, 7, 255, 255, 255, 0]),
+            [100, 50, 0, 255, 0, 1, 1, 7, 127, 127, 127, 0]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_outage_sends_one_darkened_frame_and_leaves_the_mirror() {
+        let (slot, handles, up) = session_with_outage(8, 6, true);
+        let (_display, mut updates) = connect(&slot).await;
+        next_bitmap(&mut updates).await;
+
+        up.send_replace(false);
+        let bitmap = next_bitmap(&mut updates).await;
+        assert_geometry(&bitmap, 0, 0, 8, 6);
+        assert_eq!(bitmap_rows(&bitmap), darken(&numbered_pixels(8, 6, 0)));
+        assert_eq!(surface_pixels(&handles).await, numbered_pixels(8, 6, 0));
+
+        // Neither what the next session draws while the outage lasts,
+        // nor the loss being announced again, sends anything more.
+        blit(&handles, 2, 1, 3, 2, 100).await;
+        up.send_replace(false);
+        assert_quiet(&mut updates).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recovery_sends_the_whole_surface_from_the_mirror() {
+        let (slot, handles, up) = session_with_outage(8, 6, true);
+        let (_display, mut updates) = connect(&slot).await;
+        next_bitmap(&mut updates).await;
+        up.send_replace(false);
+        next_bitmap(&mut updates).await;
+
+        blit(&handles, 2, 1, 3, 2, 100).await;
+        up.send_replace(true);
+        let bitmap = next_bitmap(&mut updates).await;
+        assert_geometry(&bitmap, 0, 0, 8, 6);
+        assert_eq!(bitmap_rows(&bitmap), surface_pixels(&handles).await);
+        // The whole surface covered the damage drawn during the outage.
+        assert_quiet(&mut updates).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_outage_too_short_to_poll_still_sends_the_whole_surface() {
+        let (slot, handles, up) = session_with_outage(8, 6, true);
+        let (_display, mut updates) = connect(&slot).await;
+        next_bitmap(&mut updates).await;
+
+        // The session is lost and back between two polls, with a new
+        // session's surface of the same size in the mirror and its
+        // damage already gone.
+        up.send_replace(false);
+        blit(&handles, 0, 0, 8, 6, 40).await;
+        handles
+            .surface_mirror
+            .lock()
+            .await
+            .primary_surface_mut()
+            .expect("surface")
+            .take_damage();
+        up.send_replace(true);
+
+        let bitmap = next_bitmap(&mut updates).await;
+        assert_geometry(&bitmap, 0, 0, 8, 6);
+        assert_eq!(bitmap_rows(&bitmap), numbered_pixels(8, 6, 40));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_client_connecting_during_an_outage_is_shown_the_darkened_frame() {
+        let (slot, _handles, up) = session_with_outage(8, 6, false);
+        let (_display, mut updates) = connect(&slot).await;
+
+        let bitmap = next_bitmap(&mut updates).await;
+        assert_geometry(&bitmap, 0, 0, 8, 6);
+        assert_eq!(bitmap_rows(&bitmap), darken(&numbered_pixels(8, 6, 0)));
+        assert_quiet(&mut updates).await;
+
+        up.send_replace(true);
+        let bitmap = next_bitmap(&mut updates).await;
+        assert_geometry(&bitmap, 0, 0, 8, 6);
+        assert_eq!(bitmap_rows(&bitmap), numbered_pixels(8, 6, 0));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_darkened_frame_waits_for_the_grace_period_to_resize() {
+        let (slot, _handles, _up) = session_with_outage(64, 48, false);
+        let accepted = Instant::now();
+        let mut display = accept_told(
+            &slot,
+            DesktopSize {
+                width: 1280,
+                height: 720,
+            },
+        )
+        .await;
+        let mut updates = display.updates().await.expect("updates");
+        next_default_pointer(&mut updates).await;
+        assert_quiet_until(
+            &mut updates,
+            accepted + FIRST_RESIZE_GRACE - DAMAGE_POLL_INTERVAL,
+        )
+        .await;
+
+        let surface = DesktopSize {
+            width: 64,
+            height: 48,
+        };
+        assert_eq!(next_resize(&mut updates).await, surface);
+        assert_eq!(display.client_size().get(), Some(surface));
+        let bitmap = next_bitmap(&mut updates).await;
+        assert_geometry(&bitmap, 0, 0, 64, 48);
+        assert_eq!(bitmap_rows(&bitmap), darken(&numbered_pixels(64, 48, 0)));
+        assert_quiet(&mut updates).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_recovered_session_of_another_size_resizes_the_client() {
+        let (slot, handles, up) = session_with_outage(8, 6, true);
+        let (_display, mut updates) = connect(&slot).await;
+        next_bitmap(&mut updates).await;
+        up.send_replace(false);
+        next_bitmap(&mut updates).await;
+
+        // The next session's surface is another size; nothing is sent
+        // for it until the session is announced as up.
+        handles
+            .surface_mirror
+            .lock()
+            .await
+            .apply_event(&ChannelEvent::SurfaceCreated {
+                display_channel_id: 0,
+                surface_id: 0,
+                width: 16,
+                height: 12,
+            });
+        blit(&handles, 0, 0, 16, 12, 200).await;
+        assert_quiet(&mut updates).await;
+
+        up.send_replace(true);
+        assert_eq!(
+            next_resize(&mut updates).await,
+            DesktopSize {
+                width: 16,
+                height: 12
+            }
+        );
+        let bitmap = next_bitmap(&mut updates).await;
+        assert_geometry(&bitmap, 0, 0, 16, 12);
+        assert_eq!(bitmap_rows(&bitmap), numbered_pixels(16, 12, 200));
     }
 }

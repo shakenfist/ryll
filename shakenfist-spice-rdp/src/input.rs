@@ -522,6 +522,7 @@ mod tests {
             let (input_tx, input_rx) = mpsc::channel(capacity);
             let (mode_tx, mouse_mode) = watch::channel(mode);
             let (_, cursor) = watch::channel(CursorState::default());
+            let (_, spice_up) = watch::channel(true);
             let (resize_tx, _resize_rx) = mpsc::channel(1);
             let mirror = SurfaceMirror::with_test_surface(0, 0, WIDTH, HEIGHT, &[]);
             let handles = Arc::new(SessionHandles {
@@ -530,6 +531,7 @@ mod tests {
                 mouse_mode,
                 resize_tx,
                 cursor,
+                spice_up,
                 clipboard: None,
                 audio: None,
                 label: "test".to_string(),
@@ -904,6 +906,7 @@ mod tests {
         let (input_tx, mut input_rx) = mpsc::channel(8);
         let (_mode_tx, mouse_mode) = watch::channel(MOUSE_MODE_SERVER);
         let (_, cursor) = watch::channel(CursorState::default());
+        let (_, spice_up) = watch::channel(true);
         let (resize_tx, _resize_rx) = mpsc::channel(1);
         h.handler.slot.set(Arc::new(SessionHandles {
             surface_mirror: Arc::clone(&h.handles.surface_mirror),
@@ -911,6 +914,7 @@ mod tests {
             mouse_mode,
             resize_tx,
             cursor,
+            spice_up,
             clipboard: None,
             audio: None,
             label: "second".to_string(),

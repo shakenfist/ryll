@@ -304,6 +304,7 @@ fn session_with(
     let (input_tx, input_rx) = mpsc::channel(16);
     let (_mouse_mode_tx, mouse_mode) = watch::channel(MOUSE_MODE_SERVER);
     let (cursor_tx, cursor) = watch::channel(CursorState::default());
+    let (_, spice_up) = watch::channel(true);
     let (resize_tx, resize_rx) = mpsc::channel(1);
     let handles = Arc::new(SessionHandles {
         surface_mirror: Arc::new(tokio::sync::Mutex::new(mirror)),
@@ -311,6 +312,7 @@ fn session_with(
         mouse_mode,
         resize_tx,
         cursor,
+        spice_up,
         clipboard,
         audio,
         label: "loopback".to_string(),

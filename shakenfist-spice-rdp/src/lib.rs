@@ -94,6 +94,16 @@ pub struct SessionHandles {
     /// event bus before the session is spawned, or the first cursor
     /// shape is lost.
     pub cursor: watch::Receiver<CursorState>,
+    /// Whether the SPICE session is up. While it is `false` the client
+    /// is shown the last frame at half brightness, and once it is
+    /// `true` again it is sent the whole surface, so a caller that
+    /// reconnects SPICE behind the same handles should publish `false`
+    /// when the session is lost and `true` once the new session's
+    /// primary surface is in the mirror. A caller that never
+    /// reconnects passes a receiver that is always `true`, such as one
+    /// whose sender has been dropped: a closed watch keeps its last
+    /// value.
+    pub spice_up: watch::Receiver<bool>,
     /// The session's clipboard, which the main channel ferries to and
     /// from the guest's agent, or `None` to carry no clipboard. Text
     /// the RDP client copies is stored in it as host text, and text the

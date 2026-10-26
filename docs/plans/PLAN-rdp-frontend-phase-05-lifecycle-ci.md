@@ -635,6 +635,15 @@ To be filled in by step 6.
   `ReconnectState::on_disconnect` now calls it. The management
   session checked the state machine case by case against the old
   code. Eight mutants, all killed (`.../p05/step2/mutate.sh`).
+- **Step 3** (Opus, high effort) named the field
+  `SessionHandles.spice_up`. A closed watch keeps its last value,
+  so a caller with no reconnect drops the sender of a `true`
+  watch. Recovery resets the stream on any change that ends at
+  `true`, so an outage too short for a poll to see still resends
+  the whole surface. For step 4 it noted that a surface appearing
+  in the mirror while the watch is `false` is sent darkened, so
+  the mirror reset belongs just before the new session starts.
+  Eight mutants, all killed (`.../p05/step3/mutate.py`).
 
 ## Future work
 

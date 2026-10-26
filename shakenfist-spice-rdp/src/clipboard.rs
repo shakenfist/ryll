@@ -532,6 +532,7 @@ mod tests {
         let (input_tx, _) = mpsc::channel(1);
         let (_, mouse_mode) = watch::channel(0);
         let (_, cursor) = watch::channel(CursorState::default());
+        let (_, spice_up) = watch::channel(true);
         let (resize_tx, _) = mpsc::channel(1);
         let mirror = SurfaceMirror::with_test_surface(0, 0, 16, 16, &[]);
         let slot = SessionSlot::new();
@@ -541,6 +542,7 @@ mod tests {
             mouse_mode,
             resize_tx,
             cursor,
+            spice_up,
             clipboard,
             audio: None,
             label: "test".to_string(),
