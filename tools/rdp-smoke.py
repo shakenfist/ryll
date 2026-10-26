@@ -41,7 +41,8 @@ Once a check fails the rest are skipped, since each needs the state the
 failed one should have left.
 
 A failure the environment caused -- Xvfb not starting, QEMU not starting
-or its guest not booting, a tool missing -- is reported as FAIL (harness),
+or its guest not booting, QEMU restarting too slowly to land inside ryll's
+retries, a tool missing -- is reported as FAIL (harness),
 not as a ryll defect. The guest's own screen (QMP screendump) is checked
 before ryll is involved, so a guest that never boots is a harness failure.
 
@@ -115,9 +116,17 @@ INPUT_BOUND = 20.0
 # A taken-over FreeRDP must exit within this long of the new one
 # authenticating.
 TAKEOVER_EXIT_BOUND = 20.0
+# ryll's last SPICE retry comes this long after the session is lost: it
+# retries after 1, 4 and 16 s (RECONNECT_BACKOFF_SECS in
+# ryll/src/reconnect_policy.rs), then gives up. QEMU must be listening
+# again before then, so the outage the spice-reconnect check stages has to
+# fit inside it, with a margin for ryll noticing the loss.
+RETRY_WINDOW = 1.0 + 4.0 + 16.0
+RETRY_MARGIN = 3.0
 # The darkened frame must reach the client within this long of QEMU
-# stopping.
-DARK_BOUND = 20.0
+# stopping. ryll darkens it within a second; the bound is kept short so
+# that, with QEMU's restart, the outage stays inside RETRY_WINDOW.
+DARK_BOUND = 8.0
 # After QEMU restarts, the new guest's frame must reach the client within
 # this long. ryll retries after 1, 4 and 16 s (RECONNECT_BACKOFF_SECS in
 # ryll/src/reconnect_policy.rs), and the guest must boot again.
@@ -892,6 +901,13 @@ class Smoke:
                    'after QEMU stopped')
         h.start_qemu()
         restarted = time.monotonic()
+        # A QEMU that came back after ryll's last retry says nothing about
+        # ryll: it gave up, as it should. That is the runner being slow.
+        outage = restarted - stopped
+        if outage > RETRY_WINDOW - RETRY_MARGIN:
+            raise HarnessError(f'QEMU took {outage:.1f}s to listen again after it was stopped, too close to '
+                               f'ryll\'s last retry {RETRY_WINDOW:.0f} s after the loss to judge the reconnect')
+        check.note(f'QEMU listened again {outage:.1f}s after it was stopped')
         wait_frame(h, client, check, RECOVER_BOUND)
         check.note(f'new guest frame {time.monotonic() - restarted:.1f}s after QEMU restarted')
         more = count_matching(h.ryll.lines(), ATTEMPT_RE) - attempts

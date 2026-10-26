@@ -43,14 +43,15 @@ jobs:
     # l because the release build is l-sized, as build-linux's is.
     runs-on: [self-hosted, vm, debian-13-docker, l]
     timeout-minutes: 60
-    # A pull request or a dispatch supersedes an earlier run on its ref.
-    # A nightly does not cancel the nightly before it, which may still be
-    # waiting for an `l` runner: cancelling pending runs would leave the
-    # flake record with gaps exactly when the pool is starved. See
-    # "Concurrency" in docs/ci.md and fuzz.yml.
+    # A pull request's push supersedes its earlier run. Nothing on develop
+    # cancels anything: a dispatch there must not cancel a running nightly,
+    # whose result is part of the flake record. GitHub still keeps only one
+    # pending run per group, so two nightlies queued behind a starved `l`
+    # pool collapse into one whatever this says. See "Concurrency" in
+    # docs/ci.md.
     concurrency:
       group: ${{ github.workflow }}-rdp-smoke-${{ github.ref }}
-      cancel-in-progress: ${{ github.event_name != 'schedule' }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     steps:
       - uses: actions/checkout@v7
 
