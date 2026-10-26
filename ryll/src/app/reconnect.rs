@@ -1,22 +1,8 @@
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use shakenfist_spice_protocol::NotifySeverity;
 
-/// Auto-reconnect retry budget per disconnect cluster.
-pub(super) const MAX_RECONNECT_ATTEMPTS: u8 = 3;
-
-/// Backoff (seconds) before each reconnect attempt within a
-/// cluster. Index 0 is the wait before attempt 1, index 1 before
-/// attempt 2, etc. Shape matches spice-gtk's reconnect policy:
-/// short first attempt for blip recovery, longer windows for
-/// server restarts. Total worst-case wait ~21 s before the modal.
-pub(super) const RECONNECT_BACKOFF_SECS: [u64; MAX_RECONNECT_ATTEMPTS as usize] = [1, 4, 16];
-
-/// After the auto-reconnect budget is exhausted (Modal shown),
-/// further disconnects within this window go straight back to
-/// Modal without re-trying — a flapping server cannot make us
-/// bang away forever. A fresh budget unlocks after this elapses.
-pub(super) const RECONNECT_CLUSTER_RESET: Duration = Duration::from_secs(5 * 60);
+use crate::reconnect_policy::{next_step, GiveUp, ReconnectPolicy, RetryDecision, TicketBlock};
 
 /// Discriminator for the disconnect-modal. The variant
 /// determines title, body copy, and which buttons render. The
@@ -71,38 +57,26 @@ pub(super) enum ReconnectState {
     Modal(ModalVariant),
 }
 
-/// Policy bits derived from the .vv file's ticket-related keys.
-/// Bundled so the state-machine transition can take a single
-/// argument rather than threading two unrelated booleans.
-#[derive(Debug, Clone, Copy, Default)]
-pub(super) struct ReconnectPolicy {
-    /// `delete-this-file=1` was set: the previous link consumed
-    /// the ticket, so the server will reject any reconnect. All
-    /// disconnects go straight to `Modal(OneShotConsumed)`.
-    pub(super) ticket_is_single_use: bool,
-    /// `ticket-valid-until=<unix-ts>` was set: when this wall
-    /// time has passed, any reconnect would be doomed. The
-    /// state machine consults this on entry and at every
-    /// `Pending` tick so the modal trips immediately rather
-    /// than burning the 3-attempt budget on dead retries.
-    pub(super) ticket_valid_until: Option<SystemTime>,
+impl ModalVariant {
+    /// The modal for a ticket that forbids any further reconnect.
+    pub(super) fn from_ticket_block(block: TicketBlock) -> Self {
+        match block {
+            TicketBlock::SingleUse => ModalVariant::OneShotConsumed,
+            TicketBlock::Expired { expired_at } => ModalVariant::TicketExpired { expired_at },
+        }
+    }
 }
 
-impl ReconnectPolicy {
-    /// If the ticket policy forbids any further reconnect, return
-    /// the appropriate `ModalVariant`. `Ok(())` means the normal
-    /// retry path is permitted.
-    pub(super) fn forbid_retry(&self, now_wall: SystemTime) -> Option<ModalVariant> {
-        if self.ticket_is_single_use {
-            return Some(ModalVariant::OneShotConsumed);
-        }
-        if let Some(expiry) = self.ticket_valid_until {
-            if now_wall >= expiry {
-                return Some(ModalVariant::TicketExpired { expired_at: expiry });
-            }
-        }
-        None
-    }
+/// If the ticket policy forbids any further reconnect, return the
+/// appropriate `ModalVariant`. `None` means the normal retry path
+/// is permitted.
+pub(super) fn forbid_retry_modal(
+    policy: &ReconnectPolicy,
+    now_wall: SystemTime,
+) -> Option<ModalVariant> {
+    policy
+        .forbid_retry(now_wall)
+        .map(ModalVariant::from_ticket_block)
 }
 
 impl ReconnectState {
@@ -134,7 +108,7 @@ impl ReconnectState {
         // Ticket-bound deployments: any further reconnect would
         // be rejected, so trip the modal on the first disconnect
         // event of any kind — no point in burning the budget.
-        if let Some(variant) = policy.forbid_retry(now_wall) {
+        if let Some(variant) = forbid_retry_modal(&policy, now_wall) {
             // Already in the matching Modal? Ignore the storm.
             if matches!(self, ReconnectState::Modal(v) if v == &variant) {
                 return None;
@@ -142,52 +116,40 @@ impl ReconnectState {
             return Some(ReconnectState::Modal(variant));
         }
 
-        if awaiting_outcome {
+        let failed_attempts = if awaiting_outcome {
             match self {
-                ReconnectState::Pending { attempt, .. } => {
-                    let next_attempt = attempt + 1;
-                    if next_attempt > MAX_RECONNECT_ATTEMPTS {
-                        Some(ReconnectState::Modal(ModalVariant::Generic {
-                            latest_error,
-                        }))
-                    } else {
-                        let backoff = Duration::from_secs(
-                            RECONNECT_BACKOFF_SECS[(next_attempt - 1) as usize],
-                        );
-                        Some(ReconnectState::Pending {
-                            attempt: next_attempt,
-                            next_at: now + backoff,
-                            latest_error,
-                        })
-                    }
-                }
+                ReconnectState::Pending { attempt, .. } => *attempt,
                 // `awaiting_outcome` should imply we were in
                 // Pending; defensively land in Generic Modal so
                 // we don't silently re-arm a retry from a stale
                 // state.
-                _ => Some(ReconnectState::Modal(ModalVariant::Generic {
-                    latest_error,
-                })),
+                _ => {
+                    return Some(ReconnectState::Modal(ModalVariant::Generic {
+                        latest_error,
+                    }))
+                }
             }
         } else {
             match self {
-                ReconnectState::Idle => {
-                    if let Some(t) = last_modal_at {
-                        if now.duration_since(t) < RECONNECT_CLUSTER_RESET {
-                            return Some(ReconnectState::Modal(ModalVariant::Generic {
-                                latest_error,
-                            }));
-                        }
-                    }
-                    let backoff = Duration::from_secs(RECONNECT_BACKOFF_SECS[0]);
-                    Some(ReconnectState::Pending {
-                        attempt: 1,
-                        next_at: now + backoff,
-                        latest_error,
-                    })
-                }
+                ReconnectState::Idle => 0,
                 // Already disconnected — ignore the duplicate.
-                ReconnectState::Pending { .. } | ReconnectState::Modal(_) => None,
+                ReconnectState::Pending { .. } | ReconnectState::Modal(_) => return None,
+            }
+        };
+
+        match next_step(&policy, now, now_wall, last_modal_at, failed_attempts) {
+            RetryDecision::RetryAfter(backoff) => Some(ReconnectState::Pending {
+                attempt: failed_attempts + 1,
+                next_at: now + backoff,
+                latest_error,
+            }),
+            RetryDecision::GiveUp(GiveUp::Ticket(block)) => Some(ReconnectState::Modal(
+                ModalVariant::from_ticket_block(block),
+            )),
+            RetryDecision::GiveUp(GiveUp::Exhausted) => {
+                Some(ReconnectState::Modal(ModalVariant::Generic {
+                    latest_error,
+                }))
             }
         }
     }
@@ -242,6 +204,10 @@ pub(super) fn modal_variant_notification(variant: &ModalVariant) -> (NotifySever
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reconnect_policy::{
+        MAX_RECONNECT_ATTEMPTS, RECONNECT_BACKOFF_SECS, RECONNECT_CLUSTER_RESET,
+    };
+    use std::time::Duration;
 
     // ── ReconnectState transitions ──────────────────────────
 
@@ -449,15 +415,6 @@ mod tests {
             "awaiting_outcome from Modal must produce Modal(Generic), got {:?}",
             next
         );
-    }
-
-    #[test]
-    fn reconnect_backoff_progression_matches_spec() {
-        // The backoffs published in plan §A.1 are 1s/4s/16s.
-        // Lock them in with a direct check so a typo in the
-        // constant array is caught by the test suite.
-        assert_eq!(RECONNECT_BACKOFF_SECS, [1, 4, 16]);
-        assert_eq!(MAX_RECONNECT_ATTEMPTS, 3);
     }
 
     // ── Ticket-policy paths ─────────────────────────────────

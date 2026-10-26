@@ -8,6 +8,7 @@ mod capture;
 mod notifications;
 #[cfg(feature = "rdp")]
 mod rdp;
+mod reconnect_policy;
 #[cfg(feature = "gui")]
 mod streaming_state;
 mod web;

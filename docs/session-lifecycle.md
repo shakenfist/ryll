@@ -169,6 +169,13 @@ machine lands in `Modal(Generic { latest_error })`. The
 `latest_error` field carries the most recent attempt's
 failure string into the modal body.
 
+The rules themselves (`RECONNECT_BACKOFF_SECS`,
+`MAX_RECONNECT_ATTEMPTS`, `RECONNECT_CLUSTER_RESET`, and
+`next_step()`, which returns `RetryAfter(d)` or
+`GiveUp(Exhausted | Ticket(..))`) are in
+`ryll/src/reconnect_policy.rs`; `ReconnectState` only turns
+their answer into a state.
+
 A `last_modal_at: Option<Instant>` field tracks when the
 modal last opened; further disconnects within 5 minutes
 skip the retry budget and go straight back to Modal — a
@@ -245,8 +252,9 @@ The `Modal` variant carries one of four discriminants:
   since nothing was consumed that ryll knows of.
 
 `ReconnectPolicy::forbid_retry(now_wall)` consults the two
-ticket-related `Config` fields and returns the appropriate
-`ModalVariant` when retry would be doomed. The state-machine
+ticket-related `Config` fields and says why retry would be
+doomed; the GUI maps that onto the matching `ModalVariant`.
+The state-machine
 transition consults it first, so a single-use ticket
 disconnects directly to Modal without burning the budget.
 

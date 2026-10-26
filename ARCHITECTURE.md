@@ -135,7 +135,7 @@ ryll/src/
 │   │                    #   connection lifecycle, egui trait impls
 │   ├── notification_snapshots.rs
 │   │                    #   NotificationSnapshotStore
-│   ├── reconnect.rs     #   ReconnectState / ReconnectPolicy, modal variants
+│   ├── reconnect.rs     #   ReconnectState, modal variants
 │   ├── resize.rs        #   Auto-fit and outgoing-resize decisions
 │   ├── session_init.rs  #   SessionInitialized classification, respawn limit
 │   └── stats.rs         #   Statistics, bandwidth/latency trackers
@@ -152,6 +152,7 @@ ryll/src/
 │                        #   keyed by surface
 ├── input_egui.rs        # egui::Key → LogicalKey adapter
 ├── notifications.rs     # NotificationStore + NotificationStoreSink
+├── reconnect_policy.rs  # SPICE retry rules (backoff, ticket, flap); no GUI dep
 ├── settings.rs          # is_verbose() gate
 ├── streaming_state.rs   # Derived state for the streaming status-bar
 │                        #   indicator and the flap heuristic

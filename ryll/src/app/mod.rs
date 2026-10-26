@@ -35,6 +35,7 @@ use crate::notifications::{
     self as notifications, register_gap_notification_observer, NotificationEntry,
     NotificationSource, NotificationStore, SharedNotifications,
 };
+use crate::reconnect_policy::{ReconnectPolicy, MAX_RECONNECT_ATTEMPTS};
 use crate::settings;
 use crate::streaming_state::{self, StreamingState};
 use shakenfist_spice_protocol::link::H264Offer;
@@ -60,8 +61,8 @@ mod ui_state;
 use agent_state::{mac_paste_chord, paste_hint, AgentState};
 use notification_snapshots::NotificationSnapshotStore;
 use reconnect::{
-    format_expiry_local, modal_variant_notification, ModalVariant, ReconnectPolicy, ReconnectState,
-    MAX_RECONNECT_ATTEMPTS,
+    forbid_retry_modal, format_expiry_local, modal_variant_notification, ModalVariant,
+    ReconnectState,
 };
 use resize::{
     auto_fit_size_acceptable, compute_auto_resize, compute_outgoing_resize, is_primary_surface,
@@ -3271,7 +3272,9 @@ impl eframe::App for RyllApp {
             // Modal{TicketExpired}, bypassing the remaining
             // attempts.
             if matches!(self.reconnect_state, ReconnectState::Pending { .. }) {
-                if let Some(variant) = self.reconnect_policy().forbid_retry(SystemTime::now()) {
+                if let Some(variant) =
+                    forbid_retry_modal(&self.reconnect_policy(), SystemTime::now())
+                {
                     info!(
                         "app: ticket policy now forbids retry mid-Pending; \
                          transitioning to Modal directly"

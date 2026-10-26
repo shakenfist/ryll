@@ -629,6 +629,12 @@ To be filled in by step 6.
   sentence, which takeover made false. Six mutants, all killed:
   `/tmp/claude-1000/-srv-kasm-profiles-mikal-vscode-src-shakenfist-ryll/a49e0447-bf0e-486b-a6d9-a7d93594be3f/scratchpad/p05/step1/mutate.py`
   (session scratchpad, not kept).
+- **Step 2** (Sonnet, medium effort) put the rules in
+  `ryll/src/reconnect_policy.rs`: `next_step()` returns a retry
+  delay or a reason to give up, and the GUI's
+  `ReconnectState::on_disconnect` now calls it. The management
+  session checked the state machine case by case against the old
+  code. Eight mutants, all killed (`.../p05/step2/mutate.sh`).
 
 ## Future work
 
