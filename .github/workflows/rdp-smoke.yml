@@ -1,0 +1,83 @@
+# Builds ryll with the default-off `rdp` feature and runs
+# tools/rdp-smoke.py's seven checks: FreeRDP under Xvfb against
+# `ryll --rdp` against the UEFI latency guest in QEMU, all inside the
+# image tools/rdp-smoke/Dockerfile builds. See "The RDP smoke lane" in
+# docs/ci.md.
+#
+# Deliberately not a gate. It runs nightly against develop, to build a
+# flake record, and on demand. Its pull_request trigger is filtered to
+# this file alone, so that a change to the lane runs the lane before it
+# merges (a workflow cannot be dispatched or scheduled until it is on
+# develop), but pull requests that touch the RDP code do not book an `l`
+# runner for it. A required check that is path-filtered never reports on
+# other pull requests and blocks them forever, the reason mermaid-lint.yml
+# and proxmox-functional.yml are advisory too ("It is deliberately not a
+# gate" in docs/ci.md). docs/ci.md also says what record the lane needs
+# before it is proposed for the smoke tier.
+#
+# No fork guard, unlike proxmox-functional.yml: this lane uses no
+# credential and creates nothing outside its runner.
+name: RDP smoke
+
+on:
+  schedule:
+    # Daily at 14:40 UTC. No other scheduled workflow uses that hour,
+    # it is clear of fuzz.yml's 12:00 run and its ninety-minute budget,
+    # it is outside the busiest merge queue hours (roughly 19:00-04:00
+    # UTC), and :40 is clear of renovate.yml's hourly :00.
+    - cron: '40 14 * * *'
+  workflow_dispatch:
+  pull_request:
+    branches: [develop]
+    paths:
+      - '.github/workflows/rdp-smoke.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  rdp-smoke:
+    name: RDP smoke
+    # debian-13-docker because the build runs in the devcontainer and the
+    # lane in its own container (docs/ci.md, "Build network isolation");
+    # l because the release build is l-sized, as build-linux's is.
+    runs-on: [self-hosted, vm, debian-13-docker, l]
+    timeout-minutes: 60
+    # A pull request or a dispatch supersedes an earlier run on its ref.
+    # A nightly does not cancel the nightly before it, which may still be
+    # waiting for an `l` runner: cancelling pending runs would leave the
+    # flake record with gaps exactly when the pool is starved. See
+    # "Concurrency" in docs/ci.md and fuzz.yml.
+    concurrency:
+      group: ${{ github.workflow }}-rdp-smoke-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name != 'schedule' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Must stay directly after checkout; see the action for why.
+      - uses: ./.github/actions/cargo-cache
+
+      - name: Build ryll with the rdp feature
+        run: make release-rdp
+
+      # The driver prints a "[rdp-smoke] <check>: PASS/FAIL/SKIP" summary
+      # line per check, and whether QEMU had /dev/kvm. Its logs land
+      # outside the checkout, with the RDP password already redacted.
+      - name: Run the RDP smoke lane
+        # Explicit bash, not the default: only `shell: bash` adds pipefail,
+        # without which the step takes tee's status and could never fail.
+        shell: bash
+        run: |
+          make rdp-smoke RDP_SMOKE_LOGS="${RUNNER_TEMP}/rdp-smoke" \
+              2>&1 | tee "${RUNNER_TEMP}/rdp-smoke.log"
+
+      - name: Upload the RDP smoke lane logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rdp-smoke-logs
+          path: |
+            ${{ runner.temp }}/rdp-smoke.log
+            ${{ runner.temp }}/rdp-smoke/*.log
+          retention-days: 30
+          if-no-files-found: ignore

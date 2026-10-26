@@ -664,9 +664,33 @@ To be filled in by step 6.
   a new surface, and Ctrl+C exiting in 0.03 s. It also found that
   `make test-qemu` takes its port and paths as make arguments,
   not environment variables, which steps 5 and 6 rely on.
+- **Step 5** (Opus, high effort) scheduled the lane at 14:40 UTC.
+  It took OVMF from the smoke image rather than mounting the
+  host's, since runners need not have it. It added two oracles
+  beyond decision 8: every colour FreeRDP shows must match the
+  guest's own QMP `screendump`, which also tells a guest that
+  never booted (a harness failure) from a ryll defect; and the
+  lane fails if ryll prints the password anywhere but its launch
+  line. Both kept. There is no fake ryll to run the driver
+  against, as `tools/test-proxmox-smoke.sh` has, because there is
+  no cheap stand-in for an X server and an RDP client; instead
+  `tools/test-rdp-smoke.py` unit-tests its pure parts from
+  pre-commit. `release-rdp` shares `target/release` with
+  `release` and copies its binary out; every local consumer of
+  `target/release/ryll` rebuilds through `release` first, so the
+  sharing is harmless. Deliberate breaks, each built from a copy
+  of the tree: dropping every input event failed `input`;
+  removing the old connection's `lose()` failed `takeover`; a
+  supervisor that gives up after any session failed
+  `spice-reconnect`. Each time every earlier check passed
+  (`.../p05/step5/breaks.py`). Local runs took 32 to 38 s warm,
+  and one without `/dev/kvm` also passed.
 
 ## Future work
 
+- Reporting a red nightly of the RDP smoke lane, as `fuzz.yml`
+  files an issue for its failures; today the run history is the
+  only record.
 - Sending an RDP client's resize request made during an outage
   again once SPICE is back; it is dropped today.
 
