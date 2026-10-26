@@ -573,39 +573,66 @@ this plan.
 
 ## Definition of done
 
-- [ ] `grep -n 'server.run()' shakenfist-spice-rdp/src/server.rs`
+- [x] `grep -n 'server.run()' shakenfist-spice-rdp/src/server.rs`
       finds nothing, and `grep -n 'run_connection'` there finds
       the per-connection call.
-- [ ] The loopback tests for reconnect, takeover, a
+- [x] The loopback tests for reconnect, takeover, a
       wrong-password second client, the pre-auth deadline and
       shutdown with a client connected pass under `make test`.
-- [ ] `grep -rn 'RECONNECT_BACKOFF_SECS' ryll/src` finds the
+- [x] `grep -rn 'RECONNECT_BACKOFF_SECS' ryll/src` finds the
       constant outside `ryll/src/app/`, and `cargo build
       --no-default-features -p ryll` (through the devcontainer)
       compiles that module.
-- [ ] `ryll/src/rdp.rs`'s supervisor has unit tests for each
+- [x] `ryll/src/rdp.rs`'s supervisor has unit tests for each
       sequence in brief 4, and they pass.
-- [ ] Every mutation listed in briefs 1 to 4 is killed, and
+- [x] Every mutation listed in briefs 1 to 4 is killed, and
       every deliberate break in brief 5 fails the check it
       should; the scripts' paths and counts are in *Execution
       notes*.
-- [ ] `make rdp-smoke` passed ten times in a row on the Kasm
+- [x] `make rdp-smoke` passed ten times in a row on the Kasm
       host, recorded in *Results*.
 - [ ] `rdp-smoke.yml` ran green on the pull request, with its
       link in *Results*, and is in no gate's `needs:` list
       (`grep -n 'rdp' .github/workflows/ci.yml` finds no job).
-- [ ] `docs/ci.md` lists `rdp-smoke.yml` in *Workflow
+- [x] `docs/ci.md` lists `rdp-smoke.yml` in *Workflow
       inventory* and states decision 9's criterion.
-- [ ] Open question 4 has an answer citing *Results*.
-- [ ] `make build`, `make test`, `make lint`, `make
+- [x] Open question 4 has an answer citing *Results*.
+- [x] `make build`, `make test`, `make lint`, `make
       check-windows`, `make package-check` and `pre-commit run
       --all-files` pass.
-- [ ] `git grep -n -i 'phase 5\|decision [0-9]\|survey item' -- shakenfist-spice-rdp shakenfist-spice-renderer/src ryll/src tools .github docs ':!docs/plans'`
+- [x] `git grep -n -i 'phase 5\|decision [0-9]\|survey item' -- shakenfist-spice-rdp shakenfist-spice-renderer/src ryll/src tools .github docs ':!docs/plans'`
       finds nothing.
 
 ## Results
 
-To be filled in by step 6.
+**Local smoke runs, 2026-10-26 (AEDT), Kasm host with `/dev/kvm`.**
+`make rdp-smoke` ran ten times in a row, each under `timeout
+1200`, at HEAD 9d178c0 with the image and build warm. All ten
+passed 7/7, in 32 or 33 s each; the driver itself took 18.0 to
+18.4 s. FreeRDP 3.15.0, QEMU 10.0.13 (Debian 13). A typical
+run's notes: takeover 4.1 s, the old client exiting as the new
+one authenticated; spice-reconnect 4.2 s, the centre darkening
+from #960000 to #490000 0.6 s after QEMU stopped and the new
+guest's frame arriving 1.4 s after it restarted, after one SPICE
+attempt; Ctrl+C exiting 0 in 0.11 s. Nothing was left running
+after the ten runs.
+
+**First CI run.** Pending: recorded once the pull request's
+`rdp-smoke.yml` run finishes.
+
+**Visual check with Mikal, 2026-10-27 (AEDT).** FreeRDP 3 on
+Mikal's desktop against `ryll --rdp` (port 3391) against the
+XFCE desktop guest (`make test-qemu-desktop` with SPICE on 5931
+and private PID, QMP and OVMF variables paths). He confirmed:
+the desktop and input worked in client A; when the guest's QEMU
+was stopped the frame went to half brightness and A stayed
+connected; once QEMU was restarted, ryll's fourth attempt (after
+the 1, 4 and 16 s waits, two refused) reconnected and the new
+guest appeared at full brightness with input working; ryll
+logged 221 input events dropped during the outage; a second
+client B took over, A's window closed and B worked; after B was
+closed cleanly a third client C connected and worked; SIGINT to
+ryll with C connected stopped ryll in 0.10 s and closed C.
 
 ## Execution notes
 
@@ -685,6 +712,15 @@ To be filled in by step 6.
   `spice-reconnect`. Each time every earlier check passed
   (`.../p05/step5/breaks.py`). Local runs took 32 to 38 s warm,
   and one without `/dev/kvm` also passed.
+- **Step 7** (Sonnet, medium effort) ran alongside step 6
+  rather than after it: the user-facing docs did not depend on
+  the run record, and the management session wrote *Results* and
+  ticked the definition of done itself. It found and corrected a
+  sentence in `docs/session-lifecycle.md` saying ryll never
+  auto-reconnects, already wrong for the GUI's backoff.
+- **Step 6** was run by the management session; see *Results*.
+  The visual check needed the desktop guest image downloaded
+  again, as phase 4's worktree had gone.
 
 ## Future work
 
