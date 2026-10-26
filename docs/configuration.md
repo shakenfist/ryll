@@ -104,6 +104,17 @@ to disable the clipboard and leave out `/sound` to disable audio (or give
 `/sound:format:1` to force PCM). In mstsc, use the clipboard and remote
 audio settings on the "Local Resources" tab.
 
+Only one client is served at a time. A client that authenticates takes the
+session over from the one connected, which is disconnected; one that fails
+to authenticate leaves it alone, and a client that has not authenticated
+within 30 seconds of connecting is dropped. If the SPICE connection is lost
+after a session has been established, ryll keeps the RDP listener and the
+connected client up, shows the client the last frame at half brightness,
+and retries SPICE after 1, 4 and 16 seconds. Keyboard and mouse input and
+resize requests made meanwhile are discarded, not replayed. ryll exits when
+the retries are used up or the ticket cannot be used again. See
+[session-lifecycle.md](session-lifecycle.md) for the details.
+
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--rdp` | false | Run as a SPICE → RDP server. A reachability fallback for users with no SPICE client: it loses SPICE features such as USB redirection and folder sharing. Serves one client per session: a new client that authenticates takes the session over and the one connected is disconnected, while a client that fails to authenticate leaves it connected. Prints the address, username, password and certificate fingerprint at launch. Mutually exclusive with `--web` and `--headless`; `--control-socket` works with it |

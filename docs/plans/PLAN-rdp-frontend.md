@@ -516,6 +516,18 @@ cursor, resize, text clipboard and audio playback. Specifically:
    phase 5 runs one IronRDP server per connection. A new
    connection takes over once it has authenticated, which is
    when IronRDP first asks the display handler for updates.
+   - **Answer (phase 5):** takeover as revised: the client that
+     authenticates last wins, but only a client that has
+     authenticated can displace the one being served, so a wrong
+     password disturbs nothing. Only one client at a time may be
+     between connecting and authenticating (others wait
+     unaccepted), and one that has not authenticated within 30
+     seconds is dropped. SPICE loss is handled by auto-reconnect
+     in `--rdp` with the GUI's retry rules, the client keeping
+     its connection and seeing the last frame at half brightness.
+     Both are exercised by the RDP smoke lane
+     ([`docs/ci.md`](../ci.md), "The RDP smoke lane"); the run
+     record is in the phase plan's *Results*.
 5. **Unicode key events.** Mobile clients and some IMEs send
    `UnicodePressed` with no scancode. **Recommendation:**
    drop them with a `warn_once!` in the MVP; map the ASCII
@@ -729,6 +741,17 @@ evidence-based answers in the plan.
   frame arrives, and that an input event reaches the guest.
   Start it advisory, and decide whether it joins the smoke
   tier once it has a flake record.
+
+*What shipped:* `--rdp` reconnects SPICE automatically with the
+GUI's retry rules (moved to `ryll/src/reconnect_policy.rs`),
+and the client sees the last frame darkened meanwhile;
+`shakenfist-spice-rdp` owns its listener and runs one IronRDP
+server per connection, so a client that authenticates takes the
+session over; Ctrl+C is proved with a client connected; and the
+`rdp-smoke` lane (`.github/workflows/rdp-smoke.yml`, nightly and
+manual, advisory) checks all of it against the UEFI latency
+guest. The run record is in the phase plan's *Results*. The
+user-facing behaviour is in `docs/session-lifecycle.md`.
 
 *Corrected by phase 5's survey* (see its *What the survey
 found*):
