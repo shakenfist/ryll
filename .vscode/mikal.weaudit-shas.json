@@ -37,10 +37,6 @@
       "sha": "b2503e3900f29f4d5efefd81ac7680be515b8eb4",
       "date": "2026-10-14"
     },
-    ".github/workflows/mermaid-lint.yml": {
-      "sha": "d5b8377f8a98d3f68fd14469ed4d5be8fece1c6a",
-      "date": "2026-10-05"
-    },
     ".github/workflows/pr-re-review.yml": {
       "sha": "68425cd384443ae15a909832693af1df01414c38",
       "date": "2026-10-05"
