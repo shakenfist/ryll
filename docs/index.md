@@ -86,6 +86,7 @@ both ends of the traffic through the proxy. This would allow:
 - [Installation](installation.md) - Pre-built packages, pip, and building from source
 - [Configuration](configuration.md) - CLI options and .vv file format
 - [Web frontend](web-frontend.md) - Operator guide for `--web` mode
+- [RDP frontend](rdp-frontend.md) - Operator guide for `--rdp` mode
 - [Kasm workspace](kasm-workspace.md) - Packaging the ryll GUI as a Kasm Workspaces image
 - [Control socket protocol](control-socket-protocol.md) - Driving headless sessions from external tools, and how the socket is implemented
 - [Key design decisions](design-decisions.md) - Why ryll is shaped the way it is
@@ -95,7 +96,8 @@ both ends of the traffic through the proxy. This would allow:
 - [Diagnostics and instrumentation](diagnostics.md) - Capture, statistics, snapshots, bug reports
 - [Session lifecycle](session-lifecycle.md) - Reconnection and graceful shutdown
 - [Web mode internals](web-mode-internals.md) - Encoder, WebRTC bridge, and the `--web` relays
-- [Multi-mode feature parity](multi-mode-parity.md) - Which features work in GUI, headless, and web modes
+- [RDP mode internals](rdp-mode-internals.md) - The IronRDP servers, takeover, the display and input handlers, and reconnect
+- [Multi-mode feature parity](multi-mode-parity.md) - Which features work in GUI, headless, web, and RDP modes
 - [Development](development.md) - Building, testing, and contributing
 - [macOS Development](development-macos.md) - Build and test locally on macOS
 - [Continuous integration](ci.md) - The two CI tiers, the merge queue, and where binaries come from

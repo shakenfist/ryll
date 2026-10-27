@@ -510,6 +510,19 @@ To be filled in by step 5.
   traffic ring buffer, PING samples and `--intimate` in Web; the
   headless reconnect cell called intrinsic), left for an issue
   rather than changed here.
+- **Step 4** (Sonnet, medium effort) also fixed the positional
+  `.vv` example in `docs/features.md`, a third instance beside the
+  README's, which it was asked to fix; `docs/web-frontend.md`'s
+  stays for the issue. The management session's brief asked it to
+  remove a duplicated *Success criteria* heading that does not
+  exist: the duplicate was an artefact of two overlapping extracts
+  in the survey. The review rewrapped a paragraph in
+  `ARCHITECTURE.md` and cut "mstsc" from its mode table's client
+  column, since mstsc is untested. The step noted that
+  `shakenfist-spice-rdp/src/lib.rs`'s module docs still name
+  mstsc and the platform apps as served clients; that is a doc
+  comment in code, so it joins step 5's issue about the RDP help
+  text.
 
 ## Future work
 
