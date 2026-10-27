@@ -389,9 +389,10 @@ whole run, but `run_connection` consumes its channels, so every SPICE
 attempt needs new ones. `SessionLink` joins the two.
 
 - **Per-attempt channels.** `SpiceAttempts::run` gives each attempt its
-  own event, input and resize channels and its own `SessionState`. USB
-  and WebDAV channels are created closed, since an RDP client cannot drive
-  them, and paste is off.
+  own event, input and resize channels and its own `SessionState`. The
+  USB and WebDAV command channels are created closed, since an RDP client
+  cannot drive them; disks and a share given on the command line are
+  still passed to every attempt. Paste is off.
 - **Input and resize.** The fixed queues the RDP handlers and the control
   socket share are drained by two `relay` tasks, which forward to
   whichever attempt the link's route watch names and drop (counting)

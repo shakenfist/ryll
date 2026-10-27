@@ -6,7 +6,8 @@ SPICE one. One client is served at a time.
 
 It is a reachability fallback, not a better path. The session is transcoded
 from SPICE to RDP on the machine running ryll, which costs CPU there, and
-SPICE features such as USB redirection and folder sharing do not cross it.
+the RDP client cannot use SPICE features such as USB redirection and folder
+sharing.
 If you can run a SPICE client, run one. If all you have is a browser, use
 [`--web`](web-frontend.md).
 
@@ -158,7 +159,12 @@ its "Local Resources" tab.
 
 ## What is lost
 
-- **USB redirection and folder sharing**: an RDP client cannot drive them.
+- **USB redirection and folder sharing from the client**: the RDP client
+  cannot pass its own USB devices or folders to the guest. ryll's own
+  `--usb-disk`, `--usb-disk-ro`, `--share-dir` and `--share-dir-ro` are
+  passed to the SPICE session as in the other modes, giving the guest a disk
+  image or a directory from the machine running ryll; that has not been
+  tested through `--rdp`.
 - **Unicode key events**: some clients, mobile ones in particular, send a
   character with no scancode. SPICE input is scancodes only, so ryll drops
   them and logs a warning once: `RDP input: the client sent a Unicode key

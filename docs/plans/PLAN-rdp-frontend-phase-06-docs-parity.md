@@ -491,6 +491,25 @@ To be filled in by step 5.
   counts that are kept but never reported (`input.rs:203-212`,
   and `relay`'s return value in `ryll/src/rdp.rs`, discarded
   when the task is aborted).
+- **Step 3** (Opus, high effort) filled 118 RDP cells (61
+  available, 13 partial, 15 missing, 29 n/a — intrinsic) and an
+  eleven-row *RDP frontend* section, with a check script that
+  asserts five cells per row and an allowed verdict in every RDP
+  cell. It found that `--usb-disk`, `--usb-disk-ro`,
+  `--share-dir` and `--share-dir-ro` reach the session in `--rdp`
+  as in headless (`run_rdp` passes them to every attempt), which
+  contradicted the guide's *What is lost*, the configuration
+  paragraph, the crate README and the internals page, all of
+  which said the mode loses them. The management session
+  confirmed it in the code and reworded all five to say the RDP
+  client cannot pass its own devices or folders while ryll's own
+  flags still work, untested through `--rdp`; the `--rdp` help
+  text in `ryll/src/config.rs:285` says the same wrong thing and
+  goes in step 5's issues. The step also reported Web and
+  Headless cells it believes are stale (USB, WebDAV, snapshots,
+  traffic ring buffer, PING samples and `--intimate` in Web; the
+  headless reconnect cell called intrinsic), left for an issue
+  rather than changed here.
 
 ## Future work
 
