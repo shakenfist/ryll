@@ -1,0 +1,5 @@
+# The example launch output in the --rdp operator guide shows what a
+# generated RDP password looks like. "aB3dE6gH9jK2mN5pQ8sT1vWx" is made
+# up for the example and was never a credential; gitleaks's
+# generic-api-key rule matches it because it follows "password:".
+dca13de84222713f02124117ff1bfd76314f1034:docs/rdp-frontend.md:generic-api-key:54
