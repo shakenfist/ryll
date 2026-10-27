@@ -590,7 +590,7 @@ cursor, resize, text clipboard and audio playback. Specifically:
 | 3. Cursor and resize | [PLAN-rdp-frontend-phase-03-cursor-resize.md](PLAN-rdp-frontend-phase-03-cursor-resize.md) | Complete | c9a763d |
 | 4. Clipboard and audio | [PLAN-rdp-frontend-phase-04-clipboard-audio.md](PLAN-rdp-frontend-phase-04-clipboard-audio.md) | Complete | fe563e1 |
 | 5. Lifecycle and CI: SPICE auto-reconnect, takeover, an `rdp-smoke` lane | [PLAN-rdp-frontend-phase-05-lifecycle-ci.md](PLAN-rdp-frontend-phase-05-lifecycle-ci.md) | Complete | 13044d7, 280c047 |
-| 6. Documentation and parity | - | Not started | |
+| 6. Documentation and parity | [PLAN-rdp-frontend-phase-06-docs-parity.md](PLAN-rdp-frontend-phase-06-docs-parity.md) | In progress | |
 | 7. Push audit | - | Not started | |
 
 Phase plans are written one at a time with `/next-phase`.
@@ -789,6 +789,23 @@ found*):
   the system changes), and a README link and usage example.
 - `docs/rdp-mode-internals.md` if the internals warrant it,
   as `docs/web-mode-internals.md` does for `--web`.
+
+*Corrected by phase 6's survey* (see its *What the survey
+found*):
+
+- `ARCHITECTURE.md`, `README.md` and `docs/index.md` do not
+  mention RDP at all yet; `ARCHITECTURE.md` still counts six
+  crates and three modes.
+- No released binary has `--rdp`: the feature is off in
+  release builds and v0.3.0 predates the crate, which is not
+  on crates.io. The guide documents building from source.
+- Only FreeRDP 3.15.0 has been tested; mstsc never was, so the
+  first success criterion cannot be checked as written.
+- Open question 5 was implemented as recommended but never
+  answered, and phase 5's deferred items are in its own plan
+  only, not in this plan's *Future work*.
+- Kerbside's documentation needs no change: nothing there
+  outside its plans mentions RDP.
 
 ### Phase 7: Push audit
 
