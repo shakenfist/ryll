@@ -589,7 +589,7 @@ cursor, resize, text clipboard and audio playback. Specifically:
 | 2. RDP skeleton: `shakenfist-spice-rdp`, `--rdp`, display, keyboard, mouse, security | [PLAN-rdp-frontend-phase-02-rdp-skeleton.md](PLAN-rdp-frontend-phase-02-rdp-skeleton.md) | Complete | 7b389b1, c314094 |
 | 3. Cursor and resize | [PLAN-rdp-frontend-phase-03-cursor-resize.md](PLAN-rdp-frontend-phase-03-cursor-resize.md) | Complete | c9a763d |
 | 4. Clipboard and audio | [PLAN-rdp-frontend-phase-04-clipboard-audio.md](PLAN-rdp-frontend-phase-04-clipboard-audio.md) | Complete | fe563e1 |
-| 5. Lifecycle and CI: SPICE auto-reconnect, takeover, an `rdp-smoke` lane | [PLAN-rdp-frontend-phase-05-lifecycle-ci.md](PLAN-rdp-frontend-phase-05-lifecycle-ci.md) | In progress | |
+| 5. Lifecycle and CI: SPICE auto-reconnect, takeover, an `rdp-smoke` lane | [PLAN-rdp-frontend-phase-05-lifecycle-ci.md](PLAN-rdp-frontend-phase-05-lifecycle-ci.md) | Complete | 13044d7, 280c047 |
 | 6. Documentation and parity | - | Not started | |
 | 7. Push audit | - | Not started | |
 
