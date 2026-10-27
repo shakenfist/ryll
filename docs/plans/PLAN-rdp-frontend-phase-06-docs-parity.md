@@ -472,6 +472,25 @@ To be filled in by step 5.
   `--rdp` flag row said the certificate fingerprint is always
   printed; it is printed only for a generated certificate, and
   the rewritten row says so.
+- **Step 2** (Opus, high effort) kept every invariant brief 2
+  listed, qualifying two: the display handler's drop rule is
+  IronRDP's contract even though the pinned release only drops
+  the future at the end of a connection, and the mirror clear
+  relies on the backoff outlasting the bus. The management
+  session's review replaced the page's IronRDP version numbers
+  with "the pinned release" and a pointer to the crate's
+  `Cargo.toml`, because `AGENTS.md` forbids quoting dependency
+  versions in `docs/`; this plan's Prompt and brief 2 were wrong
+  to ask for the number. It also corrected the page's claim,
+  repeated from a code comment at `ryll/src/rdp.rs:646`, that
+  printing the launch lines with `println!` keeps the password
+  out of journald: under systemd stdout is the journal, as the
+  guide says. Defects the step found, for step 5's issues: that
+  comment; a comment at `shakenfist-spice-rdp/src/display.rs:644`
+  naming `poll_cursor`, which is `poll_session`; and dropped-input
+  counts that are kept but never reported (`input.rs:203-212`,
+  and `relay`'s return value in `ryll/src/rdp.rs`, discarded
+  when the task is aborted).
 
 ## Future work
 
