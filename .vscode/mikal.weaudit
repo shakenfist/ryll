@@ -188,10 +188,6 @@
       "author": "mikal"
     },
     {
-      "path": "README.md",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/web/cursor.rs",
       "author": "mikal"
     },
