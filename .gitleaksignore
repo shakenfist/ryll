@@ -1,0 +1,9 @@
+# The --rdp operator guide's example launch output once showed a made-up
+# 24-character generated password, which was never a credential;
+# gitleaks's generic-api-key rule matched it because it followed the
+# "password" label. The guide now shows a placeholder, but gitleaks
+# scans history, so the commit that added the example stays listed here.
+# The entry names that commit: a rebase of the branch before it merges
+# would change the hash and need the entry updated (merges here keep
+# commit hashes).
+dca13de84222713f02124117ff1bfd76314f1034:docs/rdp-frontend.md:generic-api-key:54

@@ -70,8 +70,16 @@ ryll --direct 192.168.1.100:5900
 ryll --file connection.vv --headless --cadence
 
 # Serve the session to a web browser
-ryll --web connection.vv
+ryll --web --file connection.vv
+
+# Serve the session to a stock RDP client (needs a build with the `rdp` feature)
+ryll --rdp --file connection.vv
 ```
+
+`--rdp` is a reachability fallback for machines with an RDP client and no SPICE
+client. Releases do not include it yet; see
+[Getting a binary](https://github.com/shakenfist/ryll/blob/develop/docs/rdp-frontend.md#getting-a-binary)
+in the RDP guide.
 
 See [docs/configuration.md](https://github.com/shakenfist/ryll/blob/develop/docs/configuration.md)
 for all command-line options and the .vv file format.
@@ -86,6 +94,7 @@ directory:
 - [Installation](https://github.com/shakenfist/ryll/blob/develop/docs/installation.md) - Pre-built packages and install instructions
 - [Configuration](https://github.com/shakenfist/ryll/blob/develop/docs/configuration.md) - CLI options and .vv file format
 - [Web frontend guide](https://github.com/shakenfist/ryll/blob/develop/docs/web-frontend.md) - Operator guide for `--web` mode
+- [RDP frontend guide](https://github.com/shakenfist/ryll/blob/develop/docs/rdp-frontend.md) - Operator guide for `--rdp` mode
 - [Development](https://github.com/shakenfist/ryll/blob/develop/docs/development.md) - Building, testing, CI, and contributing
 - [macOS Development](https://github.com/shakenfist/ryll/blob/develop/docs/development-macos.md) - Build and test locally on macOS
 - [Troubleshooting](https://github.com/shakenfist/ryll/blob/develop/docs/troubleshooting.md) - Common issues and debugging

@@ -15,22 +15,25 @@ in `docs/`, indexed below.
 | Reconnection and graceful shutdown | [`docs/session-lifecycle.md`](docs/session-lifecycle.md) |
 | Encoder, WebRTC bridge, `--web` relays and lifecycle | [`docs/web-mode-internals.md`](docs/web-mode-internals.md) |
 | Running `--web` as an operator | [`docs/web-frontend.md`](docs/web-frontend.md) |
+| Running `--rdp` as an operator: builds, clients, security modes, service mode | [`docs/rdp-frontend.md`](docs/rdp-frontend.md) |
+| How `--rdp` works inside: the IronRDP servers, takeover, the display and input handlers, the reconnect supervisor | [`docs/rdp-mode-internals.md`](docs/rdp-mode-internals.md) |
 | CLI options, `.vv` format, environment variables | [`docs/configuration.md`](docs/configuration.md) |
 | Building, testing, the local QEMU test server | [`docs/development.md`](docs/development.md) |
-| Feature parity across the three modes | [`docs/multi-mode-parity.md`](docs/multi-mode-parity.md) |
+| Feature parity across the four modes | [`docs/multi-mode-parity.md`](docs/multi-mode-parity.md) |
 
 ## Repository layout
 
-The repository is a Cargo workspace with **6 crates**:
+The repository is a Cargo workspace with **7 crates**:
 
 | Crate | Role |
 |-------|------|
-| `ryll` | The binary: egui GUI, headless runner, CLI, Ctrl+C, trait impls for host-side concerns (capture, notifications, clipboard, USB devices, WebDAV server) |
+| `ryll` | The binary: egui GUI, headless runner, `--web` and `--rdp` runners, CLI, Ctrl+C, trait impls for host-side concerns (capture, notifications, clipboard, USB devices, WebDAV server) |
 | `shakenfist-spice-protocol` | Protocol constants, message framing, link handshake and auth for both the client and server/proxy roles, HTTP CONNECT tunnelling through a proxy such as Proxmox VE's spiceproxy (`proxy`), the `BoundedReader` for panic-free parsing of untrusted input, warn-once gap registry. Fuzz targets for the internet-facing parsers live in `shakenfist-spice-protocol/fuzz/` (a detached workspace, run under nightly `cargo fuzz`) |
 | `shakenfist-spice-compression` | GLZ/LZ/LZ4 + QUIC decompression, LZ4 and JPEG image encoders and the H.264 video encoder for the server role (the non-default `encode` feature, which the renderer enables for its encoder pipeline), shared (byte-bounded) GLZ dictionary (cross-channel), per-platform JPEG decoder selector (ImageIO / WIC / VA-API / libjpeg-turbo / pure-Rust fallback), MJPEG video decoder trait and the H.264 stream decoder (the default-on `h264-decode` feature) |
 | `shakenfist-spice-usbredir` | usbredir wire-format parser and message types |
 | `shakenfist-spice-renderer` | SPICE substrate shared by all frontends: channels, display surface, encoder pipeline, session orchestrator, trait surface for host-side concerns |
 | `shakenfist-spice-webrtc` | WebRTC bridge: wraps an `Arc<dyn PeerConnection>` with a video track, audio track, and control datachannel; consumes `EncodedFrame`s from the renderer's encoder |
+| `shakenfist-spice-rdp` | RDP frontend library behind `ryll --rdp`: IronRDP servers, display, input, clipboard and audio handlers, cursor relay, TLS and NLA. Depends on the renderer, not on the `ryll` binary; reached only through the binary's default-off `rdp` feature |
 
 When invoking cargo from the workspace root, use `-p ryll` to
 target the ryll package (e.g. `cargo build -p ryll`,
@@ -54,13 +57,16 @@ shared core. The supported modes are:
 | GUI | egui / eframe desktop window | Interactive day-to-day VDI access from the operator's own machine |
 | Headless | none (stdout + metrics) | Automated testing, CI, cadence latency probing, scripted USB / WebDAV scenarios |
 | Web | Browser via WebRTC | Interactive VDI access from any browser on the LAN |
+| RDP | Stock RDP client (tested with FreeRDP) | Reaching a desktop from a machine with an RDP client and no SPICE client; a reachability fallback, not a better path. Needs a build with the `rdp` feature |
 
-All three modes ship. A feature is not considered complete when it
-works in only one mode: every feature should be reachable from every
-mode that can physically support it, and intrinsic mode-specific
-features (egui-only UI panels, browser-only clipboard APIs) should be
-documented as such so the parity gaps are visible. The current gap
-list is in `docs/multi-mode-parity.md`.
+All four modes are built from this tree; release builds leave `--rdp`
+out, so it needs a build with the `rdp` feature. A feature is not
+considered complete when it works in only one mode: every feature
+should be reachable from every mode that can physically support it,
+and intrinsic mode-specific features (egui-only UI panels,
+browser-only clipboard APIs) should be documented as such so the
+parity gaps are visible. The current gap list is in
+`docs/multi-mode-parity.md`.
 
 ```mermaid
 flowchart TB
@@ -83,12 +89,23 @@ flowchart TB
 The SPICE substrate (channel handlers, display surface, encoder,
 session orchestrator) lives in `shakenfist-spice-renderer`, which is
 intentionally **egui-free**: no `eframe` or `egui` types appear in its
-source. That is what lets the GUI, headless and `--web` modes share the
-substrate without each frontend dragging in the others' dependencies.
+source. That is what lets the GUI, headless, `--web` and `--rdp` modes
+share the substrate without each frontend dragging in the others'
+dependencies.
 
 `shakenfist-spice-webrtc` is separate again, because the webrtc-rs
 dependency tree (DTLS, SRTP, ICE, SCTP, STUN) is heavy and not every
 consumer of the substrate needs it.
+
+`shakenfist-spice-rdp` is separate for the same reason: IronRDP
+brings `sspi` and `picky` for CredSSP, a large dependency tree that
+GUI, headless and `--web` builds do not need. The binary reaches it
+only through the default-off `rdp` feature, which release builds
+leave out. The crate holds all the IronRDP-facing code, so IronRDP's
+release-to-release API churn stays in one place, and it does not
+depend on the `ryll` binary, so a gateway could serve RDP from SPICE
+sessions without it. See
+[`docs/rdp-mode-internals.md`](docs/rdp-mode-internals.md).
 
 ### Communication upward: ChannelEvent
 
@@ -152,6 +169,8 @@ ryll/src/
 │                        #   keyed by surface
 ├── input_egui.rs        # egui::Key → LogicalKey adapter
 ├── notifications.rs     # NotificationStore + NotificationStoreSink
+├── rdp.rs               # --rdp mode (the `rdp` feature): run_rdp() entry,
+│                        #   SPICE reconnect supervisor, input relay
 ├── reconnect_policy.rs  # SPICE retry rules (backoff, ticket, flap); no GUI dep
 ├── settings.rs          # is_verbose() gate
 ├── streaming_state.rs   # Derived state for the streaming status-bar
