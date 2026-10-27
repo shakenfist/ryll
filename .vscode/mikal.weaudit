@@ -540,10 +540,6 @@
       "author": "mikal"
     },
     {
-      "path": "tools/review-tracking.sh",
-      "author": "mikal"
-    },
-    {
       "path": "tools/web-soak.sh",
       "author": "mikal"
     },
