@@ -451,7 +451,27 @@ To be filled in by step 5.
 
 ## Execution notes
 
-None yet.
+- **Back brief, 2026-10-27 (AEDT).** Mikal confirmed decision 3
+  (the behaviour prose moves to the guide), said FreeRDP is the
+  only client available, so step 5 runs no client session, and
+  gave permission to push and open the pull request once the
+  definition of done passes.
+- **Step 1** (Sonnet, high effort) wrote the guide with a
+  service-mode section that sets `KillSignal=SIGINT`, because
+  ryll handles only SIGINT: `ctrlc` is built without its
+  `termination` feature (`ryll/Cargo.toml:167`,
+  `ryll/src/main.rs:113`), so SIGTERM ends the process with no
+  clean stop. It also found that ryll has no positional `.vv`
+  argument (`ryll/src/config.rs:73` is `--file`), so the
+  `ryll --web connection.vv` examples in `README.md` and
+  `docs/web-frontend.md` fail to parse. Both predate this plan;
+  docs that claim SIGTERM is handled are `docs/web-frontend.md`,
+  `examples/ryll-web.service`, `docs/multi-mode-parity.md` and
+  `docs/session-lifecycle.md`. Issues are filed in step 5; step
+  4 writes the README's `--rdp` example with `--file`. The old
+  `--rdp` flag row said the certificate fingerprint is always
+  printed; it is printed only for a generated certificate, and
+  the rewritten row says so.
 
 ## Future work
 

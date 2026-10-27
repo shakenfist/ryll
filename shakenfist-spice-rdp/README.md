@@ -2,10 +2,11 @@
 
 RDP frontend for the
 [ryll](https://github.com/shakenfist/ryll) SPICE client. It
-serves a SPICE session to stock RDP clients — mstsc on Windows,
-FreeRDP, and the RDP apps on macOS, iOS and Android — so a
-desktop can be reached from machines with no SPICE client. This
-is what backs ryll's `--rdp` mode.
+serves a SPICE session to stock RDP clients, so a desktop can be
+reached from machines with no SPICE client. This is what backs
+ryll's `--rdp` mode. It has been tested with FreeRDP; other
+clients, such as mstsc on Windows and the RDP apps on macOS, iOS
+and Android, are expected to work but have not been tried.
 
 It serves the guest's display, keyboard and mouse input, cursor
 shapes, desktop resize, text clipboard (both ways) and audio.
