@@ -59,13 +59,14 @@ shared core. The supported modes are:
 | Web | Browser via WebRTC | Interactive VDI access from any browser on the LAN |
 | RDP | Stock RDP client (tested with FreeRDP) | Reaching a desktop from a machine with an RDP client and no SPICE client; a reachability fallback, not a better path. Needs a build with the `rdp` feature |
 
-All four modes ship, though release builds leave `--rdp` out. A
-feature is not considered complete when it works in only one mode:
-every feature should be reachable from every mode that can physically
-support it, and intrinsic mode-specific features (egui-only UI panels,
+All four modes are built from this tree; release builds leave `--rdp`
+out, so it needs a build with the `rdp` feature. A feature is not
+considered complete when it works in only one mode: every feature
+should be reachable from every mode that can physically support it,
+and intrinsic mode-specific features (egui-only UI panels,
 browser-only clipboard APIs) should be documented as such so the
-parity gaps are visible. The current gap
-list is in `docs/multi-mode-parity.md`.
+parity gaps are visible. The current gap list is in
+`docs/multi-mode-parity.md`.
 
 ```mermaid
 flowchart TB
@@ -103,7 +104,8 @@ only through the default-off `rdp` feature, which release builds
 leave out. The crate holds all the IronRDP-facing code, so IronRDP's
 release-to-release API churn stays in one place, and it does not
 depend on the `ryll` binary, so a gateway could serve RDP from SPICE
-sessions without it. See [`docs/rdp-mode-internals.md`](docs/rdp-mode-internals.md).
+sessions without it. See
+[`docs/rdp-mode-internals.md`](docs/rdp-mode-internals.md).
 
 ### Communication upward: ChannelEvent
 

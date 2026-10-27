@@ -415,10 +415,11 @@ attempt needs new ones. `SessionLink` joins the two.
 
 `supervise` runs the attempts with the GUI's retry rules from
 `ryll/src/reconnect_policy.rs`;
-[Session lifecycle](session-lifecycle.md#when-spice-is-lost) gives them. On the way out `run_rdp` stops the RDP server first and joins
-it off the runtime's threads with a two-second limit, then cancels the
-renderer and the supervisor, cancels the control socket (which unlinks
-its socket file), and aborts the relays and bus tasks.
+[Session lifecycle](session-lifecycle.md#when-spice-is-lost) gives them.
+On the way out `run_rdp` stops the RDP server first and joins it off the
+runtime's threads with a two-second limit, then cancels the renderer and
+the supervisor, cancels the control socket (which unlinks its socket
+file), and aborts the relays and bus tasks.
 
 **Invariants.**
 

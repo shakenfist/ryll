@@ -105,6 +105,15 @@ repos:
         pass_filenames: false
         files: ^tools/(test-)?rdp-smoke
 
+      # The feature parity matrix: one cell per mode in every row, and a
+      # verdict the page defines at the start of every cell.
+      - id: parity-matrix
+        name: parity matrix shape and verdicts
+        entry: ./tools/check-parity-matrix.py
+        language: script
+        pass_filenames: false
+        files: ^(docs/multi-mode-parity\.md|tools/check-parity-matrix\.py)$
+
   - repo: local
     hooks:
       - id: bidi-check

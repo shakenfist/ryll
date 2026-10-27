@@ -486,7 +486,11 @@ positional `.vv` in `docs/web-frontend.md`),
 [#645](https://github.com/shakenfist/ryll/issues/645) (dropped
 input counts never reported) and
 [#646](https://github.com/shakenfist/ryll/issues/646) (stale Web
-and Headless parity cells).
+and Headless parity cells). The first review of the pull request
+added [#648](https://github.com/shakenfist/ryll/issues/648) (an
+`--rdp-password-file` flag), and the second asked for step 3's
+check to be committed: it is `tools/check-parity-matrix.py`, run
+by pre-commit.
 
 ## Execution notes
 

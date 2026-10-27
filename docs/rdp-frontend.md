@@ -352,9 +352,11 @@ Things a unit has to get right:
 
   Rotate by replacing the files and restarting the unit.
 - **A reusable ticket.** If the `.vv` file's ticket is single-use, ryll cannot
-  reconnect to SPICE and exits when the session is lost, and `Restart=` then
-  starts it against a ticket that has been spent. A service wants a `.vv` file
-  that stays valid, or `--direct` with `--password-file`.
+  reconnect to SPICE and exits when the session is lost. If the session ended
+  with an error, `Restart=on-failure` then starts it against a ticket that has
+  been spent; if it ended cleanly, ryll exits 0 and is not restarted at all.
+  Either way the service stops serving. A service wants a `.vv` file that
+  stays valid, or `--direct` with `--password-file`.
 - **Reaching the client.** `--rdp-host 0.0.0.0` (or the interface address)
   and a firewall rule for the TCP port. RDP is TCP only here.
 

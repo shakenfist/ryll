@@ -61,6 +61,8 @@ Reviewers are expected to keep this matrix honest:
 - When a mode gains or loses a feature, update the cell.
 - When a "missing"/"partial" gap is closed, update the cell and remove
   the source link.
+- `tools/check-parity-matrix.py`, run by pre-commit, checks that every
+  row has a cell per mode and every cell starts with a verdict above.
 
 This document records the baseline; it does not propose fixes. There
 is no standing gap-closure plan — gaps get closed by mode-specific
