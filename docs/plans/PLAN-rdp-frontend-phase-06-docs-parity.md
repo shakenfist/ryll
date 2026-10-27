@@ -189,7 +189,7 @@ master plan's phase 6 section in the planning commit.
    (*Reconnect / Lifecycle*) are checked for the new mode, not
    just extended.
 5. **README gets one example and one link, nothing more.**
-   README is a pitch: `ryll --rdp connection.vv` under *Usage*,
+   README is a pitch: `ryll --rdp --file connection.vv` under *Usage*,
    with a line saying it needs a build with the `rdp` feature,
    and the guide under *Documentation*. No feature bullets.
 6. **Clients: say what was tested, and nothing more.** The

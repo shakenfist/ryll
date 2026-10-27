@@ -78,11 +78,11 @@ window. The operator guide, including reverse-proxy and TLS setup, is
 `--rdp` runs ryll as a SPICE-to-RDP server instead of opening a GUI window, so
 a stock RDP client can drive the guest. It is a reachability fallback for
 users with no SPICE client, and the RDP client cannot use SPICE features such
-as USB redirection and folder sharing. The binary must be built with the `rdp` feature, which
-release builds leave out; one built without it refuses `--rdp` with a clear
-message. The operator guide, including what works, how clients are served,
-certificates and running it as a service, is [rdp-frontend.md](rdp-frontend.md);
-this table is the flag reference.
+as USB redirection and folder sharing. The binary must be built with the
+`rdp` feature, which release builds leave out; one built without it refuses
+`--rdp` with a clear message. The operator guide, including what works, how
+clients are served, certificates and running it as a service, is
+[rdp-frontend.md](rdp-frontend.md); this table is the flag reference.
 
 | Option | Default | Description |
 |--------|---------|-------------|

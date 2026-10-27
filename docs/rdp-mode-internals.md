@@ -204,9 +204,9 @@ nothing if it is dropped at an await, because it runs in a
 awaits are the interval tick and the mirror lock, and both come before
 anything is taken; the take and the queueing happen together in a
 synchronous function, and whatever was taken waits in `self.pending` for
-the next call. In the pinned release a losing branch ends that client loop and drops
-the stream with it, so the next stream's whole-surface send would mask a
-lapse, but the contract is IronRDP's and a change must keep it. The
+the next call. In the pinned release a losing branch ends that client loop
+and drops the stream with it, so the next stream's whole-surface send would
+mask a lapse, but the contract is IronRDP's and a change must keep it. The
 mirror lock is held only for the synchronous step, so the SPICE side is
 never kept waiting on an encode or a network write. The stream never
 returns `None`, which IronRDP treats as the end of the display and
@@ -379,9 +379,10 @@ before it starts a runtime, then starts the RDP server before it dials
 SPICE, so an unbindable port or an unusable certificate fails the launch
 with nothing to tear down. The address, username, password and
 certificate fingerprint go to stdout with `println!`, never through
-`tracing`, so the password stays out of the log file and anything that
-collects ryll's tracing output. It is still on stdout, which a service
-manager may capture: the [operator guide](rdp-frontend.md#service-mode)
+`tracing`, so the password stays out of `/tmp/ryll.log` (written with
+`-v`) and anything that collects ryll's tracing output. It is still on
+stdout, as ryll's console log lines are, and a service manager may capture
+that: the [operator guide](rdp-frontend.md#service-mode)
 says what that means under systemd.
 
 The RDP server and the control socket hold one `SessionHandles` for the
@@ -413,8 +414,8 @@ attempt needs new ones. `SessionLink` joins the two.
   `spice_up`, so the client is shown the darkened frame.
 
 `supervise` runs the attempts with the GUI's retry rules from
-`ryll/src/reconnect_policy.rs`; [Session lifecycle](session-lifecycle.md#when-spice-is-lost)
-gives them. On the way out `run_rdp` stops the RDP server first and joins
+`ryll/src/reconnect_policy.rs`;
+[Session lifecycle](session-lifecycle.md#when-spice-is-lost) gives them. On the way out `run_rdp` stops the RDP server first and joins
 it off the runtime's threads with a two-second limit, then cancels the
 renderer and the supervisor, cancels the control socket (which unlinks
 its socket file), and aborts the relays and bus tasks.

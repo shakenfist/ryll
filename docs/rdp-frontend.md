@@ -7,9 +7,8 @@ SPICE one. One client is served at a time.
 It is a reachability fallback, not a better path. The session is transcoded
 from SPICE to RDP on the machine running ryll, which costs CPU there, and
 the RDP client cannot use SPICE features such as USB redirection and folder
-sharing.
-If you can run a SPICE client, run one. If all you have is a browser, use
-[`--web`](web-frontend.md).
+sharing. If you can run a SPICE client, run one. If all you have is a
+browser, use [`--web`](web-frontend.md).
 
 ## Getting a binary
 
@@ -52,7 +51,7 @@ to type into the RDP client:
 
     RDP: 127.0.0.1:3389
     user: ryll
-    password: aB3dE6gH9jK2mN5pQ8sT1vWx
+    password: <24 random letters and digits>
     security: tls
     certificate SHA-256: 3A:7F:...:C2
 
@@ -336,7 +335,8 @@ Things a unit has to get right:
   service wants `--rdp-password` from an `EnvironmentFile`. Create it
   `root:ryll`, mode `0640`, and keep the password out of the unit file. It is
   still on ryll's command line, so other users of the host can read it from
-  the process list.
+  the process list; there is no password-file flag yet
+  ([issue 648](https://github.com/shakenfist/ryll/issues/648)).
 - **The journal holds the password.** ryll prints the launch lines, password
   included, to standard output, and its log lines go there too. With
   `StandardOutput=journal`, as above, anyone who can read the unit's journal

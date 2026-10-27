@@ -14,7 +14,8 @@ shapes, desktop resize, text clipboard (both ways) and audio.
 It is a reachability fallback, not a better path. The session
 is transcoded from SPICE to RDP on the serving side, which costs
 CPU there, and the RDP client cannot use SPICE features such as
-USB redirection and folder sharing. Users who can run a SPICE client should.
+USB redirection and folder sharing. Users who can run a SPICE
+client should.
 
 The RDP server is
 [IronRDP](https://github.com/Devolutions/IronRDP)'s

@@ -879,7 +879,7 @@ We will know this plan has been implemented successfully
 because the following statements will be true. Status as of
 phase 6, 2026-10-27:
 
-* `ryll --rdp connection.vv` serves the session to FreeRDP
+* `ryll --rdp --file connection.vv` serves the session to FreeRDP
   with display, keyboard, mouse, cursor, resize, text
   clipboard and audio playback.
   **Reworded in phase 6.** The criterion originally also named
