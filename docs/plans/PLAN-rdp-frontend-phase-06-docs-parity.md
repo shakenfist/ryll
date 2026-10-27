@@ -412,42 +412,81 @@ Files: `ARCHITECTURE.md`, `README.md`, `docs/index.md`,
 
 ## Definition of done
 
-- [ ] `docs/rdp-frontend.md` and `docs/rdp-mode-internals.md`
+- [x] `docs/rdp-frontend.md` and `docs/rdp-mode-internals.md`
       exist, and `git grep -n 'operator guide is to come\|the
       column lands with'` finds nothing.
-- [ ] Every row of the parity matrix has five cells and every
+- [x] Every row of the parity matrix has five cells and every
       RDP cell starts with an allowed value (step 3's script,
       re-run by the management session).
-- [ ] `git grep -n -i 'three modes\|three delivery modes\|all
+- [x] `git grep -n -i 'three modes\|three delivery modes\|all
       three modes' -- ':!docs/plans'` finds nothing.
-- [ ] `ARCHITECTURE.md` says seven crates and names
+- [x] `ARCHITECTURE.md` says seven crates and names
       `shakenfist-spice-rdp`, and its *Where the detail lives*
       table links both new pages.
-- [ ] `README.md` links `docs/rdp-frontend.md` and has one
+- [x] `README.md` links `docs/rdp-frontend.md` and has one
       `--rdp` usage example; `docs/index.md` links both new
       pages.
-- [ ] Every `--rdp-*` flag in `ryll/src/config.rs` appears in
+- [x] Every `--rdp-*` flag in `ryll/src/config.rs` appears in
       `docs/configuration.md`'s flag table, and none of the
       behaviour paragraphs moved out of it is still there
       (a grep for "half brightness" and "100 MiB" finds them in
       the guide and not in `docs/configuration.md`).
-- [ ] Every relative link in the changed docs resolves (a
+- [x] Every relative link in the changed docs resolves (a
       script over the changed files, run by the management
       session).
-- [ ] The guide names FreeRDP 3.15.0 as tested and every other
+- [x] The guide names FreeRDP 3.15.0 as tested and every other
       client as untested, unless step 5 tested one; the crate
       README makes no untested claim.
-- [ ] Open question 5 has an answer and open question 8 a
+- [x] Open question 5 has an answer and open question 8 a
       status; the master plan's *Future work* holds every item
       from phase 5's.
-- [ ] `pre-commit run --all-files` passes.
-- [ ] `git grep -n -i 'phase [0-9]\|decision [0-9]\|survey
+- [x] `pre-commit run --all-files` passes.
+- [x] `git grep -n -i 'phase [0-9]\|decision [0-9]\|survey
       item' -- docs ARCHITECTURE.md README.md
       shakenfist-spice-rdp ':!docs/plans'` finds nothing new.
 
 ## Results
 
-To be filled in by step 5.
+**Definition of done, 2026-10-27 (AEDT), at c72a727.** Every
+item passed, checked as follows:
+
+- The guide and internals page exist; the two removed phrases
+  are found only in this plan.
+- Step 3's check script: 118 feature rows, five cells each,
+  RDP verdicts 61 available, 13 partial, 15 missing, 29 n/a.
+- No "three modes" wording outside `docs/plans/`.
+- `ARCHITECTURE.md` says 7 crates, has a `shakenfist-spice-rdp`
+  row, and links both new pages; `README.md` links the guide
+  and has one `ryll --rdp --file` example; `docs/index.md`
+  links both pages.
+- All eight `--rdp*` flags are in `docs/configuration.md`'s
+  table; "half brightness" and "100 MiB" are in the guide and
+  not in `docs/configuration.md`.
+- A link checker over the twelve changed markdown files found
+  every relative link and anchor resolving.
+- The guide lists FreeRDP 3.15.0 as the only tested client; the
+  crate README says other clients are untried.
+- Open question 5 has an answer and question 8 a deferred
+  status; all seven of phase 5's *Future work* items are in the
+  master plan's.
+- `pre-commit run --all-files` passes; the citation grep finds
+  nothing.
+
+**No client session.** Mikal has no RDP client other than
+FreeRDP, so decision 6's optional session did not run.
+
+**Issues filed** for what the steps found and this phase left
+alone, as it changes no code:
+[#642](https://github.com/shakenfist/ryll/issues/642) (SIGTERM
+not handled, docs say it is),
+[#643](https://github.com/shakenfist/ryll/issues/643) (a
+positional `.vv` in `docs/web-frontend.md`),
+[#644](https://github.com/shakenfist/ryll/issues/644) (the
+`--rdp` help text and code comments that overclaim),
+[#645](https://github.com/shakenfist/ryll/issues/645) (dropped
+input counts never reported) and
+[#646](https://github.com/shakenfist/ryll/issues/646) (stale Web
+and Headless parity cells).
 
 ## Execution notes
 
