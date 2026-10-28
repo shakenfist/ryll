@@ -267,16 +267,19 @@ the tag, then `publish-crates` and `github-release` run. Once
 after a partial failure does not hard-error on a file already
 published.
 
-Once `sign-tag` has run, anyone can check the tag's signature. Set
-`GITHUB_REPOSITORY` to `shakenfist/ryll` and run:
+Once `sign-tag` has run, anyone can check the tag's signature:
 
 ```bash
-export GITHUB_REPOSITORY=shakenfist/ryll
 git fetch --tags --force origin
 gitsign verify-tag vX.Y.Z \
-  --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/" \
+  --certificate-identity-regexp '^https://github\.com/shakenfist/ryll/\.github/workflows/release\.yml@refs/tags/v' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
+
+The pattern names `release.yml` running for a `v*` tag: a pattern that
+stops at the repository would accept a signature from any of its
+workflows. [gitsign](https://github.com/sigstore/gitsign) has
+install instructions.
 
 ## The release gate
 
