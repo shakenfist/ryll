@@ -428,6 +428,11 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      # Checking out is what makes the workspace safe to use. This pool
+      # is persistent and a job which skips checkout inherits whatever
+      # the last job left behind, but checkout cleans with
+      # "git clean -ffdx", which removes a stale gitignored dist/ before
+      # the wheels are downloaded into it.
       - uses: actions/checkout@v7
         with:
           persist-credentials: false

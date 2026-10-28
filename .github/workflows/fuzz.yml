@@ -297,9 +297,9 @@ jobs:
             exit 1
           fi
 
-  # Filing runs on the static runner because that is where the rest of
-  # this repository's `gh` calls run (release.yml's version-mismatch
-  # issue); the debian-13-docker image is not known to carry the CLI.
+  # Filing runs on the static runner because that is where this
+  # repository's `gh` calls run; the debian-13-docker image is not known
+  # to carry the CLI.
   report:
     name: Report fuzz failures
     needs: [fuzz]
