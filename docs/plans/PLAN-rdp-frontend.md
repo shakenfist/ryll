@@ -604,7 +604,7 @@ cursor, resize, text clipboard and audio playback. Specifically:
 | 3. Cursor and resize | [PLAN-rdp-frontend-phase-03-cursor-resize.md](PLAN-rdp-frontend-phase-03-cursor-resize.md) | Complete | c9a763d |
 | 4. Clipboard and audio | [PLAN-rdp-frontend-phase-04-clipboard-audio.md](PLAN-rdp-frontend-phase-04-clipboard-audio.md) | Complete | fe563e1 |
 | 5. Lifecycle and CI: SPICE auto-reconnect, takeover, an `rdp-smoke` lane | [PLAN-rdp-frontend-phase-05-lifecycle-ci.md](PLAN-rdp-frontend-phase-05-lifecycle-ci.md) | Complete | 13044d7, 280c047 |
-| 6. Documentation and parity | [PLAN-rdp-frontend-phase-06-docs-parity.md](PLAN-rdp-frontend-phase-06-docs-parity.md) | In progress | |
+| 6. Documentation and parity | [PLAN-rdp-frontend-phase-06-docs-parity.md](PLAN-rdp-frontend-phase-06-docs-parity.md) | Complete | 7a5895c |
 | 7. Push audit | - | Not started | |
 
 Phase plans are written one at a time with `/next-phase`.
