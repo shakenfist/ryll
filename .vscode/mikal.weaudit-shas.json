@@ -29,10 +29,6 @@
       "sha": "b9b3936053b8685ef0ae47f656b2f35aa62ba637",
       "date": "2026-10-05"
     },
-    ".github/workflows/fuzz.yml": {
-      "sha": "2f83d312b9fd3bc5399aa16e1ddea91ae68d3337",
-      "date": "2026-09-26"
-    },
     ".github/workflows/manual-build.yml": {
       "sha": "b2503e3900f29f4d5efefd81ac7680be515b8eb4",
       "date": "2026-10-14"
@@ -532,10 +528,6 @@
     "tools/proxmox-smoke.py": {
       "sha": "63a243a0d330982e367945942ef188ef58b4d4e3",
       "date": "2026-10-05"
-    },
-    "tools/report-fuzz-failure.sh": {
-      "sha": "431d9995ae224a161b5793d3b0293bdfbd19ce08",
-      "date": "2026-09-23"
     },
     "tools/report-fuzz-run.sh": {
       "sha": "3b60592ec658db548536a3c9d5989d29c457adc1",

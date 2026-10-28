@@ -360,10 +360,6 @@
       "author": "mikal"
     },
     {
-      "path": "tools/report-fuzz-failure.sh",
-      "author": "mikal"
-    },
-    {
       "path": "tools/report-fuzz-run.sh",
       "author": "mikal"
     },
@@ -409,10 +405,6 @@
     },
     {
       "path": ".gitignore",
-      "author": "mikal"
-    },
-    {
-      "path": ".github/workflows/fuzz.yml",
       "author": "mikal"
     },
     {
