@@ -605,7 +605,7 @@ cursor, resize, text clipboard and audio playback. Specifically:
 | 4. Clipboard and audio | [PLAN-rdp-frontend-phase-04-clipboard-audio.md](PLAN-rdp-frontend-phase-04-clipboard-audio.md) | Complete | fe563e1 |
 | 5. Lifecycle and CI: SPICE auto-reconnect, takeover, an `rdp-smoke` lane | [PLAN-rdp-frontend-phase-05-lifecycle-ci.md](PLAN-rdp-frontend-phase-05-lifecycle-ci.md) | Complete | 13044d7, 280c047 |
 | 6. Documentation and parity | [PLAN-rdp-frontend-phase-06-docs-parity.md](PLAN-rdp-frontend-phase-06-docs-parity.md) | Complete | 7a5895c |
-| 7. Push audit | - | Not started | |
+| 7. Push audit | [PLAN-rdp-frontend-phase-07-push-audit.md](PLAN-rdp-frontend-phase-07-push-audit.md) | In progress | |
 
 Phase plans are written one at a time with `/next-phase`.
 Phase 1 has merged, so Kerbside spike step 3b can build on it
