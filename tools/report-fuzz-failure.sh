@@ -374,8 +374,7 @@ if [ -n "${EXISTING}" ]; then
     exit 0
 fi
 
-# Labelled to match the one other place this repository files an issue
-# from CI, release.yml's version-mismatch report, so automated issues
-# are filterable as a class.
+# Labelled "bug" so that issues filed automatically from CI can be
+# filtered as a class.
 echo "filing a new issue: ${TITLE}"
 "${GH}" issue create --title "${TITLE}" --label "bug" --body-file "${BODY_FILE}"
