@@ -383,3 +383,192 @@ for p in rdp client tooling docs whole; do
     awk '/^\+/ && !/^\+\+\+/ {a++} /^-/ && !/^---/ {d++} END {printf "%6d +, %5d -\n", a, d}' "$out/$p.patch"
 done
 ```
+
+## Execution record: 2026-10-28 (AEDT)
+
+### Back brief answers
+
+Mikal confirmed the plan as written. Findings land in a separate
+pull request after this one, and this session may push this
+branch and open its pull request once the definition of done
+passes.
+
+### Departures from the plan
+
+- The management session assembled the patches itself, because
+  the appendix script is one command. The gate held: no file
+  uncovered or duplicated, and `whole` at 17 969 inserted and
+  1 082 deleted lines, with each area's figure matching the
+  survey table. The step 1 sub-agent ran only wave 1.
+- Steps 1 and 2 ran in parallel, since both only read. Step 3's
+  six agents started once step 2 had reported, as its row asks,
+  while wave 1 was still running. Steps 4 and 5 also ran in
+  parallel.
+- Before accepting four findings, the management session
+  checked them against the code: S1 (in ryll and in the pinned
+  IronRDP source), the clipboard `warn!` arms (W3), the andris
+  breakage (A1) and the unbounded cursor cache (R3).
+
+### Step 1: wave 1, exit 0
+
+`AUDIT_BASE=4696a95^1 AUDIT_HEAD=7a5895c tools/audit/wave1.sh`
+exited 0. pre-commit, rustfmt and clippy, and `cargo test
+--workspace` all passed: 1 712 tests, none failed. The println
+and mechanical checks passed. The advisory long-line check made
+four hits. One was in a file outside the range. The other three
+predate the plan (`d723074`, `9dddbc5` and `2e71840`, none
+inside a phase merge). Wave 1 raised nothing for this plan.
+
+### Step 2: wave 2 mechanical, and style
+
+- Filtered to the audit patch, after dropping seven foreign
+  hits, all in `ryll/src/config.rs` tests:
+  - no TODO, FIXME or HACK;
+  - no new `unsafe`;
+  - 176 new tests across 60 files;
+  - five new dead-code allows, all feature-gated.
+- About 60 new `unwrap`/`expect` lines, all in test code except
+  one `expect` on a semaphore that is never closed.
+- The style review raised W1 to W5 below. It found no
+  secrets in any log line.
+
+### Step 3: judgment agents
+
+| Agent | Area | Model | Findings |
+|-------|------|-------|----------|
+| 2a-1 code quality | `rdp` | sonnet, medium | Q1-Q9, all advisory |
+| 2a-2 code quality | `client`, `tooling` | sonnet, medium | C1-C11 advisory, and the andris breakage (A1) |
+| 2b tests | whole | sonnet, medium | T1-T6, all advisory |
+| 2c docs | `docs` | sonnet, medium | D1-D8, all advisory |
+| 2d-1 security | `rdp` | opus, high | S1 high, S2 medium, S3-S6 low, S7-S8 info |
+| 2d-2 security | `client`, `tooling` | opus, high | R1 medium, R2-R4 low, R5-R9 info |
+
+The RDP security review checked every IronRDP behaviour the
+crate relies on against the pinned sources. The behaviours held
+as the crate assumes:
+
+- security negotiation: a client cannot force standard RDP
+  security or no TLS;
+- the takeover hook runs only after authentication;
+- PDU framing is bounded;
+- display-control layouts are bounded;
+- the handshake timeout spans the whole pre-auth phase.
+
+S1 and S4 are the exceptions, and are being reported to IronRDP
+privately. The review found no `unsafe` code and no panic a
+client can trigger.
+
+The test review mapped every success criterion to a test, except
+three that need a real client and rest on the phases' manual
+checks: audible audio, the visual look of cursors and resize,
+and clients other than FreeRDP.
+
+### Step 4: triage against `develop` at `e49ddce`
+
+None of the audited code has changed since `7a5895c`, so nothing
+had moved or been fixed. The 59 raw findings merge into 53 rows.
+51 are still present, and 2 are already tracked by phase 6's
+issues. The last column gives the decision, recorded in full in
+the master plan's *Items deferred from the push audit*.
+
+| ID(s) | Finding | Source | Severity | Status | Predates | Location on `develop` | Decision |
+|---|---|---|---|---|---|---|---|
+| S1 | In TLS mode an unauthenticated peer can make ryll buffer unbounded data before the password is checked (detail withheld pending a private report to IronRDP); docs claim pre-auth is bounded | 2d-1 | high | still-present | no | shakenfist-spice-rdp/src/server.rs:14-20, :603, :715-718; docs/rdp-frontend.md:462-464 | fix |
+| A1 | Phase 1 gated `for_stream` H.264 behind new `h264-decode`; andris (features encode,jpeg,lz4) panics on `for_stream(3,..).unwrap()` at its next pin bump | 2a-2 | medium | still-present | no | shakenfist-spice-compression/src/video.rs:177-190, Cargo.toml:39; andris/tests/stream.rs:228 | andris#52 |
+| P1/R1/D1 | Nobody decided to publish shakenfist-spice-rdp, yet the release publishes it (6th of 7, after 5 irreversible publishes; name unreserved, token scope unchecked); README and master plan say otherwise | survey, 2d-2, 2c | medium | still-present | partly (non-idempotent re-run predates) | tools/publish-crates.sh:27-37 (:33); shakenfist-spice-rdp/Cargo.toml (no publish=false); shakenfist-spice-rdp/README.md:32-33; docs/releasing.md:51,333; docs/plans/PLAN-rdp-frontend.md:910 | fix (+#654) |
+| R2 | A red nightly rdp-smoke run is reported nowhere a human looks (floor item 2) | 2d-2 | low | still-present | no | .github/workflows/rdp-smoke.yml:28; docs/ci.md:528-612 | fix (docs) |
+| R3 | New MONO/COLOR4 cursor formats make the unbounded cursor_cache ~16x cheaper to fill | 2d-2 | low | still-present | partly (cache predates; formats c9a763d) | shakenfist-spice-renderer/src/channels/cursor.rs:31, :462, :553-600 | fix (+#652) |
+| R4 | rdp-smoke.yml says it "uses no credential" but its runner pool holds /srv/github/id_ci; no fork guard | 2d-2 | low | still-present | no | .github/workflows/rdp-smoke.yml:18-19, :44 | fix |
+| S2 | One pre-auth permit, held up to 30 s; N idle TCP connections delay a real client N x 30 s | 2d-1 | low (was medium) | still-present | no | shakenfist-spice-rdp/src/server.rs:496-504, :534; docs/rdp-frontend.md:462-467 | fix (docs); declined (behaviour) |
+| S3 | Authenticated client that stops reading grows IronRDP's unbounded event channel (~690 MB/h with PCM) | 2d-1 | low | still-present | no | shakenfist-spice-rdp/src/audio.rs:405-412 | declined |
+| S4 | Channel reassembly is not capped before ryll's clipboard cap applies (part of the private IronRDP report) | 2d-1 | low | still-present | no | shakenfist-spice-rdp/src/clipboard.rs:59, :463-477 | declined |
+| S5/W4 | No failed-login limit; constant_time_eq returns early on length; wrong-credential warn! per attempt (keep: shows brute force) | 2d-1, step 2 | low | still-present | no | shakenfist-spice-rdp/src/auth.rs:72-77, :122 | declined |
+| S6 | Confirm Active desktop size reaches the guest unclamped (displaycontrol path is 200..=8192) | 2d-1 | low | still-present | no | shakenfist-spice-rdp/src/display.rs:321-333, :267 | fix |
+| W3/T1 | Clipboard refusal arms log plain warn! on every copy (two share text), and the call site is untested | step 2, 2b | low (was advisory) | still-present | no | shakenfist-spice-rdp/src/clipboard.rs:401-423 | fix |
+| C1 | Renderer public API breaks (UsbDevicesChanged removed; KeyModifiers, PlaybackOutput/PlaybackSink added) need release notes | 2a-2 | advisory | still-present | no | shakenfist-spice-renderer/src/channels/mod.rs:255, :512 (InputEvent); playback_sink.rs:3 | fix |
+| C2 | reconnect_policy module-wide cfg_attr(not(gui), allow(dead_code)), module declared unconditionally | 2a-2 | advisory | still-present | no | ryll/src/reconnect_policy.rs:10; ryll/src/main.rs:11 | fix |
+| C3 | GiveUp::Ticket arm unreachable (forbid_retry_modal checked first), untested | 2a-2 | advisory | still-present | no | ryll/src/app/reconnect.rs:111, :146 | fix |
+| C4 | rdp.rs INPUT/RESIZE_CHANNEL_CAPACITY duplicate web/server.rs | 2a-2 | advisory | still-present | no | ryll/src/rdp.rs:56, :59; ryll/src/web/server.rs:30, :33 | fix |
+| C5 | rdp-smoke.py RETRY_WINDOW hand-copies RECONNECT_BACKOFF_SECS | 2a-2 | advisory | still-present | no | tools/rdp-smoke.py:124 | fix |
+| C6 | rdp-smoke.py is 1 035 lines in one file | 2a-2 | advisory | still-present | no | tools/rdp-smoke.py | declined (#656) |
+| C7 | check-slim-renderer.sh FEATURES/BANNED hand-maintained | 2a-2 | advisory | still-present | no | tools/check-slim-renderer.sh:33, :36 | fix |
+| C8 | Workspace rust-version 1.89 (for IronRDP) raises every published crate's MSRV; andris declares 1.88 | 2a-2 | advisory | still-present | no | Cargo.toml:27 | declined |
+| C9 | event_bus start()/label docs name web and headless only; rdp is a third caller | 2a-2 | advisory | still-present | no | shakenfist-spice-renderer/src/event_bus.rs:6-7, :79 | fix |
+| C10 | Forced release builds MouseUp by hand rather than PointerTranslator::button | 2a-2 | advisory | still-present | partly (loop predates; plan touched :4589) | ryll/src/app/mod.rs:4587-4600 | fix |
+| C11 | default_channel_caps(Playback) now Opus-only for every consumer; andris comment goes stale | 2a-2 | advisory | still-present | no | shakenfist-spice-protocol/src/link.rs:711 | declined |
+| D2 | rdp crate README quotes IronRDP "0.13" | 2c | advisory | still-present | no | shakenfist-spice-rdp/README.md:22 | fix |
+| D3 | Quick start says SPICE connects before the listener starts; code starts the listener first | 2c | advisory | still-present | no | docs/rdp-frontend.md:49-50; ryll/src/rdp.rs:609-656 | fix |
+| D4 | ARCHITECTURE.md calls MemoryClipboard, control/, surface_mirror, clipboard headless/web only | 2c | advisory | still-present | no | ARCHITECTURE.md:128, :207, :222, :235 | fix |
+| D5 | ARCHITECTURE.md layout tree has no shakenfist-spice-rdp/src/ | 2c | advisory | still-present | no | ARCHITECTURE.md:148-260 | fix |
+| D6 | --rdp help implies the fingerprint is always printed (only when generated); near-miss of #644 | 2c | advisory | still-present | no | ryll/src/config.rs:281-282; ryll/src/rdp.rs:651 | fix |
+| D7 | AGENTS.md "where do I look" has a --web internals row, none for --rdp | 2c | advisory | still-present | no | AGENTS.md:38 | fix |
+| D8 | "What works" omits the middle button forwarded via relative mouse/ainput | 2c | advisory | still-present | no | docs/rdp-frontend.md:129-134; shakenfist-spice-rdp/src/input.rs:439-445 | fix |
+| Q1 | Poisoned-lock recovery copied 7x | 2a-1 | advisory | still-present | no | rdp crate: server.rs:202, :919; display.rs:192; input.rs:142; clipboard.rs:175; audio.rs:218; lib.rs:164 | fix |
+| Q2 | SessionHandles test fixture rebuilt ~10x | 2a-1 | advisory | still-present | no | audio.rs:760; clipboard.rs:539; display.rs:932, :1655; server.rs:961, :998; input.rs:528, :911; auth.rs:178 | declined (#656) |
+| Q3/W5 | release_held re-implements try_send + dropped count with a plain warn! per reconnect instead of SpiceInputHandler::send (count reporting is #645) | 2a-1, step 2 | advisory | still-present | no | shakenfist-spice-rdp/src/server.rs:873-894; input.rs:242 | fix |
+| Q4 | audio.rs and clipboard.rs duplicate per-channel task scaffolding | 2a-1 | advisory | still-present | no | shakenfist-spice-rdp/src/audio.rs:347-510; clipboard.rs:70-300 | declined (#656) |
+| Q5 | Comments longer than the code they explain | 2a-1 | advisory | still-present | no | shakenfist-spice-rdp/src/display.rs:66-95, :474-490, :638-654; server.rs:244-276; input.rs:41-60 | fix |
+| Q6 | Comment names poll_cursor; function is poll_session | 2a-1 | advisory | tracked (#644) | no | shakenfist-spice-rdp/src/display.rs:644 | #644 |
+| Q7 | run_rdp is ~370 lines and a third copy of host scaffolding | 2a-1 | advisory | still-present | no | ryll/src/rdp.rs:460-831 | declined (#656) |
+| Q8 | Decoded and Raw PCM arms identical but for key and message | 2a-1 | advisory | still-present | no | shakenfist-spice-rdp/src/audio.rs:609-656 | fix |
+| Q9 | cfg_attr dead_code allows could say why; server.rs expect is fine | 2a-1 | advisory | still-present | no | shakenfist-spice-renderer/src/channels/playback.rs:111, :148, :213, :220 | fix |
+| T2 | No layout test at 0/65535/u32::MAX (IronRDP bounds 200..=8192, so a test gap, not a missing clamp) | 2b | advisory | still-present | no | shakenfist-spice-rdp/src/display.rs:352-389 | fix |
+| T3 | Stalled-close assertion accepts Ok(0) or Err; no test that a 2nd stalled client waits | 2b | advisory | still-present | no | shakenfist-spice-rdp/tests/loopback.rs:1627, :1653 | fix |
+| T4 | Mouse, wheel and DisplayControl never driven by a real client in tests | 2b | advisory | still-present | no | shakenfist-spice-rdp/tests/loopback.rs | fix |
+| T5 | TLS Debug test checks only "priv_key"; wrong-password test hides an NLA admit in `if let Ok` | 2b | advisory | still-present | no | shakenfist-spice-rdp/src/tls.rs:187-191; tests/loopback.rs:1538 | fix |
+| T6 | check-slim-renderer.sh has no negative test | 2b | advisory | still-present | no | tools/check-slim-renderer.sh | fix |
+| W1 | Log prefixes inconsistent (rdp x: / RDP input: / none) | step 2 | advisory | still-present | no | shakenfist-spice-rdp/src/input.rs:221, :249; auth.rs:113, :122; server.rs; ryll/src/rdp.rs:468, :538 | fix |
+| W2 | warn_once! keys two-part and macro paths vary; STYLEGUIDE.md:182 asks for <channel>:<kind>:<detail> | step 2 | advisory | still-present | no | shakenfist-spice-rdp/src/input.rs:248-480; display.rs:270-298 | fix |
+| R5 | Smoke image FROM debian:13 unpinned; QEMU test image curl -L with no --fail or checksum | 2d-2 | info | still-present | partly (Makefile:532 predates) | tools/rdp-smoke/Dockerfile:19; Makefile:532 | #653 |
+| R6 | Event-bus lag marks all damaged with a plain warn!; lost SurfaceCreated/Destroyed not recovered | 2d-2 | info | still-present | yes (moved from main.rs in 98f1607) | shakenfist-spice-renderer/src/event_bus.rs:125-130 | fix (+#651) |
+| R7 | surface_mirror has no surface-count limit | 2d-2 | info | still-present (existing #627) | yes | shakenfist-spice-renderer/src/surface_mirror.rs:67, :90 | #627 |
+| R8 | raw_samples keeps its peak capacity (~257 MiB) after one large RAW message | 2d-2 | info | still-present | no | shakenfist-spice-renderer/src/channels/playback.rs:1227-1235 | fix |
+| S7/R9/W8 | Args derives Debug including rdp_password (latent); password not zeroized | 2d-1, 2d-2, step 2 | info | still-present | partly (Args and Config Debug with SPICE password predate) | ryll/src/config.rs:64, :312, :526-531 | fix (+#655) |
+| S7b | Password printed to stdout/journal and visible in argv | 2d-1 | info | tracked (#648) | no | ryll/src/rdp.rs:643-648 | #648 |
+| S8 | Ejected client keeps clipboard/audio up to QUIT_GRACE (5 s); docs accurate | 2d-1 | info | still-present | no | shakenfist-spice-rdp/src/server.rs:76, :748 | declined |
+
+Triage changed four severities:
+
+- **S2**, medium to low: the guide already describes the queueing,
+  the listener binds to loopback by default, and S1's fix
+  narrows the window.
+- **W3/T1**, advisory to low: `STYLEGUIDE.md` asks for
+  `warn_once!` on anything a peer can repeat at will.
+- **A1**, rated medium: an outside consumer panics at run time
+  rather than failing to build.
+- **T2**: its "no upper clamp" claim was wrong, since display
+  control bounds layouts. It stands as a test gap.
+
+### Step 5: floor checklist
+
+| Item | Verdict | Evidence |
+|------|---------|----------|
+| 1. Recorded landings | pass | All eight `Merged` commits have two parents |
+| 2. Unattended work reports failure | pass, with caveat | The lane's nightly cron reports only to the run history; that was named only in *Future work*, and `docs/ci.md` now says so too (R2) |
+| 3. No secrets or private addresses | pass | The pre-commit gitleaks hook passed in wave 1. The one `.gitleaksignore` entry is the guide's former example password, never a credential. One RFC 1918 address is a documentation example |
+| 4. Nothing removed still has a consumer | pass, with caveat | kerbside already builds against every phase, and greps for about 20 removed or renamed items found nothing. andris breaks on its next pin bump (A1, andris#52) |
+| 5. Publishing fails closed | pass, with caveat | `make package-check` packages and verifies the RDP crate on every pull request. A crates.io refusal of the new name mid-release does not fail closed (P1/R1), and `propose-release.sh` gains a name check |
+
+### Step 6: decisions
+
+Mikal decided four things:
+
+- `shakenfist-spice-rdp` is published, with the release path
+  hardened.
+- The IronRDP-side cause of S1 and S4 is reported to IronRDP
+  privately rather than in a public issue.
+- andris gets an issue for its next pin bump (andris#52).
+- The findings PR takes the split recorded in the master plan:
+  - 38 rows fixed;
+  - 10 declined with reasons, the four structural refactors
+    tracked together in #656;
+  - 3 filed outside this plan;
+  - 2 already tracked.
+
+Issues filed for what predates the plan: #651 (surface events
+lost to lag), #652 (cursor cache budget), #653 (test image
+download), #654 (resuming a partial release) and #655 (`Config`'s
+`Debug` and the SPICE password).
+
+Rows need code changes, so the plan stays `In progress`. The
+findings pull request sets it `Complete`.

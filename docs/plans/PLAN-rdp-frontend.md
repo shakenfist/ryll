@@ -1019,12 +1019,175 @@ worked these out, and they are recorded here so they survive:
   outage once the session is back; it is dropped today.
 - **Limiting how long one peer can hold `--rdp`'s only
   pre-authentication slot**, for example with per-address
-  limits, for a listener on a non-loopback address.
+  limits, for a listener on a non-loopback address. The push
+  audit (S2, S5) adds two things here. Idle connections queue
+  behind the slot, so N of them delay a real client by N times
+  the handshake timeout, and that is true on loopback as well.
+  Failed logins are not rate-limited either. A fix wants more
+  than one handshake place, a per-address cap, and a backoff
+  after a rejected password.
+- **A write deadline for `--rdp` connections** (push audit S3).
+  An authenticated client that stops reading lets IronRDP's
+  outgoing event queue grow without bound, fastest with PCM
+  audio. Wrapping the stream with a write deadline that ends the
+  connection would bound it.
 - **A cap on `--rdp` reconnects** to a SPICE server that
   accepts the link and drops every session at once; unattended
   it retries every second for ever.
 - **VNC out**, only if a real network is found that allows
   VNC and not SPICE.
+
+### Items deferred from the push audit
+
+Phase 7 audited the eight merges in the Execution table: 85
+files, 17 969 insertions and 1 082 deletions, leaving out the
+plan files and `Cargo.lock`. After duplicates were merged it
+produced 53 findings. The triage table, which locates each one
+in current `develop`, is in
+[PLAN-rdp-frontend-phase-07-push-audit.md](PLAN-rdp-frontend-phase-07-push-audit.md).
+Wave 1 passed (1 712 tests). Every floor checklist item passed,
+three of them with caveats that the findings below cover.
+
+**To fix in the findings pull request** (38):
+
+- Security:
+  - **S1** (high): in TLS mode, the default, an unauthenticated
+    peer can make ryll buffer an unbounded amount of data before
+    the password is checked, for the whole handshake timeout.
+    It can be repeated until ryll runs out of memory. NLA mode
+    is not affected. The fix caps the bytes read from a
+    connection until it authenticates, and corrects the module
+    doc and `docs/rdp-frontend.md`, which say the pre-auth phase
+    is bounded. The library-side cause is being reported to
+    IronRDP privately, so it is not described further here.
+  - **S6**: clamp the desktop size from the client's Confirm
+    Active to the range display control already enforces
+    (200 to 8192) before it reaches the guest.
+  - **R3**: cap cursor dimensions at a size real cursors never
+    reach. The cache's missing byte budget predates the plan
+    and is #652.
+  - **R4**: add the fork guard the mermaid lane got in
+    `38ed77c` to `rdp-smoke.yml`, and correct its comment. The
+    lane's runner pool holds the CI mesh key.
+  - **R8**: return `raw_samples` to a small capacity after a
+    large RAW message.
+  - **S7/R9/W8**: hold `--rdp-password` in a type whose `Debug`
+    is redacted. `Config`'s SPICE password, which predates the
+    plan, is #655.
+  - **W3/T1**: log the clipboard's refusals of client text with
+    `warn_once!`, and test that the cap is wired in at the call
+    site.
+  - **S2**: correct the guide's account of the pre-auth slot.
+    Queued connections stack, so the wait is N handshake
+    timeouts. The behaviour change is declined below.
+- Release path:
+  - **P1/R1/D1**: `shakenfist-spice-rdp` is published, as Mikal
+    decided. `tools/propose-release.sh` checks, before tagging,
+    that every crate name is ours or unclaimed. The crate README
+    and this plan's success criterion stop saying it is not
+    published. A partial release that cannot be re-run predates
+    the plan and is #654.
+  - **C1**: the findings PR lists phase 1's breaking renderer
+    API changes under a "Breaking changes" heading, as
+    `docs/releasing.md` asks, so the release notes pick them up.
+  - **R2**: `docs/ci.md` says that a red nightly of the lane is
+    reported nowhere but the run history. The reporting job
+    itself stays in *Future work*.
+- Code:
+  - **Q1**: one shared poisoned-lock helper in place of seven
+    copies.
+  - **Q3/W5**: `release_held` goes through the input send path
+    rather than duplicating it.
+  - **Q5**: trim the comments that are longer than the code they
+    explain.
+  - **Q8**: merge the identical decoded and raw PCM arms.
+  - **Q9**: say which feature each `cfg_attr` dead-code allow is
+    for.
+  - **C2**: compile `reconnect_policy` only for the features that
+    use it, and drop its blanket allow.
+  - **C3**: remove the ticket check that can never be reached.
+  - **C4**: share the input and resize queue capacities between
+    `--web` and `--rdp`.
+  - **C5**: test that `tools/rdp-smoke.py`'s retry window matches
+    the backoff in `reconnect_policy.rs`.
+  - **C7**: check `tools/check-slim-renderer.sh`'s feature list
+    against `cargo metadata`.
+  - **C9**: the event bus docs name `--rdp` as a caller.
+  - **C10**: the GUI's forced release uses
+    `PointerTranslator::button`.
+  - **R6**: the mirror's lag message becomes `warn_once!`.
+    Surface events lost to lag predate the plan and are #651.
+  - **W1**, **W2**: one log prefix per RDP module, and
+    three-part `warn_once!` keys. No release has shipped the
+    current keys, so renaming them costs no one a grep.
+- Docs:
+  - **D2**: the crate README stops quoting the IronRDP version.
+  - **D3**: the guide's quick start says the listener starts
+    before SPICE connects.
+  - **D4**, **D5**: `ARCHITECTURE.md` names `--rdp` among the
+    users of the clipboard, control socket and surface mirror,
+    and gains a layout tree for the RDP crate.
+  - **D6**: `--rdp`'s help text says the fingerprint is printed
+    only for a generated certificate.
+  - **D7**: `AGENTS.md`'s lookup table gains a row for
+    `docs/rdp-mode-internals.md`.
+  - **D8**: the guide's *What works* includes the middle button.
+- Tests:
+  - **T2**: extreme layout sizes, pinning the display-control
+    bounds and the S6 clamp.
+  - **T3**: a tighter stalled-connection assertion, and a second
+    stalled client that waits while the first holds the slot.
+  - **T4**: mouse, wheel and display control driven through the
+    loopback IronRDP client.
+  - **T5**: the TLS `Debug` test checks for key bytes, not a
+    field name, and the wrong-password helper asserts NLA's
+    refusal.
+  - **T6**: a negative test for `check-slim-renderer.sh`.
+
+**Declined** (10):
+
+- **Q2, Q4, Q7, C6**: structural refactors (a shared test
+  fixture, shared per-channel task scaffolding, shared host
+  scaffolding across the three server modes, and splitting
+  `tools/rdp-smoke.py`). They change no behaviour, and each is
+  larger than the rest of the findings PR. They are tracked
+  together in #656.
+- **S3**: a write deadline is a design change to how the crate
+  wraps its stream. It is in *Future work*.
+- **S4**: IronRDP reassembles static and dynamic channel data
+  without the limit ryll's clipboard applies afterwards. That is
+  part of the private report to IronRDP; ryll's own cap still
+  bounds what reaches the guest.
+- **S5**: rate-limiting failed logins belongs with the
+  per-address limits in *Future work*. The early return on a
+  length mismatch reveals the length of a password the operator
+  chose or ryll generated, at network timing resolution. It is
+  not worth a constant-time dependency.
+- **S8**: an ejected client keeps its clipboard and audio feeds
+  until its server is dropped. That takes at most the 5 second
+  quit grace, and the docs promise only that input and display
+  stop.
+- **C8**: moving to per-crate `rust-version`s would let andris
+  stay on 1.88. Whether the other crates still build on 1.88
+  cannot be checked without a 1.88 toolchain, so andris raises
+  its MSRV instead (andris#52).
+- **C11**: playback now offers Opus alone, deliberately. ryll
+  cannot decode CELT, and `5364638` pins it with a test. The
+  stale comment downstream is in andris#52.
+
+**Filed as issues, outside this plan** (3):
+
+- **A1**, andris#52 (medium): the next andris pin bump must
+  enable `h264-decode`, or two of its tests panic.
+- **R5**, #653: the test image download has no `--fail` or
+  checksum. Pinning the smoke image's Debian base is declined,
+  as it follows the devcontainer's convention.
+- **R7**, #627: the surface mirror has no surface count limit.
+  This was already filed by the decoder hardening audit.
+
+**Already tracked** (2): **Q6**, the stale `poll_cursor`
+comment, by #644; **S7b**, the password on stdout and in argv,
+by #648.
 
 ### Bugs fixed during this work
 
