@@ -23,6 +23,17 @@
         "verified": true
       }
     },
+    "tools/sign-release-tag.sh": {
+      "sha": "cc23ebc95fbcdeec23224323fe9bd9c36a85e585",
+      "date": "2026-10-30",
+      "imported": {
+        "repo": "shakenfist/development",
+        "reviewer": "mikal",
+        "path": "templates/release-automation-rust/sign-release-tag.sh",
+        "commit": "a2837f2dc7cf5fd792fca58e98c40e70a4d126bc",
+        "verified": true
+      }
+    },
     "tools/tag-release.sh": {
       "sha": "16a49ce3cf6bfa3420093406c981401eaab19c90",
       "date": "2026-10-22",
