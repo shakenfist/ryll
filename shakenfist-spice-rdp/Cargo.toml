@@ -49,7 +49,7 @@ ironrdp-displaycontrol = "0.8"
 # none of which `ironrdp-server` re-exports. The version
 # `ironrdp-server` builds on, already in Cargo.lock through it, so
 # this adds an edge, not a crate.
-ironrdp-cliprdr = "0.7"
+ironrdp-cliprdr = "0.9"
 
 # The audio format and wave format types the sound handler offers its
 # formats in, and the negotiated format and error types its trait
