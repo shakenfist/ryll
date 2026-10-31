@@ -1,6 +1,10 @@
 {
   "version": 1,
   "files": {
+    ".devcontainer/Dockerfile": {
+      "sha": "6c9fd633d49a305acf0f3d108692db3484b46e2e",
+      "date": "2026-11-01"
+    },
     ".devcontainer/devcontainer.json": {
       "sha": "49f7a86770a92824fecdde678d773bb02971deb7",
       "date": "2026-09-10"

@@ -678,6 +678,14 @@
     {
       "path": ".github/workflows/release.yml",
       "author": "mikal"
+    },
+    {
+      "path": ".devcontainer/Dockerfile",
+      "author": "mikal"
+    },
+    {
+      "path": ".devcontainer",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
