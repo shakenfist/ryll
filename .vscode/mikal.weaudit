@@ -686,6 +686,70 @@
     {
       "path": ".devcontainer",
       "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/encode/h264.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/encode/mod.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/encode",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/dimensions.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/glz.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/jpeg.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/lib.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/limits.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/log_once.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/lz.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/lz4.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/quic.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/video.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/README.md",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
