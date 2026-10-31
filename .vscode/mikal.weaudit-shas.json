@@ -21,6 +21,10 @@
       "sha": "7a223bb8c7f0875f3ecee14f61b63dee6c1338b2",
       "date": "2026-08-24"
     },
+    ".github/workflows/ci.yml": {
+      "sha": "3536098cb4503c0426ab889fd50a06c7596405f0",
+      "date": "2026-10-31"
+    },
     ".github/workflows/codeql-analysis.yml": {
       "sha": "975f656d8135aefe12ba2f2094d8671460ef1a8a",
       "date": "2026-10-05"
@@ -29,9 +33,17 @@
       "sha": "b9b3936053b8685ef0ae47f656b2f35aa62ba637",
       "date": "2026-10-05"
     },
+    ".github/workflows/fuzz.yml": {
+      "sha": "d0305d9ebe499f930c61bf6f2ffe6107a0d1fb6a",
+      "date": "2026-10-31"
+    },
     ".github/workflows/manual-build.yml": {
       "sha": "b2503e3900f29f4d5efefd81ac7680be515b8eb4",
       "date": "2026-10-14"
+    },
+    ".github/workflows/mermaid-lint.yml": {
+      "sha": "29408a6b2da8760271d2614561adff59683f53f7",
+      "date": "2026-10-31"
     },
     ".github/workflows/pr-re-review.yml": {
       "sha": "68425cd384443ae15a909832693af1df01414c38",
@@ -48,6 +60,18 @@
     ".github/workflows/prune-reviews.yml": {
       "sha": "91ff1783e6589e198ce5d14aab473112761b7ce2",
       "date": "2026-10-16"
+    },
+    ".github/workflows/rdp-smoke.yml": {
+      "sha": "a9b1485db379f8081f08a4ddd0a829014228dee2",
+      "date": "2026-10-31"
+    },
+    ".github/workflows/release.yml": {
+      "sha": "96df79911e5d8c7f0647056a4c8c327bdd6a2ad7",
+      "date": "2026-10-31"
+    },
+    ".github/workflows/renovate.yml": {
+      "sha": "9022cf3950fa1a95e36e3bb2ad97b59cc102d5bd",
+      "date": "2026-10-31"
     },
     ".github/workflows/supply-chain.yml": {
       "sha": "c855b8e116194dc365244a69aff28900f33023fe",
