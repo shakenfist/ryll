@@ -29,6 +29,10 @@
 # decides the privileges the daemon runs with. .gitignore is included
 # because what it hides is a security property -- a pattern that
 # silently swallows a credentials file is invisible until it is not.
+# .gitleaksignore is included for the same reason from the other
+# side: each entry tells the secret scanner to stop reporting a
+# finding, and an entry that waves through a real credential is just
+# as quiet.
 #
 # .devcontainer/ is included whole, by directory rather than by
 # extension, because it is the build environment rather than a file
@@ -93,6 +97,7 @@
 include = [
     '*.rs', '*.sh', '*.py', '*.pyi', '*.js', '*.proto', '*.md', '*.yml', '*.yaml',
     '*.toml', '*.json', '*.html', '*.css', '*.rb', '*.service', '*.gitignore',
+    '*.gitleaksignore',
     '*Makefile', '*Dockerfile',
     '.devcontainer/*',
 ]
