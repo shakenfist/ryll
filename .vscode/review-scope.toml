@@ -113,5 +113,4 @@ exclude = [
     '*Cargo.lock',
     '.github/exported-config/*',
     'LICENSE',
-    'shakenfist-spice-compression/tests/fixtures/*',
 ]
