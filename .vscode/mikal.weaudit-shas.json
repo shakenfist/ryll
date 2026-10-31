@@ -69,10 +69,6 @@
       "sha": "96df79911e5d8c7f0647056a4c8c327bdd6a2ad7",
       "date": "2026-10-31"
     },
-    ".github/workflows/renovate.yml": {
-      "sha": "9022cf3950fa1a95e36e3bb2ad97b59cc102d5bd",
-      "date": "2026-10-31"
-    },
     ".github/workflows/supply-chain.yml": {
       "sha": "c855b8e116194dc365244a69aff28900f33023fe",
       "date": "2026-09-26"

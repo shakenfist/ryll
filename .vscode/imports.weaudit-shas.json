@@ -1,17 +1,6 @@
 {
   "version": 1,
   "files": {
-    ".github/workflows/mermaid-lint.yml": {
-      "sha": "29408a6b2da8760271d2614561adff59683f53f7",
-      "date": "2026-10-28",
-      "imported": {
-        "repo": "shakenfist/development",
-        "reviewer": "mikal",
-        "path": ".github/workflows/mermaid-lint.yml",
-        "commit": "6f5c8a1384447a7c768a75cb9541e9be2b575739",
-        "verified": true
-      }
-    },
     "tools/review-tracking.sh": {
       "sha": "fcadd30b9cea7aec8c747c7f43ef1864bc01bbef",
       "date": "2026-10-28",
