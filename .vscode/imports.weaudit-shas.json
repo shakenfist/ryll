@@ -1,6 +1,39 @@
 {
   "version": 1,
   "files": {
+    ".github/workflows/prune-reviews.yml": {
+      "sha": "0c0cfe362b24e6bc67ccf1ddd09dacc722a0524f",
+      "date": "2026-11-01",
+      "imported": {
+        "repo": "shakenfist/development",
+        "reviewer": "mikal",
+        "path": ".github/workflows/prune-reviews.yml",
+        "commit": "d8055a5e16965c0780483c737cca94caeabe81d8",
+        "verified": true
+      }
+    },
+    ".github/workflows/renovate.yml": {
+      "sha": "7480d088733b509c81a99bc0b3a05797a8665091",
+      "date": "2026-11-02",
+      "imported": {
+        "repo": "shakenfist/development",
+        "reviewer": "mikal",
+        "path": ".github/workflows/renovate.yml",
+        "commit": "7925d02bb343bb8a946730ff00718228225ae22f",
+        "verified": true
+      }
+    },
+    "tools/ci-prune-reviews.sh": {
+      "sha": "3c00a9489c0b571bfdd0d1f1170344cfc33b44ff",
+      "date": "2026-11-01",
+      "imported": {
+        "repo": "shakenfist/development",
+        "reviewer": "mikal",
+        "path": "templates/review-tracking/ci-prune-reviews.sh",
+        "commit": "d8055a5e16965c0780483c737cca94caeabe81d8",
+        "verified": true
+      }
+    },
     "tools/review-tracking.sh": {
       "sha": "fcadd30b9cea7aec8c747c7f43ef1864bc01bbef",
       "date": "2026-10-28",

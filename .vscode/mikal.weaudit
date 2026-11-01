@@ -492,19 +492,11 @@
       "author": "mikal"
     },
     {
-      "path": ".github/workflows/prune-reviews.yml",
-      "author": "mikal"
-    },
-    {
       "path": "tools/build-ryll-wheel-in-container.sh",
       "author": "mikal"
     },
     {
       "path": "tools/build-ryll-wheel.sh",
-      "author": "mikal"
-    },
-    {
-      "path": "tools/ci-prune-reviews.sh",
       "author": "mikal"
     },
     {

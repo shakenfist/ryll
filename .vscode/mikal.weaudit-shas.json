@@ -57,10 +57,6 @@
       "sha": "c42f54754a55943a43daa3ddad2c9188db547984",
       "date": "2026-09-29"
     },
-    ".github/workflows/prune-reviews.yml": {
-      "sha": "91ff1783e6589e198ce5d14aab473112761b7ce2",
-      "date": "2026-10-16"
-    },
     ".github/workflows/rdp-smoke.yml": {
       "sha": "a9b1485db379f8081f08a4ddd0a829014228dee2",
       "date": "2026-10-31"
@@ -504,10 +500,6 @@
     "tools/check-bidi.sh": {
       "sha": "ea7d6b5bc018c5be3c40f270ea6c5b222631cea7",
       "date": "2026-07-26"
-    },
-    "tools/ci-prune-reviews.sh": {
-      "sha": "b4ce5b64c79afb01e07b98f43457fa5ff842e896",
-      "date": "2026-10-16"
     },
     "tools/fuzz-targets.sh": {
       "sha": "b6cba20bf72f5b01a12e52b029aaadfee2dead8d",
