@@ -678,6 +678,162 @@
     {
       "path": ".github/workflows/release.yml",
       "author": "mikal"
+    },
+    {
+      "path": ".devcontainer/Dockerfile",
+      "author": "mikal"
+    },
+    {
+      "path": ".devcontainer",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/encode/h264.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/encode/mod.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/encode",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/dimensions.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/glz.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/jpeg.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/lib.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/limits.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/log_once.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/lz.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/lz4.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/quic.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/video.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/README.md",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/tests/fixtures/lz4/README.md",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/constants.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/lib.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/link.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/logging.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/README.md",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/audio.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/auth.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/clipboard.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/cursor.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/display.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/input.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/lib.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/server.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/tls.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/tests/loopback.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/tests",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
