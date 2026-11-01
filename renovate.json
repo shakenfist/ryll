@@ -90,6 +90,13 @@
       "groupName": "openh264"
     },
     {
+      "description": "Group every IronRDP crate so they upgrade in lockstep with ironrdp-server. shakenfist-spice-rdp depends directly on crates whose types ironrdp-server takes but does not re-export (cliprdr, core, pdu, svc, rdpsnd, displaycontrol), at the versions ironrdp-server builds on, and the connector side shares picky, which ironrdp-connector pins exactly. Bumping any one alone either puts two versions of a trait crate in the graph and fails to compile, or fails to resolve. The group PR can only land once an ironrdp-server release has moved to the new versions; until then it stays red (see #668 / #669 / #676).",
+      "matchPackageNames": [
+        "ironrdp-*"
+      ],
+      "groupName": "ironrdp"
+    },
+    {
       "description": "Hold sha1 < 0.11 until rsa 0.10 stable releases. sha1 0.11 moves to digest 0.11, but our transitive rsa 0.9 still requires digest 0.10, so Sha1 no longer satisfies rsa::Oaep::new's DynDigest bound. Tracked in shakenfist/ryll#93 / RustCrypto/RSA#647.",
       "matchPackageNames": [
         "sha1"
