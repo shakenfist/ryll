@@ -774,6 +774,66 @@
     {
       "path": "shakenfist-spice-protocol/src",
       "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/README.md",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/audio.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/auth.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/clipboard.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/cursor.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/display.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/input.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/lib.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/server.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/tls.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/tests/loopback.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/tests",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],

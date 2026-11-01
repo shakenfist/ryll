@@ -401,6 +401,54 @@
       "sha": "7a54174573c7ff672b5099de4de0e7e60ce00aaf",
       "date": "2026-10-20"
     },
+    "shakenfist-spice-rdp/Cargo.toml": {
+      "sha": "087835dbd25ab62b6cbc2ba02496f1e0b5521c1d",
+      "date": "2026-11-01"
+    },
+    "shakenfist-spice-rdp/README.md": {
+      "sha": "dbfa2b0205b4e24ea601b92e6e326076ae1067ed",
+      "date": "2026-11-01"
+    },
+    "shakenfist-spice-rdp/src/audio.rs": {
+      "sha": "c2deefebb02a3ae6cd5d31c20eccff0b57a9f6e2",
+      "date": "2026-11-01"
+    },
+    "shakenfist-spice-rdp/src/auth.rs": {
+      "sha": "08a9e10cbcd8f0ccac8f3f9ed69b2ccfd6728d79",
+      "date": "2026-11-01"
+    },
+    "shakenfist-spice-rdp/src/clipboard.rs": {
+      "sha": "957d1099766c17b05455b5b2511b0bb1265828c1",
+      "date": "2026-11-01"
+    },
+    "shakenfist-spice-rdp/src/cursor.rs": {
+      "sha": "591778595d265fb0a25c1369d495250f5a24709f",
+      "date": "2026-11-01"
+    },
+    "shakenfist-spice-rdp/src/display.rs": {
+      "sha": "aa13da959df3ca6db6554cecb86f384d1215053c",
+      "date": "2026-11-01"
+    },
+    "shakenfist-spice-rdp/src/input.rs": {
+      "sha": "5d105b0a03b6ea4b01261be9d23601fea537157d",
+      "date": "2026-11-01"
+    },
+    "shakenfist-spice-rdp/src/lib.rs": {
+      "sha": "b59b6d7639cb20db5eed01c5c3be07f2e7b01cf2",
+      "date": "2026-11-01"
+    },
+    "shakenfist-spice-rdp/src/server.rs": {
+      "sha": "b15b4f11ae2e46869b385d885cbf6a4000a90295",
+      "date": "2026-11-01"
+    },
+    "shakenfist-spice-rdp/src/tls.rs": {
+      "sha": "544ef01949a6140995091390e92d9ef71dae5707",
+      "date": "2026-11-01"
+    },
+    "shakenfist-spice-rdp/tests/loopback.rs": {
+      "sha": "f72f9661d6d30f71bd234b34b97bfa954f3acfb7",
+      "date": "2026-11-01"
+    },
     "shakenfist-spice-renderer/src/byte_counter.rs": {
       "sha": "d9b32a0b373832330a33bbff2e950273eac1e34e",
       "date": "2026-07-21"
