@@ -333,9 +333,25 @@
       "sha": "4b3bd11c6946c6f9f27f4c5ff7aaf5008331b202",
       "date": "2026-10-20"
     },
+    "shakenfist-spice-protocol/src/constants.rs": {
+      "sha": "c2f0f6394339e79bd443ef40ed6d9dbef41a786f",
+      "date": "2026-11-01"
+    },
     "shakenfist-spice-protocol/src/host_subject.rs": {
       "sha": "af96836e04851d493d60e8aabe229ca3163dbd7d",
       "date": "2026-07-18"
+    },
+    "shakenfist-spice-protocol/src/lib.rs": {
+      "sha": "a773d5363bafa291f57b71025b28e3d128b6f883",
+      "date": "2026-11-01"
+    },
+    "shakenfist-spice-protocol/src/link.rs": {
+      "sha": "9a044803f14d07750ded5dffac6ef8f8a0d31eb9",
+      "date": "2026-11-01"
+    },
+    "shakenfist-spice-protocol/src/logging.rs": {
+      "sha": "421d82a4b1f1931122a4559a1262e84174d62c1b",
+      "date": "2026-11-01"
     },
     "shakenfist-spice-protocol/src/messages/agent_stream.rs": {
       "sha": "df3ccacd5fd3c6361b874811c85215b577f76164",
