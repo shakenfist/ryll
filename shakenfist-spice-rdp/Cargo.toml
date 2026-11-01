@@ -62,7 +62,7 @@ ironrdp-rdpsnd = "0.9"
 # backend, and the `impl_as_any!` macro that implements it. The
 # version the other IronRDP crates build on, already in Cargo.lock
 # through them, so this adds an edge, not a crate.
-ironrdp-core = "0.2"
+ironrdp-core = "0.3"
 
 # The IronRDP display and input handler traits are declared with
 # `#[async_trait::async_trait]`, and `ironrdp-server` does not
