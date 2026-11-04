@@ -163,8 +163,12 @@ mp4 = { version = "0.14", optional = true }
 # does not touch the host clipboard.
 arboard = { version = "3", optional = true }
 
-# Signal handling (Ctrl+C graceful shutdown, cross-platform)
-ctrlc = "3"
+# Signal handling (graceful shutdown, cross-platform). The
+# `termination` feature routes SIGTERM and SIGHUP to the same handler
+# as SIGINT on unix; without it only Ctrl+C is graceful and a service
+# manager's SIGTERM ends the process at once. Windows handles its
+# console control events either way.
+ctrlc = { version = "3", features = ["termination"] }
 
 # Serialisation (for bug report snapshots)
 serde = { version = "1", features = ["derive"] }
