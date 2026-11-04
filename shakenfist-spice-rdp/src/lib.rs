@@ -1,8 +1,9 @@
 //! RDP frontend for the ryll SPICE client.
 //!
-//! Serves a SPICE session to stock RDP clients (mstsc, FreeRDP and
-//! the platform RDP apps), so a user with no SPICE client can still
-//! reach a desktop. It is the library behind `ryll --rdp`, and is
+//! Serves a SPICE session to stock RDP clients, so a user with no
+//! SPICE client can still reach a desktop. Only FreeRDP 3.15.0 has
+//! been tested; other clients speak standard RDP and are expected to
+//! work, but nobody has checked (see `docs/rdp-frontend.md`). It is the library behind `ryll --rdp`, and is
 //! kept free of the ryll binary so that a gateway could serve RDP
 //! from SPICE sessions without it.
 //!
