@@ -170,10 +170,17 @@ report's `traffic.pcap`.
 
 ### inputs
 
-Inputs has `motion_count`, `button_state`, `secs_since_last_key`, a
-`recent_events` ring that records the last N input events with
-timestamps, and the four per-opcode baseline fields. No
-channel-specific gaps identified.
+Inputs has `motion_count`, `button_state`, `secs_since_last_key`,
+`recent_events` with timestamps, and the four per-opcode baseline
+fields. No channel-specific gaps identified.
+
+`recent_events` is backed by two rings, not one: a 50-entry ring of
+keys, buttons and modifier changes, and a separate 10-entry ring of
+pointer motion, merged into one chronological list when a snapshot is
+taken. Motion arrives orders of magnitude faster than anything else,
+so sharing a ring with it meant a bug report filed about clicks
+contained nothing but `MouseMove` (ryll#432). Each ring ages out on
+its own timescale.
 
 ### cursor
 

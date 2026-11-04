@@ -252,6 +252,71 @@ impl MotionRoundTrip {
 /// Maximum number of recent input events to keep in the snapshot.
 const MAX_RECENT_EVENTS: usize = 50;
 
+/// Recent pointer motions kept alongside them. Motion is worth a
+/// little context -- it says where the pointer was travelling when a
+/// click landed somewhere unexpected -- but it arrives orders of
+/// magnitude faster than anything else, so it gets its own small
+/// budget rather than a share of the one above.
+const MAX_RECENT_MOTION: usize = 10;
+
+/// The last input events the channel saw, for bug reports.
+///
+/// Two rings, not one. A single ring of [`MAX_RECENT_EVENTS`] was
+/// flooded by pointer motion: in a bug report filed specifically to
+/// capture clicks that were not working, all 50 entries were
+/// `MouseMove`, spanning 1.68 seconds, and not one of that session's
+/// 274 press/release pairs survived (ryll#432). The field that exists
+/// to show what the user did was unusable for any input bug except
+/// "the pointer moved in the last two seconds".
+///
+/// Enlarging it does not fix that. At the rate motion arrives, 500
+/// entries buy about 17 seconds and still bury every click. Motion has
+/// to age out on its own timescale, which means its own ring.
+#[derive(Default)]
+struct RecentEvents {
+    /// Keys, buttons and modifier changes: what the user did.
+    discrete: VecDeque<InputEventRecord>,
+    /// Pointer motion, as context for the above.
+    motion: VecDeque<InputEventRecord>,
+}
+
+impl RecentEvents {
+    /// Whether an event type is pointer motion rather than an action.
+    fn is_motion(event_type: &str) -> bool {
+        matches!(event_type, "MouseMove" | "MouseMotion")
+    }
+
+    /// Record an event in whichever ring it belongs to.
+    fn push(&mut self, event: InputEventRecord) {
+        let (ring, cap) = if Self::is_motion(&event.event_type) {
+            (&mut self.motion, MAX_RECENT_MOTION)
+        } else {
+            (&mut self.discrete, MAX_RECENT_EVENTS)
+        };
+        ring.push_back(event);
+        if ring.len() > cap {
+            ring.pop_front();
+        }
+    }
+
+    /// The two rings as one chronological list, which is what a bug
+    /// report reads. Both are already in order, so this is a merge.
+    fn merged(&self) -> VecDeque<InputEventRecord> {
+        let mut out: Vec<InputEventRecord> =
+            Vec::with_capacity(self.discrete.len() + self.motion.len());
+        out.extend(self.discrete.iter().cloned());
+        out.extend(self.motion.iter().cloned());
+        // Stable, so two events sharing a timestamp keep the order
+        // they were recorded in.
+        out.sort_by(|a, b| {
+            a.timestamp_secs
+                .partial_cmp(&b.timestamp_secs)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        out.into()
+    }
+}
+
 /// Maximum characters for a single paste-as-keystrokes sequence.
 const PASTE_MAX_CHARS: usize = 4096;
 
@@ -308,7 +373,7 @@ pub struct InputsChannel {
     traffic: Arc<dyn TrafficSink>,
     log_config: LogConfig,
     snapshot: Arc<Mutex<InputsSnapshot>>,
-    recent_events: VecDeque<InputEventRecord>,
+    recent_events: RecentEvents,
     bytes_in: u64,
     bytes_out: u64,
     /// Local cache of disconnect-cause diagnostic fields,
@@ -359,7 +424,7 @@ impl InputsChannel {
             traffic,
             log_config,
             snapshot,
-            recent_events: VecDeque::new(),
+            recent_events: RecentEvents::default(),
             bytes_in: 0,
             bytes_out: 0,
             last_recv_ts_secs: None,
@@ -1110,12 +1175,9 @@ impl InputsChannel {
         }
     }
 
-    /// Record an input event in the local deque.
+    /// Record an input event, in whichever ring it belongs to.
     fn record_event(&mut self, event: InputEventRecord) {
-        self.recent_events.push_back(event);
-        if self.recent_events.len() > MAX_RECENT_EVENTS {
-            self.recent_events.pop_front();
-        }
+        self.recent_events.push(event);
     }
 
     /// Sync local state to the shared snapshot.
@@ -1124,7 +1186,7 @@ impl InputsChannel {
         snap.button_state = self.button_state;
         snap.motion_count = self.motion_window.outstanding();
         snap.secs_since_last_key = self.last_key_time.map(|t| t.elapsed().as_secs_f64());
-        snap.recent_events = self.recent_events.clone();
+        snap.recent_events = self.recent_events.merged();
         snap.bytes_in = self.bytes_in;
         snap.bytes_out = self.bytes_out;
         snap.last_recv_ts_secs = self.last_recv_ts_secs;
@@ -1712,10 +1774,97 @@ pub fn translate_paste(text: &str) -> Result<Vec<PasteKey>, PasteError> {
 mod tests {
     use super::{
         scancode_for_logical_key, translate_paste, Direction, LogicalKey, MotionRoundTrip,
-        MotionWedgeDetector, MotionWindow, PasteError, PasteKey, WSKey, WedgeDiagnosis,
-        MAX_ROUND_TRIPS_PENDING, MOTION_ACK_BUNCH, MOTION_WEDGE_THRESHOLD,
+        MotionWedgeDetector, MotionWindow, PasteError, PasteKey, RecentEvents, WSKey,
+        WedgeDiagnosis, MAX_RECENT_EVENTS, MAX_RECENT_MOTION, MAX_ROUND_TRIPS_PENDING,
+        MOTION_ACK_BUNCH, MOTION_WEDGE_THRESHOLD,
     };
+    use crate::snapshots::InputEventRecord;
     use std::time::{Duration, Instant};
+
+    fn record(event_type: &str, at: f64) -> InputEventRecord {
+        InputEventRecord {
+            event_type: event_type.to_string(),
+            scancode: 0,
+            x: 0,
+            y: 0,
+            button_mask: 0,
+            timestamp_secs: at,
+        }
+    }
+
+    /// The bug from ryll#432: a flood of motion must not evict a
+    /// click. This is the exact shape of the session that produced an
+    /// all-MouseMove ring.
+    #[test]
+    fn a_flood_of_motion_does_not_evict_a_click() {
+        let mut r = RecentEvents::default();
+        r.push(record("MouseDown", 0.0));
+        r.push(record("MouseUp", 0.1));
+        for i in 0..1000 {
+            r.push(record("MouseMove", 1.0 + f64::from(i)));
+        }
+
+        let merged = r.merged();
+        let kinds: Vec<&str> = merged.iter().map(|e| e.event_type.as_str()).collect();
+        assert!(
+            kinds.contains(&"MouseDown") && kinds.contains(&"MouseUp"),
+            "the click was evicted by motion: {kinds:?}"
+        );
+        assert_eq!(
+            kinds.iter().filter(|k| **k == "MouseMove").count(),
+            MAX_RECENT_MOTION,
+            "motion exceeded its own budget"
+        );
+    }
+
+    /// Each ring is capped on its own, so the total is bounded.
+    #[test]
+    fn each_ring_is_capped_separately() {
+        let mut r = RecentEvents::default();
+        for i in 0..(MAX_RECENT_EVENTS * 3) {
+            r.push(record("KeyDown", i as f64));
+        }
+        for i in 0..(MAX_RECENT_MOTION * 3) {
+            r.push(record("MouseMove", 10_000.0 + i as f64));
+        }
+        assert_eq!(r.merged().len(), MAX_RECENT_EVENTS + MAX_RECENT_MOTION);
+    }
+
+    /// A bug report reads one chronological list, so the merge has to
+    /// interleave the rings rather than concatenate them.
+    #[test]
+    fn the_merged_list_is_in_time_order() {
+        let mut r = RecentEvents::default();
+        r.push(record("KeyDown", 1.0));
+        r.push(record("MouseMove", 2.0));
+        r.push(record("MouseUp", 3.0));
+        r.push(record("MouseMove", 4.0));
+
+        let merged = r.merged();
+        let order: Vec<&str> = merged.iter().map(|e| e.event_type.as_str()).collect();
+        assert_eq!(order, ["KeyDown", "MouseMove", "MouseUp", "MouseMove"]);
+        assert!(
+            merged
+                .iter()
+                .zip(merged.iter().skip(1))
+                .all(|(a, b)| a.timestamp_secs <= b.timestamp_secs),
+            "not in time order"
+        );
+    }
+
+    /// Only pointer motion goes in the motion ring; everything else is
+    /// an action and must age out slowly.
+    #[test]
+    fn only_motion_is_classed_as_motion() {
+        assert!(RecentEvents::is_motion("MouseMove"));
+        assert!(RecentEvents::is_motion("MouseMotion"));
+        for action in ["MouseDown", "MouseUp", "KeyDown", "KeyUp", "KeyModifiers"] {
+            assert!(
+                !RecentEvents::is_motion(action),
+                "{action} was classed as motion"
+            );
+        }
+    }
 
     /// A server that never acked anything is the mouse-mode case: the
     /// hint that names the mode is the right one.
