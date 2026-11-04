@@ -27,6 +27,63 @@ use super::{ChannelEvent, DisconnectReason, EventSink, InputEvent, MAX_MESSAGE_B
 /// spice-gtk throttles motion messages to this many pending before an ACK
 const MOTION_ACK_BUNCH: u32 = 4;
 
+/// The client's view of how many pointer messages the server has not
+/// yet acknowledged, and the gate that keeps that number bounded.
+///
+/// spice-server counts every `MOUSE_POSITION` and `MOUSE_MOTION` it
+/// receives and acks each [`MOTION_ACK_BUNCH`]-th. To stay in step the
+/// client must count exactly what the server counts -- which includes
+/// the position update sent with every button press and release, not
+/// just the ones the gate let through.
+///
+/// Counting only the gated sends is what made this throttle inert.
+/// Each click sent a position the server counted and the client did
+/// not, so `outstanding` drifted down by two per click while acks took
+/// it down by [`MOTION_ACK_BUNCH`] apiece. Floored at zero by
+/// `saturating_sub`, it sat pinned near zero for whole sessions and
+/// [`may_send`](Self::may_send) never once refused: pointer updates
+/// went out as fast as the UI made them, which is the exact flood the
+/// ack window exists to bound.
+///
+/// Every send therefore goes through [`note_sent`](Self::note_sent)
+/// from the channel's single send path, so no future call site can
+/// forget to count itself.
+#[derive(Default)]
+struct MotionWindow {
+    /// Pointer messages sent that no ack has answered yet.
+    outstanding: u32,
+}
+
+impl MotionWindow {
+    /// Whether a pointer move may be sent, or must be dropped.
+    ///
+    /// Only discretionary moves ask. A click's position update is sent
+    /// regardless -- dropping it would put the press at a stale
+    /// location -- and is counted all the same.
+    fn may_send(&self) -> bool {
+        self.outstanding < MOTION_ACK_BUNCH * 2
+    }
+
+    /// Count a pointer message the server will count too.
+    fn note_sent(&mut self) {
+        self.outstanding = self.outstanding.saturating_add(1);
+    }
+
+    /// Count an ack, which answers a whole bunch.
+    ///
+    /// Saturating: an ack arriving for a bunch the client has not
+    /// finished sending would otherwise wrap, and the server counting
+    /// differently is not worth a panic.
+    fn note_ack(&mut self) {
+        self.outstanding = self.outstanding.saturating_sub(MOTION_ACK_BUNCH);
+    }
+
+    /// How many messages are outstanding, for logs and snapshots.
+    fn outstanding(&self) -> u32 {
+        self.outstanding
+    }
+}
+
 /// Consecutive throttled pointer moves, with no `MOUSE_MOTION_ACK`
 /// in between, that make the ack window look wedged rather than
 /// briefly busy. At a browser's pointer event rate a genuine burst
@@ -195,7 +252,9 @@ pub struct InputsChannel {
     buffer: ReceiveBuffer,
     last_key_time: Option<Instant>,
     button_state: u32,
-    motion_count: u32,
+    /// See [`MotionWindow`]. Counted from the single send path, so it
+    /// cannot drift from what the server acks.
+    motion_window: MotionWindow,
     /// Distinguishes a busy ack window from a wedged one. See
     /// [`MotionWedgeDetector`].
     motion_wedge: MotionWedgeDetector,
@@ -250,7 +309,7 @@ impl InputsChannel {
             buffer: ReceiveBuffer::with_capacity(4096),
             last_key_time: None,
             button_state: 0,
-            motion_count: 0,
+            motion_window: MotionWindow::default(),
             motion_wedge: MotionWedgeDetector::default(),
             motion_round_trip: MotionRoundTrip::default(),
             last_round_trip_ms: None,
@@ -536,9 +595,12 @@ impl InputsChannel {
             }
 
             inputs_server::MOUSE_MOTION_ACK => {
-                self.motion_count = self.motion_count.saturating_sub(MOTION_ACK_BUNCH);
+                self.motion_window.note_ack();
                 self.motion_wedge.note_ack();
-                debug!("inputs: mouse motion ack (pending={})", self.motion_count);
+                debug!(
+                    "inputs: mouse motion ack (pending={})",
+                    self.motion_window.outstanding()
+                );
                 if let Some(rtt_ms) = self.motion_round_trip.note_ack(Instant::now()) {
                     self.last_round_trip_ms = Some(rtt_ms);
                     self.events
@@ -708,7 +770,7 @@ impl InputsChannel {
 
             InputEvent::MouseMove { x, y } => {
                 // Throttle: don't exceed MOTION_ACK_BUNCH * 2 pending
-                if self.motion_count < MOTION_ACK_BUNCH * 2 {
+                if self.motion_window.may_send() {
                     self.record_event(InputEventRecord {
                         event_type: "MouseMove".to_string(),
                         scancode: 0,
@@ -729,7 +791,6 @@ impl InputsChannel {
                     let msg = make_message(inputs_client::MOUSE_POSITION, &payload);
                     self.send_with_log(inputs_client::MOUSE_POSITION, &msg)
                         .await?;
-                    self.motion_count += 1;
                 } else {
                     self.note_motion_throttled();
                 }
@@ -737,7 +798,7 @@ impl InputsChannel {
 
             InputEvent::MouseMotion { dx, dy } => {
                 // Server mouse mode: send relative deltas.
-                if self.motion_count < MOTION_ACK_BUNCH * 2 {
+                if self.motion_window.may_send() {
                     self.record_event(InputEventRecord {
                         event_type: "MouseMotion".to_string(),
                         scancode: 0,
@@ -757,7 +818,6 @@ impl InputsChannel {
                     let msg = make_message(inputs_client::MOUSE_MOTION, &payload);
                     self.send_with_log(inputs_client::MOUSE_MOTION, &msg)
                         .await?;
-                    self.motion_count += 1;
                 } else {
                     self.note_motion_throttled();
                 }
@@ -985,7 +1045,7 @@ impl InputsChannel {
                  pointer is not moving, check the negotiated mouse mode — \
                  the server does not acknowledge messages it ignores.",
                 self.motion_wedge.drops(),
-                self.motion_count
+                self.motion_window.outstanding()
             );
         }
     }
@@ -1002,7 +1062,7 @@ impl InputsChannel {
     fn update_snapshot(&self) {
         let mut snap = self.snapshot.lock().expect("lock poisoned");
         snap.button_state = self.button_state;
-        snap.motion_count = self.motion_count;
+        snap.motion_count = self.motion_window.outstanding();
         snap.secs_since_last_key = self.last_key_time.map(|t| t.elapsed().as_secs_f64());
         snap.recent_events = self.recent_events.clone();
         snap.bytes_in = self.bytes_in;
@@ -1038,7 +1098,12 @@ impl InputsChannel {
             && (msg_type == inputs_client::MOUSE_POSITION
                 || msg_type == inputs_client::MOUSE_MOTION)
         {
+            // Both counters belong here, on the one path every send
+            // takes, and for exactly the message types the server
+            // acks. A click's position update reaches this line like
+            // any other, which is what keeps the window honest.
             self.motion_round_trip.note_sent(Instant::now());
+            self.motion_window.note_sent();
         }
         self.update_snapshot();
         result
@@ -1587,10 +1652,98 @@ pub fn translate_paste(text: &str) -> Result<Vec<PasteKey>, PasteError> {
 mod tests {
     use super::{
         scancode_for_logical_key, translate_paste, Direction, LogicalKey, MotionRoundTrip,
-        MotionWedgeDetector, PasteError, PasteKey, WSKey, MAX_ROUND_TRIPS_PENDING,
+        MotionWedgeDetector, MotionWindow, PasteError, PasteKey, WSKey, MAX_ROUND_TRIPS_PENDING,
         MOTION_ACK_BUNCH, MOTION_WEDGE_THRESHOLD,
     };
     use std::time::{Duration, Instant};
+
+    /// The window opens closed-ended: a fresh channel may send.
+    #[test]
+    fn a_fresh_window_may_send() {
+        let w = MotionWindow::default();
+        assert!(w.may_send());
+        assert_eq!(w.outstanding(), 0);
+    }
+
+    /// The gate must actually refuse once the window fills. This is
+    /// what ryll#431 broke: with click sends uncounted the window
+    /// never filled, so this assertion failed in practice even though
+    /// the gate's arithmetic read correctly.
+    #[test]
+    fn the_gate_closes_once_the_window_is_full() {
+        let mut w = MotionWindow::default();
+        for i in 0..(MOTION_ACK_BUNCH * 2) {
+            assert!(w.may_send(), "refused at {i}, before the window was full");
+            w.note_sent();
+        }
+        assert!(!w.may_send(), "the gate never closed");
+        assert_eq!(w.outstanding(), MOTION_ACK_BUNCH * 2);
+    }
+
+    /// An ack frees exactly one bunch, and no more.
+    #[test]
+    fn an_ack_frees_one_bunch() {
+        let mut w = MotionWindow::default();
+        for _ in 0..(MOTION_ACK_BUNCH * 2) {
+            w.note_sent();
+        }
+        assert!(!w.may_send());
+        w.note_ack();
+        assert_eq!(w.outstanding(), MOTION_ACK_BUNCH);
+        assert!(w.may_send(), "an ack did not reopen the gate");
+    }
+
+    /// A click's position update is counted even though it is never
+    /// gated. Two uncounted sends per click is precisely the drift
+    /// that pinned the old counter at zero.
+    #[test]
+    fn click_position_sends_count_toward_the_window() {
+        let mut w = MotionWindow::default();
+        // A press and a release, each sending one position, and
+        // nothing else.
+        w.note_sent();
+        w.note_sent();
+        assert_eq!(
+            w.outstanding(),
+            2,
+            "clicks must count: the server acks them whether ryll counts them or not"
+        );
+    }
+
+    /// The arithmetic from the capture on ryll#431: 3,279 pointer
+    /// messages sent, of which 548 were the position updates of 274
+    /// clicks, against 819 acks. Counting every send leaves the window
+    /// where the server's own count puts it, instead of floored at
+    /// zero.
+    #[test]
+    fn the_captured_session_leaves_the_window_where_the_server_puts_it() {
+        let mut w = MotionWindow::default();
+        for _ in 0..3279 {
+            w.note_sent();
+        }
+        for _ in 0..819 {
+            w.note_ack();
+        }
+        // 3279 - 819 * 4 = 3. The old accounting reached this point
+        // having counted only 2,731 sends against 3,276 acked
+        // messages, saturating to 0.
+        assert_eq!(w.outstanding(), 3);
+        assert!(
+            w.may_send(),
+            "three outstanding is a working window, not a wedge"
+        );
+    }
+
+    /// An ack the client did not earn must not wrap the counter.
+    #[test]
+    fn an_unearned_ack_floors_at_zero() {
+        let mut w = MotionWindow::default();
+        w.note_sent();
+        w.note_ack();
+        assert_eq!(w.outstanding(), 0);
+        w.note_ack();
+        assert_eq!(w.outstanding(), 0, "an extra ack wrapped the counter");
+    }
 
     /// A burst that clears is not a wedge, and must say nothing.
     #[test]
@@ -2742,6 +2895,131 @@ mod tests {
                 .handle_server_message(inputs_server::PING, &[0; Ping::SIZE - 1])
                 .await
                 .is_err());
+        }
+    }
+    /// End-to-end cover for the motion-ack accounting (ryll#431),
+    /// driving real events through the channel rather than exercising
+    /// [`MotionWindow`] alone: the bug was never in that arithmetic,
+    /// it was in which sends reached it.
+    mod motion_accounting {
+        use std::sync::{Arc, Mutex};
+
+        use tokio::sync::mpsc;
+
+        use super::super::{InputEvent, InputsChannel, MOTION_ACK_BUNCH};
+        use crate::channels::test_support::{loopback, NullTraffic, TestChannelPeers};
+        use crate::snapshots::InputsSnapshot;
+        use crate::{ByteCounter, LogConfig};
+
+        /// Like `failure_policy`'s harness, but keeps the snapshot so a
+        /// test can read the window the channel publishes.
+        ///
+        /// The peers come back with it and must be held for the whole
+        /// test: dropping them closes the loopback's far end, every
+        /// send then fails with a broken pipe, and -- since only a
+        /// successful send is counted -- the window stays at zero and
+        /// the test passes for the wrong reason.
+        async fn channel_with_snapshot(
+        ) -> (InputsChannel, Arc<Mutex<InputsSnapshot>>, TestChannelPeers) {
+            let (stream, events, peers) = loopback().await;
+            let (_input_tx, input_rx) = mpsc::channel(1);
+            let snapshot = Arc::new(Mutex::new(InputsSnapshot::default()));
+            let channel = InputsChannel::new(
+                stream,
+                events,
+                input_rx,
+                None,
+                Arc::new(ByteCounter::new()),
+                Arc::new(NullTraffic::new()),
+                snapshot.clone(),
+                false,
+                LogConfig::default(),
+            );
+            (channel, snapshot, peers)
+        }
+
+        fn outstanding(snapshot: &Arc<Mutex<InputsSnapshot>>) -> u32 {
+            snapshot.lock().expect("snapshot lock").motion_count
+        }
+
+        /// A click sends a MOUSE_POSITION before its button message.
+        /// The server counts that position toward its ack bunch, so
+        /// ryll must too. Counting only gated moves is what left the
+        /// window pinned near zero for whole sessions.
+        #[tokio::test]
+        async fn a_click_counts_its_position_send() {
+            let (mut channel, snapshot, _peers) = channel_with_snapshot().await;
+
+            channel
+                .handle_input_event(InputEvent::MouseDown {
+                    button: 0x01,
+                    x: 10,
+                    y: 20,
+                })
+                .await
+                .expect("a press sends");
+            assert_eq!(
+                outstanding(&snapshot),
+                1,
+                "the press's position update went uncounted"
+            );
+
+            channel
+                .handle_input_event(InputEvent::MouseUp {
+                    button: 0x01,
+                    x: 10,
+                    y: 20,
+                })
+                .await
+                .expect("a release sends");
+            assert_eq!(
+                outstanding(&snapshot),
+                2,
+                "the release's position update went uncounted"
+            );
+        }
+
+        /// With clicks counted, sustained clicking fills the ack window
+        /// and the throttle finally engages. Before the fix this loop
+        /// left the count at zero no matter how long it ran.
+        #[tokio::test]
+        async fn sustained_clicking_fills_the_ack_window() {
+            let (mut channel, snapshot, _peers) = channel_with_snapshot().await;
+
+            // Four clicks: eight position sends, double the window.
+            for _ in 0..4 {
+                channel
+                    .handle_input_event(InputEvent::MouseDown {
+                        button: 0x01,
+                        x: 1,
+                        y: 1,
+                    })
+                    .await
+                    .expect("a press sends");
+                channel
+                    .handle_input_event(InputEvent::MouseUp {
+                        button: 0x01,
+                        x: 1,
+                        y: 1,
+                    })
+                    .await
+                    .expect("a release sends");
+            }
+
+            assert_eq!(outstanding(&snapshot), MOTION_ACK_BUNCH * 2);
+
+            // The window is full, so a discretionary move is now
+            // dropped rather than sent -- the flow control doing its
+            // job for the first time.
+            channel
+                .handle_input_event(InputEvent::MouseMove { x: 2, y: 2 })
+                .await
+                .expect("a throttled move is not an error");
+            assert_eq!(
+                outstanding(&snapshot),
+                MOTION_ACK_BUNCH * 2,
+                "a move was sent through a full window"
+            );
         }
     }
 }
