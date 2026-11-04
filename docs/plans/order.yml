@@ -53,3 +53,4 @@
 - PLAN-decoder-hardening.md: Image decoder hardening
 - PLAN-app-split.md: Splitting app.rs
 - PLAN-rdp-frontend.md: RDP frontend
+- PLAN-untrusted-value-sweep.md: Untrusted value and text sweep
