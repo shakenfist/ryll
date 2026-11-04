@@ -764,14 +764,26 @@ async fn serve_connection(
 
     let peer = connection.peer;
     let duration = started.elapsed();
+    // Counted all connection long and, until ryll#645, never said
+    // anywhere: an operator saw only the warn-once lines. Read after
+    // `end`, so the held input it could not release is included.
+    let dropped = connection.dropped();
     match result {
-        Ok(()) => info!(%peer, ?duration, "RDP client disconnected"),
+        Ok(()) => info!(%peer, ?duration, dropped, "RDP client disconnected"),
         Err(error) => info!(
             %peer,
             ?duration,
+            dropped,
             error = format!("{error:#}"),
             "RDP client disconnected"
         ),
+    }
+    if dropped > 0 {
+        warn!(
+            %peer,
+            dropped,
+            "input from the RDP client was dropped during this connection,              because a session queue was full or no SPICE session was              available"
+        );
     }
 }
 
@@ -865,6 +877,13 @@ impl Connection {
         self.slot.clear();
         self.release_held(session);
         self.taken_over.send_replace(true);
+    }
+
+    /// Input events this connection dropped, for the line it
+    /// disconnects with. Read after [`end`](Self::end), so the
+    /// releases that could not be queued are included.
+    fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
 
     /// Release, to `session`, whatever keys and buttons the client
@@ -1177,10 +1196,35 @@ mod tests {
         // Neither release fits, so both are counted, and the record
         // is cleared regardless.
         assert_eq!(input.dropped(), 3);
+        // The connection reports the same total, and only after
+        // `end` is it the whole of it: this is the number the
+        // disconnect line carries (ryll#645), and reading it before
+        // the held input was released would under-report by two.
+        assert_eq!(connection.dropped(), 3);
         assert!(matches!(input_rx.try_recv(), Ok(InputEvent::KeyDown(0x1E))));
         assert!(input_rx.try_recv().is_err());
         assert!(held.end_connection().is_empty());
         assert!(connection.slot.current().is_none());
+    }
+
+    /// A connection that dropped nothing says so, rather than
+    /// reporting a stale or absent number.
+    #[test]
+    fn a_clean_connection_reports_no_drops() {
+        let (session, mut input_rx) = session_with_input(8);
+        let (connection, mut input) = connection(&session);
+        connection.take_over(&Served::default());
+
+        press(&mut input, 0x1E);
+        assert!(matches!(input_rx.try_recv(), Ok(InputEvent::KeyDown(0x1E))));
+        assert_eq!(connection.dropped(), 0);
+
+        connection.end(&Served::default());
+        assert_eq!(
+            connection.dropped(),
+            0,
+            "a connection whose input all got through must report none dropped"
+        );
     }
 
     #[test]

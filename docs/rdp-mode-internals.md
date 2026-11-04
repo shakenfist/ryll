@@ -291,6 +291,16 @@ surface size and reads it with `try_lock` on the mirror. An event that
 cannot be queued (full or closed queue, empty slot, busy mirror) is
 dropped and counted, and a full or closed queue is logged once.
 
+The count is reported where an operator will see it. Every connection
+carries its dropped total on the line it disconnects with, and a
+connection that dropped anything also gets a warning naming the two
+reasons it happens, read after the held input has been released so the
+releases that could not be queued are included. ryll's relays keep
+their own totals for the session and report them at teardown, since
+the per-outage lines they log as a session returns cover one gap
+rather than the whole run. Before this the counts were kept and never
+surfaced anywhere (ryll#645).
+
 The pressure that reaches it comes from ryll's relays (see
 [The supervisor](#the-supervisor-ryllsrcrdprs)): the handler's queue holds
 256 events, and the relay forwarding it into the current attempt's queue
