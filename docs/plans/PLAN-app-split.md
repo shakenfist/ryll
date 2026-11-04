@@ -205,7 +205,7 @@ with web mode).
 | Phase | Plan | Status | Merged |
 |-------|------|--------|--------|
 | 1. Reuse survey and shared draw dispatch | [PLAN-app-split-phase-01-reuse.md](PLAN-app-split-phase-01-reuse.md) | Complete | acc7a12 (#483) |
-| 2. Module directory and pure state | [PLAN-app-split-phase-02-pure-state.md](PLAN-app-split-phase-02-pure-state.md) | In progress | |
+| 2. Module directory and pure state | [PLAN-app-split-phase-02-pure-state.md](PLAN-app-split-phase-02-pure-state.md) | Complete | b245380 (#501) |
 | 3. Events and bug-report flow | PLAN-app-split-phase-03-events.md | Not started | |
 | 4. Split `ui` into per-panel files | PLAN-app-split-phase-04-panels.md | Not started | |
 | 5. Panel state sub-structs | PLAN-app-split-phase-05-substructs.md | Not started | |
