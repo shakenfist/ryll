@@ -108,6 +108,19 @@ struct MotionWedgeDetector {
     drops_since_ack: u32,
     /// Whether the current run has already been reported.
     warned: bool,
+    /// Acks seen this session, and when the last one arrived.
+    ///
+    /// This is what tells a mouse-mode mismatch from a server that has
+    /// stalled, which look identical from the send side: both leave the
+    /// window full and nothing acking it. A server that never
+    /// acknowledged a single pointer message is not consuming this
+    /// message form at all. A server that acked for a while and then
+    /// stopped was consuming them fine, so the mouse mode is not the
+    /// suspect -- as in ryll#574, where the guest's X display stopped
+    /// answering for about 37 s and the mouse mode was correct
+    /// throughout.
+    acks: u64,
+    last_ack_at: Option<Instant>,
 }
 
 impl MotionWedgeDetector {
@@ -127,15 +140,43 @@ impl MotionWedgeDetector {
     /// again, because a session that wedges, recovers and wedges a
     /// second time is two faults, and reporting only the first hides
     /// the one the user is looking at.
-    fn note_ack(&mut self) {
+    fn note_ack(&mut self, now: Instant) {
         self.drops_since_ack = 0;
         self.warned = false;
+        self.acks = self.acks.saturating_add(1);
+        self.last_ack_at = Some(now);
     }
 
     /// Drops in the current run, for the warning message.
     fn drops(&self) -> u32 {
         self.drops_since_ack
     }
+
+    /// How the ack history reads at `now`, which decides what the
+    /// warning should blame.
+    fn diagnosis(&self, now: Instant) -> WedgeDiagnosis {
+        match self.last_ack_at {
+            None => WedgeDiagnosis::NeverAcked,
+            Some(last) => WedgeDiagnosis::AcksStopped {
+                acks: self.acks,
+                quiet_secs: now.saturating_duration_since(last).as_secs_f32(),
+            },
+        }
+    }
+}
+
+/// What a wedged ack window means, judged from whether the server was
+/// ever acking. See [`MotionWedgeDetector::diagnosis`].
+#[derive(Debug, PartialEq)]
+enum WedgeDiagnosis {
+    /// No `MOUSE_MOTION_ACK` has arrived all session. The server is not
+    /// consuming this message form, which the negotiated mouse mode
+    /// explains.
+    NeverAcked,
+    /// Acks were arriving and have stopped. The server was consuming
+    /// pointer messages, so the mouse mode is not the suspect; the
+    /// server, or the guest behind it, has gone quiet.
+    AcksStopped { acks: u64, quiet_secs: f32 },
 }
 
 /// Most motion bunches [`MotionRoundTrip`] waits on at once. The send
@@ -596,7 +637,7 @@ impl InputsChannel {
 
             inputs_server::MOUSE_MOTION_ACK => {
                 self.motion_window.note_ack();
-                self.motion_wedge.note_ack();
+                self.motion_wedge.note_ack(Instant::now());
                 debug!(
                     "inputs: mouse motion ack (pending={})",
                     self.motion_window.outstanding()
@@ -1036,17 +1077,36 @@ impl InputsChannel {
     /// nothing; above it, say so once. The original failure had no
     /// log line at all, which made an input problem look like a
     /// rendering or transport one.
+    ///
+    /// Which cause to name comes from
+    /// [`MotionWedgeDetector::diagnosis`]: a mouse-mode mismatch and a
+    /// stalled server look the same from here, and blaming the mode
+    /// for a stall sent one investigation the wrong way (ryll#574).
     fn note_motion_throttled(&mut self) {
-        if self.motion_wedge.note_drop() {
-            warn!(
-                "inputs: {} consecutive pointer moves dropped with {} \
-                 motions outstanding and no MOUSE_MOTION_ACK in between; \
-                 further motion will be dropped silently. If the guest \
-                 pointer is not moving, check the negotiated mouse mode — \
-                 the server does not acknowledge messages it ignores.",
-                self.motion_wedge.drops(),
-                self.motion_window.outstanding()
-            );
+        if !self.motion_wedge.note_drop() {
+            return;
+        }
+        let preamble = format!(
+            "inputs: {} consecutive pointer moves dropped with {} motions \
+             outstanding and no MOUSE_MOTION_ACK in between; further \
+             motion will be dropped silently.",
+            self.motion_wedge.drops(),
+            self.motion_window.outstanding()
+        );
+        match self.motion_wedge.diagnosis(Instant::now()) {
+            WedgeDiagnosis::NeverAcked => warn!(
+                "{preamble} No MOUSE_MOTION_ACK has arrived at all this \
+                 session, so the server is not consuming this message \
+                 form: check the negotiated mouse mode — the server does \
+                 not acknowledge messages it ignores."
+            ),
+            WedgeDiagnosis::AcksStopped { acks, quiet_secs } => warn!(
+                "{preamble} The server acked {acks} bunches and then went \
+                 quiet {quiet_secs:.1} s ago, so it was consuming pointer \
+                 messages until it stopped: this looks like the server or \
+                 its guest stalling, not a mouse-mode mismatch. Check \
+                 whether the display channel went quiet at the same time."
+            ),
         }
     }
 
@@ -1652,10 +1712,59 @@ pub fn translate_paste(text: &str) -> Result<Vec<PasteKey>, PasteError> {
 mod tests {
     use super::{
         scancode_for_logical_key, translate_paste, Direction, LogicalKey, MotionRoundTrip,
-        MotionWedgeDetector, MotionWindow, PasteError, PasteKey, WSKey, MAX_ROUND_TRIPS_PENDING,
-        MOTION_ACK_BUNCH, MOTION_WEDGE_THRESHOLD,
+        MotionWedgeDetector, MotionWindow, PasteError, PasteKey, WSKey, WedgeDiagnosis,
+        MAX_ROUND_TRIPS_PENDING, MOTION_ACK_BUNCH, MOTION_WEDGE_THRESHOLD,
     };
     use std::time::{Duration, Instant};
+
+    /// A server that never acked anything is the mouse-mode case: the
+    /// hint that names the mode is the right one.
+    #[test]
+    fn a_window_that_never_acked_blames_the_mouse_mode() {
+        let d = MotionWedgeDetector::default();
+        assert_eq!(d.diagnosis(Instant::now()), WedgeDiagnosis::NeverAcked);
+    }
+
+    /// A server that acked and then stopped was consuming pointer
+    /// messages, so the mouse mode is exonerated. This is ryll#574:
+    /// the mode was correct and the guest's X display had stalled.
+    #[test]
+    fn a_window_that_stopped_acking_blames_the_server() {
+        let mut d = MotionWedgeDetector::default();
+        let t0 = Instant::now();
+        for _ in 0..7 {
+            d.note_ack(t0);
+        }
+        match d.diagnosis(t0 + Duration::from_millis(37_500)) {
+            WedgeDiagnosis::AcksStopped { acks, quiet_secs } => {
+                assert_eq!(acks, 7);
+                assert!(
+                    (quiet_secs - 37.5).abs() < 0.01,
+                    "quiet_secs was {quiet_secs}"
+                );
+            }
+            other => panic!("expected a stalled server, got {other:?}"),
+        }
+    }
+
+    /// The verdict follows the latest ack, not the first: a session
+    /// that recovers and wedges again still reports the recent gap.
+    #[test]
+    fn the_quiet_period_runs_from_the_last_ack() {
+        let mut d = MotionWedgeDetector::default();
+        let t0 = Instant::now();
+        d.note_ack(t0);
+        d.note_ack(t0 + Duration::from_secs(10));
+        match d.diagnosis(t0 + Duration::from_secs(12)) {
+            WedgeDiagnosis::AcksStopped { quiet_secs, .. } => {
+                assert!(
+                    (quiet_secs - 2.0).abs() < 0.01,
+                    "quiet_secs was {quiet_secs}"
+                );
+            }
+            other => panic!("expected a stalled server, got {other:?}"),
+        }
+    }
 
     /// The window opens closed-ended: a fresh channel may send.
     #[test]
@@ -1752,7 +1861,7 @@ mod tests {
         for _ in 0..(MOTION_WEDGE_THRESHOLD - 1) {
             assert!(!d.note_drop(), "warned before the threshold");
         }
-        d.note_ack();
+        d.note_ack(Instant::now());
         assert_eq!(d.drops(), 0, "an ack should clear the run");
     }
 
@@ -1778,7 +1887,7 @@ mod tests {
             .count();
         assert_eq!(first, 1);
 
-        d.note_ack();
+        d.note_ack(Instant::now());
 
         let second = (0..MOTION_WEDGE_THRESHOLD)
             .filter(|_| d.note_drop())

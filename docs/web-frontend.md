@@ -376,10 +376,21 @@ session, look for:
 
     inputs: N consecutive pointer moves dropped ...
 
-That is the ack window wedged — the server acknowledges only the
-pointer messages it consumes, so a client sending the form the
-server did not negotiate fills the window once and drops
-everything after it.
+That is the ack window wedged, and the rest of the line says which
+of two causes the evidence supports. The server acknowledges only
+the pointer messages it consumes, so both look identical from the
+send side, and ryll tells them apart by whether acks were ever
+arriving:
+
+- *"No MOUSE_MOTION_ACK has arrived at all this session"* — the
+  server is not consuming this message form. A client sending the
+  form the server did not negotiate fills the window once and
+  drops everything after it, so check the mouse mode above.
+- *"The server acked N bunches and then went quiet X s ago"* — the
+  server was consuming pointer messages until it stopped, so the
+  mouse mode is not the suspect. Check whether the display channel
+  went quiet over the same period; a guest whose X display stops
+  answering stalls input injection and drawing together.
 
 In server mode specifically, expect the guest pointer and your own
 to drift apart over a session. The browser reports absolute
