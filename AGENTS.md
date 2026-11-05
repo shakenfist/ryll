@@ -146,7 +146,11 @@ that table is an incomplete change.
    and `MAX_MESSAGE_BODY`, never by hand (STYLEGUIDE.md,
    "Message framing").
    Image decoders size output buffers with `limits::rgba_len`
-   (STYLEGUIDE.md, "Dimension safety").
+   (STYLEGUIDE.md, "Dimension safety"). A wire field parsing cannot
+   refuse — any count or rate whose every bit pattern is in range —
+   is checked where it is stored into channel state, and text the
+   server chose is sanitised in its accessor (STYLEGUIDE.md,
+   "Server-chosen values" and "Server-supplied text").
    New link/message parsers should ship with a fuzz target
    under `shakenfist-spice-protocol/fuzz/` — see
    shakenfist/ryll#135 (broaden coverage) and #136 (retrofit
