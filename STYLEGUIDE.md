@@ -322,6 +322,54 @@ buffer they are given and return `None` when its length disagrees
 with the dimensions, so a decoder's result is never paired with the
 wrong geometry downstream. Treat that `None` as a decode failure.
 
+### Server-chosen values
+
+A parse that succeeds says the message was well formed, not that its
+contents are usable. Any wire field whose every bit pattern is in
+range — a `u32` count, a rate, a length — is whatever the server chose,
+and `BoundedReader` will not refuse it.
+
+Check such a field **where it is stored into channel state**, before
+anything downstream can be sized or divided by it, and refuse the
+whole message when it fails:
+
+```rust
+if !start.playable() {
+    self.starts_refused = self.starts_refused.saturating_add(1);
+    warn_once!("playback:start:unplayable", "playback: refusing START: ...");
+    continue;
+}
+```
+
+Not at the point of use: in the playback channel the channel count
+reaches a `vec![0i16; ch]` on the audio thread, several hops and one
+thread away from the message, and a check there has no way to refuse
+the message that supplied it. Not by clamping, either — a clamped
+value sets up state for a stream the server never described, and does
+it silently. Put the predicate and its bounds on the message type in
+the protocol crate (`PlaybackStart::playable`, with its `MIN_`/`MAX_`
+constants) so the limit is documented with the wire format and shared
+by every consumer, the way `limits::rgba_len` is for image geometry.
+Count the refusal in the channel's snapshot and fire a `warn_once!`:
+refusing a message is dropping something the server sent, so the rule
+in "warn_once for protocol gaps" applies.
+
+### Server-supplied text
+
+Text a server chose is passed through
+`shakenfist_spice_protocol::text::sanitise_untrusted` before it
+reaches a log line, a UI label or a bug report. It replaces the C0
+and C1 controls, `DEL` and the bidi formatting characters with
+`U+FFFD`, which stops a server forging log lines with a newline,
+driving a reader's terminal with an escape sequence, or reordering
+what a human sees with a bidi override.
+
+Sanitise in the **accessor**, not at the call sites: `NOTIFY` is read
+by seven channels, and a rule each of them has to remember is a rule
+one of them will not. `Notify::message_text()` is the model — it
+sanitises, and the raw bytes stay on the struct for a caller that
+wants them verbatim.
+
 ### Message framing
 
 Channel read loops keep their received bytes in a `ReceiveBuffer`
