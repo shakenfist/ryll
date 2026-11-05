@@ -809,6 +809,14 @@ not help here. Use the snapshot to answer "where did the audio go?"
   ryll cannot play, so every DATA packet is being dropped. ryll also raises
   a notification the first time this happens.
 
+- **`starts_refused` > 0**: A `PLAYBACK_START` declared a channel count or
+  sample rate outside the range any output could serve, so the stream it
+  described was dropped whole rather than set up. The accepted ranges are
+  1 to 8 channels and 4 kHz to 384 kHz; a real server sends 2 channels at
+  48 kHz. A non-zero count means something upstream is malformed or
+  hostile, not misconfigured, and the log carries the values that were
+  refused.
+
 - **`output`**: The device the sound is going to. If it is not the device
   you are listening to, the problem is local routing, not ryll or the
   guest. On a platform that moves default-device streams by itself (macOS),

@@ -25,7 +25,7 @@
 6347 shakenfist-spice-renderer/src/channels/display.rs
 3210 shakenfist-spice-renderer/src/channels/inputs.rs
 3929 shakenfist-spice-renderer/src/channels/main_channel.rs
-2340 shakenfist-spice-renderer/src/channels/playback.rs
+2398 shakenfist-spice-renderer/src/channels/playback.rs
 1915 shakenfist-spice-renderer/src/control/server.rs
 1681 shakenfist-spice-renderer/src/session.rs
 2254 shakenfist-spice-renderer/tests/control_socket.rs
