@@ -709,8 +709,14 @@ pub struct PlaybackSnapshot {
     /// has been started or the most recent session has been
     /// STOPped.
     pub current_session: Option<PlaybackSessionInfo>,
-    /// Monotonic count of START messages observed.
+    /// Monotonic count of START messages acted on.
     pub start_count: u64,
+    /// Monotonic count of START messages refused because the
+    /// channel count or sample rate the server sent was outside
+    /// what any output could serve. Non-zero means the server is
+    /// malformed or adversarial: no real one describes a stream
+    /// that way.
+    pub starts_refused: u64,
     /// Monotonic count of STOP messages observed.
     pub stop_count: u64,
 

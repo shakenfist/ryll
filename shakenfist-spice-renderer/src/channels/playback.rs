@@ -861,8 +861,13 @@ pub struct PlaybackChannel {
     /// Raw-mode DATA converted to samples, kept between packets so
     /// the conversion does not allocate per packet.
     raw_samples: Vec<i16>,
-    /// Cumulative START message count.
+    /// Cumulative START message count, counting only the ones that
+    /// described a stream ryll could set up an output for.
     start_count: u64,
+    /// Cumulative count of START messages refused because the channel
+    /// count or sample rate they described was outside what
+    /// [`PlaybackStart::playable`] accepts.
+    starts_refused: u64,
     /// Cumulative STOP message count.
     stop_count: u64,
     /// Cumulative DATA packet receive count.
@@ -954,6 +959,7 @@ impl PlaybackChannel {
             current_session: None,
             raw_samples: Vec::new(),
             start_count: 0,
+            starts_refused: 0,
             stop_count: 0,
             data_packets_received: 0,
             data_packets_decoded: 0,
@@ -1155,6 +1161,30 @@ impl PlaybackChannel {
                 playback_server::START => {
                     // A malformed body is ignored, as it always has been.
                     if let Ok(start) = PlaybackStart::decode(payload) {
+                        // The channel count and sample rate are
+                        // server-chosen `u32`s that parsing cannot
+                        // refuse, and they do not stay here: they size
+                        // a per-frame buffer and a resampling ratio on
+                        // the audio thread. A stream ryll could not
+                        // set up an output for is dropped whole, which
+                        // leaves any stream already playing alone,
+                        // rather than clamped into a stream the server
+                        // did not describe.
+                        if !start.playable() {
+                            self.starts_refused = self.starts_refused.saturating_add(1);
+                            warn_once!(
+                                "playback:start:unplayable",
+                                "playback: refusing START: {} channels at {}Hz is outside \
+                                 {}-{} channels and {}-{}Hz",
+                                start.channels,
+                                start.frequency,
+                                PlaybackStart::MIN_CHANNELS,
+                                PlaybackStart::MAX_CHANNELS,
+                                PlaybackStart::MIN_FREQUENCY,
+                                PlaybackStart::MAX_FREQUENCY,
+                            );
+                            continue;
+                        }
                         self.channels = start.channels;
                         let format = start.format;
                         self.sample_rate = start.frequency;
@@ -1558,6 +1588,7 @@ impl PlaybackChannel {
             // Per-session audio state.
             snap.current_session = self.current_session.clone();
             snap.start_count = self.start_count;
+            snap.starts_refused = self.starts_refused;
             snap.stop_count = self.stop_count;
 
             // Audio-data plumbing counters.
@@ -1954,22 +1985,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_channel_count_saturates_rather_than_truncates() {
+    async fn an_unplayable_start_leaves_the_running_stream_alone() {
         let (mut channel, sink, _peers) = sink_channel().await;
-        // 300 truncated to a u8 would be 44.
+        // A stream the client can serve, then one it cannot: 300
+        // channels would be 44 truncated into the `u8` the sink
+        // takes, and 0xffffffff would size an 8 GiB per-frame buffer
+        // on the audio thread.
         feed(
             &mut channel,
-            &[mode(audio_data_mode::RAW), start(300, 48_000)],
+            &[mode(audio_data_mode::RAW), start(2, 48_000)],
         )
         .await;
+        for refused in [start(300, 48_000), start(u32::MAX, 48_000), start(2, 0)] {
+            feed(&mut channel, &[refused]).await;
+        }
         assert_eq!(
             sink.calls(),
             vec![SinkCall::Start(PlaybackFormat {
                 mode: audio_data_mode::RAW,
                 sample_rate_hz: 48_000,
-                channels: u8::MAX,
-            })]
+                channels: 2,
+            })],
+            "a refused START must not reach the sink, nor restart the stream"
         );
+        assert_eq!(channel.starts_refused, 3);
+        assert_eq!(channel.start_count, 1, "a refused START is not counted");
+        // The stream the server did describe playably is still the
+        // one running, with its own shape.
+        let session = channel.current_session.as_ref().expect("session");
+        assert_eq!((session.sample_rate_hz, session.channels), (48_000, 2));
+        assert_eq!(channel.channels, 2);
+        assert_eq!(channel.sample_rate, 48_000);
+    }
+
+    #[tokio::test]
+    async fn the_channel_count_saturates_rather_than_truncates() {
+        // `playable()` keeps the wire from reaching 256 channels, so
+        // this guards the conversion itself rather than a message a
+        // server could still send: 300 truncated to a `u8` would be
+        // 44, and the saturation is what keeps the sink's `u8` honest
+        // if the accepted range is ever widened.
+        let (mut channel, _sink, _peers) = sink_channel().await;
+        channel.channels = 300;
+        assert_eq!(channel.channels_u8(), u8::MAX);
     }
 
     // --- CallbackState and audio-thread helper tests ---

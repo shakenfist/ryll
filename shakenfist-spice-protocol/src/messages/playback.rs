@@ -28,6 +28,45 @@ pub struct PlaybackStart {
 impl PlaybackStart {
     /// The size on the wire, in bytes.
     pub const SIZE: usize = 14;
+
+    /// The fewest channels a playable stream has. Zero channels
+    /// describe no audio at all, and every consumer of a stream
+    /// assumes at least one.
+    pub const MIN_CHANNELS: u32 = 1;
+
+    /// The most channels a playable stream has: 7.1 surround. The
+    /// wire field is a `u32` and spice-server sends 2, so this is
+    /// headroom rather than a real configuration, but it is the point
+    /// past which a count is a hostile number rather than a layout.
+    pub const MAX_CHANNELS: u32 = 8;
+
+    /// The lowest sample rate a playable stream has, below telephony.
+    pub const MIN_FREQUENCY: u32 = 4_000;
+
+    /// The highest sample rate a playable stream has, above any audio
+    /// device in use. SPICE sends 48 kHz; 44.1 kHz and below appear
+    /// from other servers.
+    pub const MAX_FREQUENCY: u32 = 384_000;
+
+    /// Whether the stream this message describes is one a client can
+    /// set up an output for.
+    ///
+    /// The wire bounds `channels` and `frequency` only by their width,
+    /// so a server chooses them freely, and neither is checked by
+    /// parsing: every `u32` is a well-formed `u32`. They are not
+    /// inert, though — a client sizes buffers and resamplers from
+    /// them, often on an audio thread a long way from this message —
+    /// so a client validates them here, before they are stored, and
+    /// treats a message that fails as one it cannot honour.
+    ///
+    /// `format` is not checked: it selects the sample layout of the
+    /// `DATA` that follows, which the data path has to recognise
+    /// anyway, and an unknown one costs nothing until data arrives.
+    #[must_use]
+    pub fn playable(&self) -> bool {
+        (Self::MIN_CHANNELS..=Self::MAX_CHANNELS).contains(&self.channels)
+            && (Self::MIN_FREQUENCY..=Self::MAX_FREQUENCY).contains(&self.frequency)
+    }
 }
 
 impl WireType for PlaybackStart {
@@ -326,6 +365,76 @@ mod tests {
         assert_eq!(encode(&start), body[..PlaybackStart::SIZE]);
         assert!(PlaybackStart::decode(&body[..PlaybackStart::SIZE - 1]).is_err());
         assert!(PlaybackStart::decode(&[]).is_err());
+    }
+
+    #[test]
+    fn start_accepts_the_rates_and_layouts_servers_really_send() {
+        for (channels, frequency) in [
+            (2, 48_000),  // spice-server
+            (1, 8_000),   // telephony-rate mono
+            (2, 44_100),  // CD rate
+            (6, 48_000),  // 5.1
+            (8, 192_000), // the corners of what is accepted
+            (1, 4_000),
+        ] {
+            let start = PlaybackStart {
+                channels,
+                format: audio_fmt::S16,
+                frequency,
+                time: 0,
+            };
+            assert!(
+                start.playable(),
+                "{} ch at {} Hz refused",
+                channels,
+                frequency
+            );
+        }
+    }
+
+    #[test]
+    fn start_refuses_a_channel_count_no_output_could_serve() {
+        // The field is a `u32`, and a client that believed it would
+        // size a per-frame buffer from it: 0xffffffff channels of
+        // `i16` is 8 GiB, and the allocation happens on the audio
+        // thread rather than here.
+        for channels in [0, 9, 1 << 20, u32::MAX] {
+            let start = PlaybackStart {
+                channels,
+                format: audio_fmt::S16,
+                frequency: 48_000,
+                time: 0,
+            };
+            assert!(!start.playable(), "{} channels accepted", channels);
+        }
+    }
+
+    #[test]
+    fn start_refuses_a_sample_rate_no_output_could_serve() {
+        // Zero is the dangerous one: it is the numerator of a
+        // resampling ratio, so a stream claiming it never advances.
+        for frequency in [0, 1, 3_999, 384_001, u32::MAX] {
+            let start = PlaybackStart {
+                channels: 2,
+                format: audio_fmt::S16,
+                frequency,
+                time: 0,
+            };
+            assert!(!start.playable(), "{} Hz accepted", frequency);
+        }
+    }
+
+    #[test]
+    fn start_judges_nothing_about_the_format() {
+        // An unrecognised format is the data path's problem, not a
+        // reason to refuse the stream's geometry.
+        let start = PlaybackStart {
+            channels: 2,
+            format: u16::MAX,
+            frequency: 48_000,
+            time: 0,
+        };
+        assert!(start.playable());
     }
 
     // --- PlaybackMode ---

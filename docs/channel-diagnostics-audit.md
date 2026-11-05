@@ -203,7 +203,12 @@ snapshot surfaces:
   `sample_rate_hz`, `channels`, and `codec` (Opus, raw PCM, or an
   unrecognised codec number)
 - `start_count` / `stop_count` — cumulative `PLAYBACK_START` /
-  `PLAYBACK_STOP` messages received since session open
+  `PLAYBACK_STOP` messages received since session open; `start_count`
+  counts only the STARTs that were acted on
+- `starts_refused` — cumulative `PLAYBACK_START` messages dropped
+  because the channel count or sample rate they declared was outside
+  what any output could serve. No real server sends one, so a non-zero
+  value means the server is malformed or adversarial
 - `last_volume_per_channel`, `last_mute`, `last_latency_ms` — the
   most recent volume, mute, and latency-hint values set by the server
 
