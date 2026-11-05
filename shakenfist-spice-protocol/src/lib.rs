@@ -30,6 +30,9 @@
 //!   and matching (`parse_host_subject`, `ExpectedSubject`),
 //!   replicating spice-common's `ssl_verify.c` semantics for
 //!   `host-subject` pinning.
+//! - [`text`] — making server-supplied text safe to log or show
+//!   (`sanitise_untrusted`), which [`messages::Notify`] applies to
+//!   its own message.
 //! - [`proxy`] — HTTP CONNECT proxy support: proxy URI parsing
 //!   (`parse_proxy_uri`, `HttpProxy`) with spice-gtk's
 //!   semantics, and the CONNECT exchange
@@ -65,6 +68,7 @@ pub mod messages;
 pub mod parse;
 pub mod proxy;
 pub mod reader;
+pub mod text;
 
 pub use client::{SpiceClient, CA_ALONE_WARNING};
 

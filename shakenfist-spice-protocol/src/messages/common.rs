@@ -241,10 +241,24 @@ impl Notify {
         SpiceVisibility::from_u32(self.visibility)
     }
 
-    /// The text, with invalid UTF-8 replaced by U+FFFD.
+    /// The text, made safe to log and to show a human: invalid UTF-8
+    /// and every control, escape and bidi character replaced by
+    /// U+FFFD, as [`crate::text::sanitise_untrusted`] describes.
+    ///
+    /// Every caller of this takes the result to a log line or a
+    /// notification, so the sanitising belongs here rather than at
+    /// each of them: a channel that forgot it would hand a server
+    /// control of ryll's own output. The raw bytes stay available in
+    /// [`message`](Self::message) for a caller that wants them
+    /// verbatim, such as a capture or a bug report.
     #[must_use]
     pub fn message_text(&self) -> Cow<'_, str> {
-        String::from_utf8_lossy(&self.message)
+        match String::from_utf8_lossy(&self.message) {
+            Cow::Borrowed(text) => crate::text::sanitise_untrusted(text),
+            // The lossy decode has already allocated, so sanitising
+            // what it produced costs no more than borrowing it would.
+            Cow::Owned(text) => Cow::Owned(crate::text::sanitise_untrusted(&text).into_owned()),
+        }
     }
 }
 
@@ -947,7 +961,11 @@ mod tests {
 
     #[test]
     fn notify_parse_with_500_byte_message() {
-        let payload: Vec<u8> = (0u8..=127u8).cycle().take(500).collect();
+        // Printable ASCII only: `message_text` replaces controls, so a
+        // payload holding them would not round-trip through it, which
+        // is `notify_text_is_sanitised`'s business rather than this
+        // test's.
+        let payload: Vec<u8> = (0x20u8..=0x7eu8).cycle().take(500).collect();
         let expected_str = String::from_utf8(payload.clone()).expect("test payload is valid ASCII");
         let buf = build_notify(1, 2, 7, &payload);
         assert_eq!(buf.len(), 524);
@@ -996,6 +1014,36 @@ mod tests {
             msg.message_text().contains('\u{FFFD}'),
             "expected U+FFFD replacement char in message, got: {:?}",
             msg.message_text(),
+        );
+    }
+
+    #[test]
+    fn notify_text_is_sanitised() {
+        // A server that embeds a newline and an escape in its notify is
+        // reaching for the log file and the terminal of whoever reads
+        // it. The accessor every channel uses refuses both, so no
+        // channel has to remember to.
+        let hostile = b"disk full\n\x1b[2JWARN: authentication disabled";
+        let buf = build_notify(0, 0, 0, hostile);
+        let msg = Notify::decode(&buf).expect("a control character is not a parse error");
+        assert_eq!(msg.message, hostile, "the raw bytes are kept as given");
+        assert_eq!(
+            msg.message_text(),
+            "disk full\u{fffd}\u{fffd}[2JWARN: authentication disabled"
+        );
+    }
+
+    #[test]
+    fn notify_text_is_sanitised_even_when_the_bytes_are_not_utf8() {
+        // The lossy decode and the sanitiser are different filters,
+        // and a hostile server has no reason to pick one: this body
+        // is invalid UTF-8 *and* carries an escape.
+        let buf = build_notify(0, 0, 0, b"\xff\x1b[2J");
+        let msg = Notify::decode(&buf).expect("invalid UTF-8 should return Ok");
+        assert_eq!(
+            msg.message_text(),
+            "\u{fffd}\u{fffd}[2J",
+            "the first U+FFFD is the lossy decode's, the second the sanitiser's"
         );
     }
 
