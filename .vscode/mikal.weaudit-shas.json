@@ -129,6 +129,10 @@
       "sha": "ffeba1d4155450125fa098094f1167ed0cdbc9d2",
       "date": "2026-09-17"
     },
+    "ryll/Cargo.toml": {
+      "sha": "6e77411f25e9bb28b23bb146644cd9f05bd680fb",
+      "date": "2026-11-07"
+    },
     "ryll/build.rs": {
       "sha": "b0803d125978073b943df8c6a6207879c41f5157",
       "date": "2026-07-26"
@@ -185,6 +189,10 @@
       "sha": "058ef513df12824921acda54af01c9b1893f4197",
       "date": "2026-10-17"
     },
+    "ryll/src/config.rs": {
+      "sha": "efbbf14eda1d37f6dcb5ba08b50338517969f9ff",
+      "date": "2026-11-07"
+    },
     "ryll/src/display_gui.rs": {
       "sha": "e363fd1127f0d1201f7272ca4c3da13e2ec9a499",
       "date": "2026-10-17"
@@ -193,9 +201,17 @@
       "sha": "44b5e6e108ab73c57fadd40d5e279be56694ff12",
       "date": "2026-11-03"
     },
+    "ryll/src/main.rs": {
+      "sha": "0f224793a5248004e918e8ac7bcff62038a4a08e",
+      "date": "2026-11-07"
+    },
     "ryll/src/notifications.rs": {
       "sha": "cfd7c5df773b57965f15ed83526d46f5d217b747",
       "date": "2026-09-18"
+    },
+    "ryll/src/rdp.rs": {
+      "sha": "99087faff987742cc768af7e62b9ce7aae3ac458",
+      "date": "2026-11-07"
     },
     "ryll/src/reconnect_policy.rs": {
       "sha": "ea6dece117a787eda8c7eb2a8f01fbc41455f4a2",
