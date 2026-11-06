@@ -144,10 +144,6 @@
       "author": "mikal"
     },
     {
-      "path": "tools/web-smoke.sh",
-      "author": "mikal"
-    },
-    {
       "path": "tools/gen-swatches-jpeg/src/main.rs",
       "author": "mikal"
     },
@@ -544,10 +540,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/web-frontend.md",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/pyproject.toml",
       "author": "mikal"
     },
@@ -692,14 +684,6 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/rdp.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/Cargo.toml",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/web/assets/app.js",
       "author": "mikal"
     },
@@ -732,15 +716,7 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/main.rs",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/capture.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/config.rs",
       "author": "mikal"
     },
     {
