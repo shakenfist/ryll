@@ -107,6 +107,24 @@ depend on the `ryll` binary, so a gateway could serve RDP from SPICE
 sessions without it. See
 [`docs/rdp-mode-internals.md`](docs/rdp-mode-internals.md).
 
+The crates are workspace members rather than separate repositories,
+so a type change and every call site it touches land in one commit
+against one `Cargo.lock`. See
+[Key design decisions](docs/design-decisions.md) for why, and
+[Releasing](docs/releasing.md) for how they are published anyway.
+
+The four image codecs share `shakenfist-spice-compression` rather
+than taking a crate each, because `DecompressedImage` is the common
+return type of three of them: splitting them would push it into a
+fifth types crate, duplicate it, or hoist it into the protocol
+crate. (`quic_decode` is the exception and returns raw bytes --
+[issue 697](https://github.com/shakenfist/ryll/issues/697).)
+Per-algorithm dependency differences are features instead -- `glz`
+is what pulls in tokio, for the cross-channel retry loop -- so a
+consumer that does not need an algorithm does not pay for its
+dependencies. The crate has since grown JPEG and H.264 decoders and
+the encoders a SPICE server needs, behind their own features.
+
 ### Communication upward: ChannelEvent
 
 Channel handlers communicate state changes upstream via the

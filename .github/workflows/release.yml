@@ -325,7 +325,7 @@ jobs:
 
   # Builds the per-arch `ryll` PyPI wheels (maturin bindings=bin; the
   # wheel embeds the compiled ryll GUI binary, see
-  # tools/build-ryll-wheel.sh and docs/plans/PLAN-pip-distribution.md).
+  # tools/build-ryll-wheel.sh and docs/design-decisions.md).
   # Each leg must build natively on a runner matching its arch (no
   # QEMU), so it only needs check-version and can build in parallel
   # with the Rust jobs above. manual-build.yml carries a copy of this

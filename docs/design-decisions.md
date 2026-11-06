@@ -81,7 +81,13 @@ produced.
    based on the `win_head_dist` field from each GLZ header, rather than using
    a fixed cache size. This matches the server's reference window and prevents
    both premature eviction (corrupting cross-frame references) and unbounded
-   memory growth.
+   memory growth. Cross-frame corruption was traced to dictionary lifetime
+   rather than to the decoder: the control-byte parsing, pixel_flag and
+   image_flag decoding and the pixel copy loops were compared against
+   kerbside's Python `glz.py` and found faithful. So a hunt for corrupted GLZ
+   output starts with eviction, the `IMAGE_FLAGS_CACHE_ME` test before
+   caching, and the invalidation handlers that clear the dictionary, not with
+   the decompression algorithm.
 
 9. **Pcap TCP segmentation** - Large SPICE messages are split into multiple
    TCP segments in the pcap writer to avoid exceeding the IPv4 maximum packet
@@ -300,6 +306,62 @@ produced.
     repeats and run their own timer. ryll's held-key set, not the
     toolkit's `repeat` flag, decides what counts as a repeat, and on
     macOS a repeat while Cmd is down is withheld like any other Cmd
-    chord. Earlier plans record dropping repeats as a fix (the PR 31
-    follow-up and the WebRTC soak's input findings); this entry
-    reverses them.
+    chord. Earlier plans record dropping repeats as a fix (the WebRTC
+    soak's input findings, and the retired PR #31 follow-up, whose text
+    the plans index links); this entry reverses them.
+
+25. **The PyPI wheel embeds the binary rather than fetching it** - `pip
+    install ryll` installs a per-arch `manylinux_2_28` wheel with the
+    compiled GUI binary already inside it (maturin `bindings = "bin"`,
+    from `ryll/pyproject.toml`), so the install works offline and fetches
+    nothing from GitHub the first time `ryll` runs. Two alternatives were
+    rejected, and the first of them was fully built and working before it
+    was dropped: a pure-Python `py3-none-any` wheel whose console script
+    downloads and SHA256-verifies the release binary on first run, which
+    puts a runtime GitHub dependency plus launcher, download and verify
+    code on every user's machine; and compiling at install time from a
+    maturin sdist, which needs a Rust toolchain and every GUI/audio
+    `-dev` library present while `pip install` runs, so it fails in a
+    container or on a fresh desktop. The cost the embedded wheel carries
+    instead -- a manylinux build lane and larger per-arch wheels -- falls
+    on CI rather than on users. kerbside-proxy builds its wheel with
+    maturin's `--zig`, which does not work here, because zig's sysroot
+    has no GUI/audio dev libraries; `tools/build-ryll-wheel.sh` runs the
+    build natively inside the `manylinux_2_28` container instead. See
+    [Releasing](releasing.md#the-pypi-wheels-platform-tag) for what the
+    wheel's platform tag does and does not promise.
+
+26. **The status bar is glanceable state; feature actions live in the
+    menu** - The bottom panel shows only what an operator reads
+    continuously -- volume, latency, bandwidth and their sparklines, the
+    FPS readout, the Cadence indicator, the USB device description --
+    while anything an operator *invokes* sits behind the `☰` menu at the
+    right edge (`ryll/src/app/mod.rs`). The row had grown a button per
+    feature as USB, WebDAV, screenshots, bug reports and the traffic
+    viewer landed, which mixed commands into the state and crowded out
+    the state, so a new feature gets a menu entry rather than another
+    button. The glyph is the unicode `☰` rather than an image, matching
+    the `🔇`/`🔊` buttons beside it and keeping the GUI free of an asset
+    pipeline. Side-panel entries are checkboxes, so the menu shows
+    whether their panel is open; one-shot actions are buttons, and those
+    with a host shortcut advertise it (see `HostShortcut`). Protocol gap
+    counts stay a separate badge rather than moving into the menu,
+    because a notification is neither state nor a command and
+    notifications have their own home in the bell and its panel.
+
+27. **The crates are workspace members, not separate repositories** -
+    All seven crates live in this repository. A type change in
+    `shakenfist-spice-protocol` and every call site it touches is then
+    one commit and one CI run rather than a multi-repository version
+    dance, one `Cargo.lock` keeps every member on the same dependency
+    versions, and one CI and pre-commit configuration covers them all.
+    They are versioned together (`version.workspace = true`, and
+    [Releasing](releasing.md) bumps them as a set), so the independent
+    versioning separate repositories would buy goes unused. The layout
+    does not block publication: `tools/publish-crates.sh` runs `cargo
+    publish` per crate in dependency order, and `ryll/Cargo.toml` uses
+    the dual-spec `{ path = "...", version = "..." }` idiom so Cargo
+    takes the path for local builds and the version for the published
+    artefact. The choice is reversible rather than permanent: if a
+    crate ever needs its own repository, `git filter-repo` can lift it
+    out with its history.

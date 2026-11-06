@@ -114,8 +114,8 @@ succeeds on a host without them. ALSA is linked directly, so without
 `remote-viewer` is the fallback whenever ryll can't be installed or run
 on a given platform.
 
-See [plans/PLAN-pip-distribution.md](plans/PLAN-pip-distribution.md)
-for the full design rationale.
+See [Key design decisions](design-decisions.md) for why the wheel
+embeds the binary rather than fetching it on first run.
 
 ## Kasm Workspaces
 
