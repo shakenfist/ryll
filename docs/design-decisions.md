@@ -324,3 +324,21 @@ produced.
     build natively inside the `manylinux_2_28` container instead. See
     [Releasing](releasing.md#the-pypi-wheels-platform-tag) for what the
     wheel's platform tag does and does not promise.
+
+26. **The status bar is glanceable state; feature actions live in the
+    menu** - The bottom panel shows only what an operator reads
+    continuously -- volume, latency, bandwidth and their sparklines, the
+    FPS readout, the Cadence indicator, the USB device description --
+    while anything an operator *invokes* sits behind the `☰` menu at the
+    right edge (`ryll/src/app/mod.rs`). The row had grown a button per
+    feature as USB, WebDAV, screenshots, bug reports and the traffic
+    viewer landed, which mixed commands into the state and crowded out
+    the state, so a new feature gets a menu entry rather than another
+    button. The glyph is the unicode `☰` rather than an image, matching
+    the `🔇`/`🔊` buttons beside it and keeping the GUI free of an asset
+    pipeline. Side-panel entries are checkboxes, so the menu shows
+    whether their panel is open; one-shot actions are buttons, and those
+    with a host shortcut advertise it (see `HostShortcut`). Protocol gap
+    counts stay a separate badge rather than moving into the menu,
+    because a notification is neither state nor a command and
+    notifications have their own home in the bell and its panel.
