@@ -275,17 +275,17 @@ pub struct Args {
     #[arg(long = "web-ice-server", value_name = "URL")]
     pub web_ice_server: Vec<String>,
 
-    /// Serve the SPICE session to stock RDP clients (mstsc,
-    /// FreeRDP and the platform RDP apps). Listens on port 3389,
-    /// or an ephemeral port if 3389 is in use, and prints the
-    /// address, the username, a per-launch random password and the
-    /// fingerprint of a per-launch self-signed certificate.
+    /// Serve the SPICE session to stock RDP clients. Listens on
+    /// port 3389, or an ephemeral port if 3389 is in use, and prints
+    /// the address, the username, a per-launch random password and
+    /// the fingerprint of a per-launch self-signed certificate.
     /// Clients authenticate with TLS unless --rdp-security says
     /// otherwise. A reachability fallback for users with no SPICE
-    /// client, which loses SPICE features such as USB redirection
-    /// and folder sharing. Mutually exclusive with --web, --headless
-    /// and the GUI default. Needs a ryll built with the `rdp`
-    /// feature.
+    /// client: --usb-disk and --share-dir still reach the guest, but
+    /// the RDP client cannot offer its own devices or folders. Only
+    /// FreeRDP has been tested; see docs/rdp-frontend.md. Mutually
+    /// exclusive with --web, --headless and the GUI default. Needs a
+    /// ryll built with the `rdp` feature.
     #[arg(long, conflicts_with_all = ["web", "headless"])]
     pub rdp: bool,
 

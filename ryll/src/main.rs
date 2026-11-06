@@ -109,7 +109,11 @@ fn main() -> Result<()> {
     // trigger. See `docs/plans/PLAN-macos-runtime-metrics.md`.
     shakenfist_spice_renderer::metrics::init_at_startup();
 
-    // Install Ctrl+C handler so graceful shutdown works on all platforms.
+    // Install the shutdown handler so graceful shutdown works on all
+    // platforms. With ctrlc's `termination` feature this fires for
+    // SIGINT, SIGTERM and SIGHUP on unix, so `systemctl stop` is as
+    // clean as Ctrl+C; ryll has no config reload, so SIGHUP meaning
+    // "shut down" costs nothing.
     ctrlc::set_handler(|| {
         SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
     })

@@ -643,7 +643,11 @@ pub fn run_rdp(
 
         // Operator-visible: what to type into the RDP client. Goes to
         // stdout only, never through the tracing pipeline, so the
-        // password does not reach journald or log aggregators.
+        // password stays out of the tracing output and the log file.
+        // It does *not* stay out of the journal: under systemd a
+        // service's stdout is captured by journald, so a unit that
+        // runs this prints the password there. See the password
+        // handling section of docs/rdp-frontend.md.
         // audit-allow-println: operator-facing launch lines, not for logs
         println!("RDP: {local_addr}");
         println!("user: {username}");

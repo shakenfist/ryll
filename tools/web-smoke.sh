@@ -144,9 +144,24 @@ while kill -0 "$PID" 2>/dev/null; do
     sleep 0.2
 done
 
-# Reap the child to avoid a leftover zombie and collect exit code.
+# Reap the child to avoid a leftover zombie and collect its status.
 # The process may have exited non-zero (SPICE connect failed) — that
-# is acceptable; we only care that it exited promptly after SIGTERM.
-wait "$PID" || true
+# is acceptable. What is not acceptable is status 143, which is how
+# the shell reports a process killed by SIGTERM's default action: that
+# is the signal going unhandled, which is what ryll#642 was. A handled
+# SIGTERM runs ryll's own teardown and exits through a normal status,
+# never 143. Promptness alone cannot tell the two apart, because the
+# kernel's default action is the promptest exit of all.
+STATUS=0
+wait "$PID" || STATUS=$?
+if (( STATUS == 143 )); then
+    echo "FAIL: ryll --web was killed by SIGTERM's default action (status 143)"
+    echo "      rather than handling it; shutdown was not graceful."
+    echo "--- stdout ---"
+    cat "$TMPDIR_WORK/ryll.stdout" || true
+    echo "--- stderr ---"
+    cat "$TMPDIR_WORK/ryll.stderr" || true
+    exit 1
+fi
 
 echo "smoke test passed ($MODE_LABEL)"

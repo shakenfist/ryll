@@ -641,7 +641,7 @@ impl RdpServerDisplayUpdates for MirrorUpdates {
         // damage is taken; the take and the queueing happen together
         // in `poll_mirror`, with no await between them, and what is
         // taken stays in `self.pending` for the next call. The cursor
-        // watch is read the same way, in `poll_cursor`, before the
+        // watch is read the same way, in `poll_session`, before the
         // lock, so a pointer update goes out ahead of that poll's
         // bitmaps and is already queued if the call is dropped at the
         // lock. The mirror lock is held only for that synchronous step,
