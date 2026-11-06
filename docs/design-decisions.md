@@ -81,7 +81,13 @@ produced.
    based on the `win_head_dist` field from each GLZ header, rather than using
    a fixed cache size. This matches the server's reference window and prevents
    both premature eviction (corrupting cross-frame references) and unbounded
-   memory growth.
+   memory growth. Cross-frame corruption was traced to dictionary lifetime
+   rather than to the decoder: the control-byte parsing, pixel_flag and
+   image_flag decoding and the pixel copy loops were compared against
+   kerbside's Python `glz.py` and found faithful. So a hunt for corrupted GLZ
+   output starts with eviction, the `IMAGE_FLAGS_CACHE_ME` test before
+   caching, and the invalidation handlers that clear the dictionary, not with
+   the decompression algorithm.
 
 9. **Pcap TCP segmentation** - Large SPICE messages are split into multiple
    TCP segments in the pcap writer to avoid exceeding the IPv4 maximum packet
