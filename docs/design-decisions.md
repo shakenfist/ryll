@@ -348,3 +348,20 @@ produced.
     counts stay a separate badge rather than moving into the menu,
     because a notification is neither state nor a command and
     notifications have their own home in the bell and its panel.
+
+27. **The crates are workspace members, not separate repositories** -
+    All seven crates live in this repository. A type change in
+    `shakenfist-spice-protocol` and every call site it touches is then
+    one commit and one CI run rather than a multi-repository version
+    dance, one `Cargo.lock` keeps every member on the same dependency
+    versions, and one CI and pre-commit configuration covers them all.
+    They are versioned together (`version.workspace = true`, and
+    [Releasing](releasing.md) bumps them as a set), so the independent
+    versioning separate repositories would buy goes unused. The layout
+    does not block publication: `tools/publish-crates.sh` runs `cargo
+    publish` per crate in dependency order, and `ryll/Cargo.toml` uses
+    the dual-spec `{ path = "...", version = "..." }` idiom so Cargo
+    takes the path for local builds and the version for the published
+    artefact. The choice is reversible rather than permanent: if a
+    crate ever needs its own repository, `git filter-repo` can lift it
+    out with its history.
