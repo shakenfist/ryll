@@ -830,6 +830,14 @@
     {
       "path": "shakenfist-spice-protocol/src",
       "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/renovate.yml",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
