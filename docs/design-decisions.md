@@ -300,9 +300,9 @@ produced.
     repeats and run their own timer. ryll's held-key set, not the
     toolkit's `repeat` flag, decides what counts as a repeat, and on
     macOS a repeat while Cmd is down is withheld like any other Cmd
-    chord. Earlier plans record dropping repeats as a fix (the PR 31
-    follow-up and the WebRTC soak's input findings); this entry
-    reverses them.
+    chord. Earlier plans record dropping repeats as a fix (the WebRTC
+    soak's input findings, and the retired PR #31 follow-up, whose text
+    the plans index links); this entry reverses them.
 
 25. **The PyPI wheel embeds the binary rather than fetching it** - `pip
     install ryll` installs a per-arch `manylinux_2_28` wheel with the
