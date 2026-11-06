@@ -303,3 +303,24 @@ produced.
     chord. Earlier plans record dropping repeats as a fix (the PR 31
     follow-up and the WebRTC soak's input findings); this entry
     reverses them.
+
+25. **The PyPI wheel embeds the binary rather than fetching it** - `pip
+    install ryll` installs a per-arch `manylinux_2_28` wheel with the
+    compiled GUI binary already inside it (maturin `bindings = "bin"`,
+    from `ryll/pyproject.toml`), so the install works offline and fetches
+    nothing from GitHub the first time `ryll` runs. Two alternatives were
+    rejected, and the first of them was fully built and working before it
+    was dropped: a pure-Python `py3-none-any` wheel whose console script
+    downloads and SHA256-verifies the release binary on first run, which
+    puts a runtime GitHub dependency plus launcher, download and verify
+    code on every user's machine; and compiling at install time from a
+    maturin sdist, which needs a Rust toolchain and every GUI/audio
+    `-dev` library present while `pip install` runs, so it fails in a
+    container or on a fresh desktop. The cost the embedded wheel carries
+    instead -- a manylinux build lane and larger per-arch wheels -- falls
+    on CI rather than on users. kerbside-proxy builds its wheel with
+    maturin's `--zig`, which does not work here, because zig's sysroot
+    has no GUI/audio dev libraries; `tools/build-ryll-wheel.sh` runs the
+    build natively inside the `manylinux_2_28` container instead. See
+    [Releasing](releasing.md#the-pypi-wheels-platform-tag) for what the
+    wheel's platform tag does and does not promise.
