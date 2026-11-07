@@ -50,6 +50,11 @@ pub struct StreamSnapshot {
     /// error or unsupported pixel format) or the codec is not
     /// supported by the renderer (anything other than MJPEG today).
     pub frames_decode_failed: u64,
+    /// Frames the decoder produced that could not be painted because
+    /// the stream's dest rect encloses no pixels (`right <= left` or
+    /// `bottom <= top`). Counted here rather than in
+    /// `frames_decoded_ok`, which means "painted".
+    pub frames_dropped_empty_dest: u64,
     /// Session-relative seconds of the most recent `STREAM_DATA`
     /// message for this stream. None until the first one arrives.
     pub last_frame_ts_secs: Option<f64>,

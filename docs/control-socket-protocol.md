@@ -1,4 +1,4 @@
-# Control Socket Protocol — Version 1.6
+# Control Socket Protocol — Version 1.7
 
 This document specifies the wire protocol spoken between a Ryll session
 with no host window — `--headless` or `--web` — and any external driver
@@ -8,7 +8,7 @@ such as latency loadtests and Sextant scenario tests implement against
 this document. Read the whole document before writing a client or
 implementing a verb.
 
-Protocol version: **1.6**
+Protocol version: **1.7**
 
 Version history:
 
@@ -52,6 +52,9 @@ Version history:
   check that audio arrives and decodes.  It is absent when no playback
   channel has linked, including in every build without the `audio`
   feature.  Additive.
+- **1.7** — added `frames_dropped_empty_dest` to each stream in the
+  `stats` result, counting frames a server sent with a dest rect that
+  encloses no pixels, which used to be counted as painted.  Additive.
 
 ---
 
@@ -302,7 +305,7 @@ Parameters:
 ### Hello response — success
 
 ```json
-{"id": 1, "ok": true, "result": {"server_name": "ryll", "protocol_version": "1.6", "supported_methods": ["hello", "status", "send_key", "paste", "screenshot", "subscribe", "unsubscribe", "clipboard_set", "clipboard_get", "resize", "stats"], "supported_events": ["latency", "agent_connected", "paste_completed", "paste_failed", "dropped", "surface_drawn", "clipboard_changed", "input_rtt"]}}
+{"id": 1, "ok": true, "result": {"server_name": "ryll", "protocol_version": "1.7", "supported_methods": ["hello", "status", "send_key", "paste", "screenshot", "subscribe", "unsubscribe", "clipboard_set", "clipboard_get", "resize", "stats"], "supported_events": ["latency", "agent_connected", "paste_completed", "paste_failed", "dropped", "surface_drawn", "clipboard_changed", "input_rtt"]}}
 ```
 
 Result fields:
@@ -310,7 +313,7 @@ Result fields:
 | Field | Type | Description |
 |-------|------|-------------|
 | `server_name` | string | Always `"ryll"` in this implementation. |
-| `protocol_version` | string | The version the server will speak. In v1.x this is `"1.6"`; older servers reported `"1.0"`, `"1.1"`, `"1.2"`, `"1.3"`, `"1.4"` or `"1.5"`. Clients should not compare for exact equality — see the compat note below. |
+| `protocol_version` | string | The version the server will speak. In v1.x this is `"1.7"`; older servers reported `"1.0"`, `"1.1"`, `"1.2"`, `"1.3"`, `"1.4"`, `"1.5"` or `"1.6"`. Clients should not compare for exact equality — see the compat note below. |
 | `supported_methods` | array of string | The complete set of verb names the server recognises. Clients should use this list rather than hard-coding expectations, especially when connecting to a newer server. |
 | `supported_events` | array of string | The complete set of event names the server can emit. |
 
@@ -327,7 +330,7 @@ error and then **closes the connection**:
 The server writes the error line and then closes the socket. The client
 will see EOF immediately after reading that line.
 
-**Minor version mismatches are accepted in both directions.** A v1.6
+**Minor version mismatches are accepted in both directions.** A v1.7
 client connecting to a v1.0 server, or vice versa, is fine: the server
 responds with whatever minor version *it* speaks (e.g. `"1.0"` or
 `"1.1"`), and both sides behave according to the features they each
@@ -400,7 +403,7 @@ Worked example:
 
 ```
 → {"id": 1, "method": "hello", "params": {"client_name": "demo", "protocol_version": "1.1"}}
-← {"id": 1, "ok": true, "result": {"server_name": "ryll", "protocol_version": "1.6", "supported_methods": ["hello", "status", "send_key", "paste", "screenshot", "subscribe", "unsubscribe", "clipboard_set", "clipboard_get", "resize", "stats"], "supported_events": ["latency", "agent_connected", "paste_completed", "paste_failed", "dropped", "surface_drawn", "clipboard_changed", "input_rtt"]}}
+← {"id": 1, "ok": true, "result": {"server_name": "ryll", "protocol_version": "1.7", "supported_methods": ["hello", "status", "send_key", "paste", "screenshot", "subscribe", "unsubscribe", "clipboard_set", "clipboard_get", "resize", "stats"], "supported_events": ["latency", "agent_connected", "paste_completed", "paste_failed", "dropped", "surface_drawn", "clipboard_changed", "input_rtt"]}}
 ```
 
 ---
@@ -821,6 +824,7 @@ Each stream object:
 | `frames_received` | u64 | Frames received, decodable or not. |
 | `frames_decoded_ok` | u64 | Frames decoded and painted. |
 | `frames_decode_failed` | u64 | Frames the decoder failed on. |
+| `frames_dropped_empty_dest` | u64 | From v1.7. Frames decoded but not painted, because the stream's dest rect encloses no pixels (`right <= left`, or `bottom <= top`). A server chooses that rect, so it can send one. |
 | `created_at_secs` | f64 | When the stream was created, in seconds since the session started. |
 | `destroyed_at_secs` | f64 or null | When the stream was destroyed, on the same clock; `null` while it is open. |
 
@@ -866,7 +870,7 @@ Worked example, polled while an H.264 stream plays:
 
 ```
 → {"id": 13, "method": "stats", "params": {}}
-← {"id": 13, "ok": true, "result": {"display": {"channel_id": 0, "bytes_in": 48211953, "messages_received": 5120, "marks_received": 1474, "streams_active": 1, "streams_created_total": 1, "streams_destroyed_total": 0, "stream_data_orphan_count": 0, "stream_reports_sent_total": 92, "decodes": {"h264": {"decodes_total": 460, "decode_failures_total": 0}}, "streams": [{"stream_id": 0, "surface_id": 0, "codec": "h264", "codec_type": 3, "width": 1280, "height": 720, "frames_received": 460, "frames_decoded_ok": 460, "frames_decode_failed": 0, "created_at_secs": 31.42, "destroyed_at_secs": null}], "streams_recently_destroyed": []}}}
+← {"id": 13, "ok": true, "result": {"display": {"channel_id": 0, "bytes_in": 48211953, "messages_received": 5120, "marks_received": 1474, "streams_active": 1, "streams_created_total": 1, "streams_destroyed_total": 0, "stream_data_orphan_count": 0, "stream_reports_sent_total": 92, "decodes": {"h264": {"decodes_total": 460, "decode_failures_total": 0}}, "streams": [{"stream_id": 0, "surface_id": 0, "codec": "h264", "codec_type": 3, "width": 1280, "height": 720, "frames_received": 460, "frames_decoded_ok": 460, "frames_decode_failed": 0, "frames_dropped_empty_dest": 0, "created_at_secs": 31.42, "destroyed_at_secs": null}], "streams_recently_destroyed": []}}}
 ```
 
 The same poll from a ryll with the `audio` feature, while Opus audio
@@ -1370,7 +1374,7 @@ Additional error codes may be added in future **minor** version bumps.
 Clients should treat any unrecognised `code` value as a generic error
 (print the `message` and fail the operation) rather than treating it as
 `internal_error`. This ensures forward compatibility when a client
-compiled against v1.0 connects to a v1.6 server that has added new
+compiled against v1.0 connects to a v1.7 server that has added new
 domain-specific codes.
 
 ---
@@ -1378,7 +1382,7 @@ domain-specific codes.
 ## Versioning
 
 The protocol version is a dotted `major.minor` string. The current
-version is **1.6**.
+version is **1.7**.
 
 Rules:
 
@@ -1419,9 +1423,10 @@ Version 1.0 was the first published version. Version 1.1 added the
 socket to `--web` mode and corrected `send_key`'s extended-scancode
 encoding. Version 1.3 added the clipboard and `resize` verbs and the
 `clipboard_changed` event. Version 1.4 added the `stats` verb. Version
-1.5 added the `input_rtt` event. Version 1.6 (the current version)
-added the `stats` result's `playback` object; see the version history
-at the top of this document.
+1.5 added the `input_rtt` event. Version 1.6 added the `stats`
+result's `playback` object. Version 1.7 (the current version) added
+the `stats` result's `frames_dropped_empty_dest` stream counter; see
+the version history at the top of this document.
 
 ---
 
@@ -1434,7 +1439,7 @@ indicates the sender: `→` is client-to-server, `←` is server-to-client.
 
 ```
 → {"id": 1, "method": "hello", "params": {"client_name": "demo-client", "protocol_version": "1.0"}}
-← {"id": 1, "ok": true, "result": {"server_name": "ryll", "protocol_version": "1.6", "supported_methods": ["hello", "status", "send_key", "paste", "screenshot", "subscribe", "unsubscribe", "clipboard_set", "clipboard_get", "resize", "stats"], "supported_events": ["latency", "agent_connected", "paste_completed", "paste_failed", "dropped", "surface_drawn", "clipboard_changed", "input_rtt"]}}
+← {"id": 1, "ok": true, "result": {"server_name": "ryll", "protocol_version": "1.7", "supported_methods": ["hello", "status", "send_key", "paste", "screenshot", "subscribe", "unsubscribe", "clipboard_set", "clipboard_get", "resize", "stats"], "supported_events": ["latency", "agent_connected", "paste_completed", "paste_failed", "dropped", "surface_drawn", "clipboard_changed", "input_rtt"]}}
 → {"id": 2, "method": "status", "params": {}}
 ← {"id": 2, "ok": true, "result": {"spice_connected": true, "agent_connected": true, "surfaces": [{"channel_id": 1, "surface_id": 0, "width": 1024, "height": 768}]}}
 → {"id": 3, "method": "subscribe", "params": {"events": ["latency", "agent_connected", "paste_completed", "paste_failed"]}}
@@ -1458,7 +1463,7 @@ Key observations from this transcript:
 
 - The `hello` handshake always comes first and its response lists the
   full verb and event catalogue. Note the minor-version interop at
-  work: the client requested `"1.0"` and the v1.6 server accepted it,
+  work: the client requested `"1.0"` and the v1.7 server accepted it,
   responding with the version *it* speaks and advertising verbs and
   events this v1.0 client simply never uses.
 - `status` gives a snapshot of the session state at that instant. The

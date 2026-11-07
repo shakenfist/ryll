@@ -300,7 +300,7 @@ async fn hello_returns_protocol_version_and_supported_sets() {
     let (mut r, mut w) = connect_client(&path).await;
 
     let result = hello(&mut r, &mut w).await;
-    assert_eq!(result["protocol_version"], "1.6");
+    assert_eq!(result["protocol_version"], "1.7");
     assert_eq!(result["server_name"], "ryll");
 
     let methods: Vec<String> =
@@ -1949,6 +1949,7 @@ async fn stats_reports_a_stream_while_open_and_after_it_is_destroyed() {
         "frames_received": 41,
         "frames_decoded_ok": 40,
         "frames_decode_failed": 0,
+        "frames_dropped_empty_dest": 0,
         "created_at_secs": 10.0,
         "destroyed_at_secs": null,
     });
