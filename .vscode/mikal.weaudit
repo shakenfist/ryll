@@ -1082,6 +1082,26 @@
     {
       "path": "shakenfist-spice-renderer",
       "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/src/bridge.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/src/test_client.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/src",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
