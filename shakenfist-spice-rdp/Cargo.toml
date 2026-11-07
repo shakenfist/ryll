@@ -42,27 +42,27 @@ ironrdp-server = { version = "0.13", default-features = false, features = ["rayo
 # `ironrdp-server` does not re-export. The version `ironrdp-server`
 # builds on, already in Cargo.lock through it, so this adds an edge,
 # not a crate.
-ironrdp-displaycontrol = "0.8"
+ironrdp-displaycontrol = "0.10"
 
 # The clipboard channel's backend and backend factory traits, the
 # messages a backend sends the server, and the clipboard PDU types,
 # none of which `ironrdp-server` re-exports. The version
 # `ironrdp-server` builds on, already in Cargo.lock through it, so
 # this adds an edge, not a crate.
-ironrdp-cliprdr = "0.7"
+ironrdp-cliprdr = "0.9"
 
 # The audio format and wave format types the sound handler offers its
 # formats in, and the negotiated format and error types its trait
 # methods take, none of which `ironrdp-server` re-exports. The version
 # `ironrdp-server` builds on, already in Cargo.lock through it, so
 # this adds an edge, not a crate.
-ironrdp-rdpsnd = "0.9"
+ironrdp-rdpsnd = "0.11"
 
 # `AsAny`, which the clipboard backend trait requires of every
 # backend, and the `impl_as_any!` macro that implements it. The
 # version the other IronRDP crates build on, already in Cargo.lock
 # through them, so this adds an edge, not a crate.
-ironrdp-core = "0.2"
+ironrdp-core = "0.3"
 
 # The IronRDP display and input handler traits are declared with
 # `#[async_trait::async_trait]`, and `ironrdp-server` does not
@@ -127,13 +127,13 @@ tokio = { version = "1", features = ["test-util"] }
 # loopback test builds the client's key events and capability types
 # from it. Already in Cargo.lock through `ironrdp-server`, so this
 # adds an edge, not a crate.
-ironrdp-pdu = "0.9"
+ironrdp-pdu = "0.11"
 
 # The static channel trait, through which the sound handler's tests
 # drive IronRDP's own audio channel through its handshake. Already in
 # Cargo.lock through `ironrdp-server`, so this adds an edge, not a
 # crate.
-ironrdp-svc = "0.8"
+ironrdp-svc = "0.10"
 
 # IronRDP's own client, which the loopback test (tests/loopback.rs)
 # drives against `serve` to prove the handshake without a desktop RDP
@@ -147,7 +147,7 @@ ironrdp-svc = "0.8"
 # new to the tree and reach only test builds. The `rustls` feature
 # selects the TLS backend with the aws-lc-rs provider the workspace
 # already carries.
-ironrdp-connector = "0.10"
-ironrdp-session = "0.11"
-ironrdp-tokio = "0.10"
-ironrdp-tls = { version = "0.2", features = ["rustls"] }
+ironrdp-connector = "0.12"
+ironrdp-session = "0.13"
+ironrdp-tokio = "0.12"
+ironrdp-tls = { version = "0.3", features = ["rustls"] }
