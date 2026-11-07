@@ -373,13 +373,27 @@ Ctrl+Shift+X, because ryll cannot tell them apart from those.
 
 ## Environment Variables
 
-Currently, ryll does not use environment variables for configuration. All
-settings are provided via command-line arguments or .vv files.
+`RUST_LOG` selects the logging filter, as described under
+[Logging](#logging). Every other setting is provided via
+command-line arguments or .vv files.
 
 ## Logging
 
 Ryll uses the `tracing` crate for logging. By default, INFO-level messages
 are shown. Use `-v` or `--verbose` for DEBUG-level output.
+
+`RUST_LOG` overrides that level when it is set, using `tracing`'s
+own directive syntax, so a single crate can be turned up without
+turning up the whole dependency tree:
+
+```bash
+RUST_LOG=info,shakenfist_spice_webrtc=debug ryll --file test.vv
+```
+
+`--verbose` still decides whether `/tmp/ryll.log` is written, and
+that file is filtered by the same directive. A `RUST_LOG` that does
+not parse is reported at WARN level and ignored, leaving the level
+`--verbose` asked for.
 
 Log output goes to stderr, so you can redirect stdout for data output:
 
