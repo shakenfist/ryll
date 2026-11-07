@@ -761,6 +761,14 @@ with `agent_not_connected`. A size equal to the last one sent is not
 sent again. Whether the guest applies the size is up to the guest;
 watch `status` (or `screenshot`) for the new surface dimensions.
 
+A guest that does not apply it says nothing either, so ryll judges the
+request itself: if no new primary surface appears within 5 seconds, it
+logs a warning and raises a notification naming the size, and the
+session's `resize_unapplied_count` grows (both are visible in a bug
+report, not over this socket). See *The guest ignores a resize* in the
+[troubleshooting guide](troubleshooting.md) for what to check in the
+guest.
+
 In `--web` mode the browser reports its viewport size on the same
 queue, so a later viewport change -- the browser window resized, or a
 viewer connecting -- replaces a size a control client asked for, and

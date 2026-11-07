@@ -599,6 +599,26 @@ pub struct MainSnapshot {
     /// Token-starvation episodes that lasted long enough to raise
     /// the "not accepting messages" notification. Cumulative.
     pub agent_stall_count: u32,
+    /// Display sizes sent to the guest agent since session start.
+    /// Cumulative.
+    pub resize_requests_sent_count: u64,
+    /// How many of those the guest never applied: no new primary
+    /// surface within the main channel's resize timeout. Each one
+    /// raised a notification naming the size. Cumulative.
+    pub resize_unapplied_count: u64,
+    /// The display size sent to the agent and not yet judged, with
+    /// the session-relative seconds at which it went out. `None`
+    /// between requests.
+    pub outstanding_resize: Option<OutstandingResizeSnapshot>,
+}
+
+/// A display size asked of the guest agent and not yet judged; see
+/// `MainSnapshot::outstanding_resize`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct OutstandingResizeSnapshot {
+    pub width: u32,
+    pub height: u32,
+    pub sent_at_secs: f64,
 }
 
 /// SPICE playback audio codec, as inferred from the most

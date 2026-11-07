@@ -11,6 +11,7 @@ use crate::display::clip::{clip_area, ClipArea, Ltrb, MAX_CLIP_RECTS};
 use crate::image_cache::BoundedImageCache;
 use crate::mm_clock::MmClock;
 use crate::opcode_counters::OpcodeCounters;
+use crate::session_state::PrimarySurfaceSize;
 use crate::snapshots::{DecodeResult, DisplaySnapshot, StreamSnapshot};
 use crate::{
     ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, TrafficSink,
@@ -912,6 +913,10 @@ pub struct DisplayChannel {
     channel_id: u8,
     stream: SpiceStream,
     events: EventSink,
+    /// Where the primary surface's size is published, so the main
+    /// channel can tell whether a resize it asked the guest for was
+    /// ever applied. Only channel 0's surface 0 is published.
+    primary_surface_size: PrimarySurfaceSize,
     buffer: ReceiveBuffer,
     glz_dictionary: SharedGlzDictionary,
     /// MJPEG decoder backend selected once at construction via
@@ -1042,10 +1047,12 @@ impl DisplayChannel {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         channel_id: u8,
         stream: SpiceStream,
         events: EventSink,
+        primary_surface_size: PrimarySurfaceSize,
         capture: Option<Arc<dyn CaptureSink>>,
         byte_counter: Arc<ByteCounter>,
         traffic: Arc<dyn TrafficSink>,
@@ -1061,6 +1068,7 @@ impl DisplayChannel {
             channel_id,
             stream,
             events,
+            primary_surface_size,
             buffer: ReceiveBuffer::with_capacity(1024 * 1024),
             glz_dictionary,
             jpeg_decoder: best_for_platform(),
@@ -1436,6 +1444,14 @@ impl DisplayChannel {
                         surface.format,
                         surface.flags
                     ));
+                }
+
+                // The primary surface is the evidence that a guest
+                // applied a resize ryll asked for; see the main
+                // channel's `resize_outcome_deadline`.
+                if self.channel_id == 0 && surface.surface_id == 0 {
+                    self.primary_surface_size
+                        .publish(surface.width, surface.height);
                 }
 
                 self.events
@@ -4386,11 +4402,22 @@ mod tests {
 
     /// Build a `DisplayChannel` wired to a loopback socket.
     async fn test_display_channel() -> (DisplayChannel, TestChannelPeers) {
+        let (channel, peers, _primary) = test_display_channel_full().await;
+        (channel, peers)
+    }
+
+    /// A channel, its peers, and the handle it publishes the primary
+    /// surface's size through. The `SessionState` the handle came from
+    /// is dropped at once: the handle holds the sender itself, as it
+    /// does in a session once the main channel's task has ended.
+    async fn test_display_channel_full() -> (DisplayChannel, TestChannelPeers, PrimarySurfaceSize) {
         let (stream, events, peers) = loopback().await;
+        let primary = crate::session_state::SessionState::new().primary_surface_size();
         let channel = DisplayChannel::new(
             0,
             stream,
             events,
+            primary.clone(),
             None,
             Arc::new(ByteCounter::new()),
             Arc::new(NullTraffic::new()),
@@ -4402,7 +4429,52 @@ mod tests {
             1024 * 1024,
             image_compression::AUTO_GLZ,
         );
-        (channel, peers)
+        (channel, peers, primary)
+    }
+
+    /// A `SpiceMsgSurfaceCreate` payload for `surface_id`.
+    fn surface_create_payload(surface_id: u32, width: u32, height: u32) -> Vec<u8> {
+        let mut v = Vec::new();
+        SurfaceCreate {
+            surface_id,
+            width,
+            height,
+            format: 32,
+            flags: 1,
+        }
+        .write(&mut v);
+        v
+    }
+
+    // The main channel judges a resize it asked the guest for by
+    // whether a new primary surface appears, so the display channel
+    // has to publish that surface and only that surface (#485).
+    #[tokio::test]
+    async fn a_primary_surface_create_is_published() {
+        let (mut channel, _peers, primary) = test_display_channel_full().await;
+        assert_eq!(primary.get(), None, "nothing is published before a surface");
+
+        channel
+            .handle_message(
+                display_server::SURFACE_CREATE,
+                &surface_create_payload(0, 1992, 1256),
+            )
+            .await
+            .expect("surface_create must not error");
+        assert_eq!(primary.get(), Some((1992, 1256)));
+
+        channel
+            .handle_message(
+                display_server::SURFACE_CREATE,
+                &surface_create_payload(4, 640, 480),
+            )
+            .await
+            .expect("surface_create must not error");
+        assert_eq!(
+            primary.get(),
+            Some((1992, 1256)),
+            "an off-screen surface is not the primary one"
+        );
     }
 
     // spice-server sends INVAL_ALL_PALETTES on every connect (#446). With
