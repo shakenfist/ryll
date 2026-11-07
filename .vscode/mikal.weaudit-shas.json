@@ -101,13 +101,53 @@
       "sha": "789383eaa2b614b16b52dda69a909dedf5559a9f",
       "date": "2026-10-22"
     },
+    "docs/ci.md": {
+      "sha": "1a06548a21fd97965ddbae97d689cb8d4cdc8c87",
+      "date": "2026-11-08"
+    },
+    "docs/configuration.md": {
+      "sha": "139433836ef6d78b0fd54ec9b3179735780c648b",
+      "date": "2026-11-08"
+    },
+    "docs/control-socket-protocol.md": {
+      "sha": "778ed59e708e7fc3153cba7f74a47266f60e64d8",
+      "date": "2026-11-08"
+    },
+    "docs/design-decisions.md": {
+      "sha": "9b8f2f2c5d063731d26405b4981cb8907eba8a3b",
+      "date": "2026-11-08"
+    },
     "docs/development-macos.md": {
       "sha": "9fef25179d5ec56bb52e4a5b5edeecadcff74097",
       "date": "2026-09-17"
     },
+    "docs/development.md": {
+      "sha": "39f902177adb41b92666c651b11dcf75bc3b5249",
+      "date": "2026-11-08"
+    },
     "docs/device-redirection.md": {
       "sha": "851b7981637d7a0d7c9175b02c891cf0e73db7ce",
       "date": "2026-10-16"
+    },
+    "docs/diagnostics.md": {
+      "sha": "80222c3e3c04805500851aee2e1d970f4f012d29",
+      "date": "2026-11-08"
+    },
+    "docs/features.md": {
+      "sha": "169359dcd7d5b54e0fd0b3dbcaff58499683e39f",
+      "date": "2026-11-08"
+    },
+    "docs/index.md": {
+      "sha": "2c97e8ec7903966e139887718c3d63c530f4521f",
+      "date": "2026-11-08"
+    },
+    "docs/installation.md": {
+      "sha": "f129e1394b6f6b1827facc7305d52115f64b7068",
+      "date": "2026-11-08"
+    },
+    "docs/kasm-workspace.md": {
+      "sha": "2f68fd05593d2bd39db194a8f1d1ec33954149a4",
+      "date": "2026-11-08"
     },
     "docs/libvirt-spice-recommendations.md": {
       "sha": "8ca2b52c719afa9c327504c4734d6a2cc755e267",
@@ -117,9 +157,49 @@
       "sha": "518de92ccf3999ad33e5104a4a519d0d1fb24b51",
       "date": "2026-08-18"
     },
+    "docs/multi-mode-parity.md": {
+      "sha": "8ba5552c2ca0c60a6639d45209048b266b1a1c21",
+      "date": "2026-11-08"
+    },
     "docs/portability.md": {
       "sha": "dc06c44e9d9a0e7fe4888d35adb50908ab37fc7d",
       "date": "2026-10-16"
+    },
+    "docs/rdp-frontend.md": {
+      "sha": "9ce33d52e0c1e9c06019c6da21035e2292ae7b66",
+      "date": "2026-11-08"
+    },
+    "docs/rdp-mode-internals.md": {
+      "sha": "2ea9a8f852ed24b03efc3eb7c7e62b08209bda2d",
+      "date": "2026-11-08"
+    },
+    "docs/releasing.md": {
+      "sha": "e98219360e9c649258bea242d8e921cd0bc7165e",
+      "date": "2026-11-08"
+    },
+    "docs/rendering-pipeline.md": {
+      "sha": "fe45cc4b8988352eacdeff26cdc654731fa9159d",
+      "date": "2026-11-08"
+    },
+    "docs/session-lifecycle.md": {
+      "sha": "017806552696300e19cdd4463191a32e36cc6248",
+      "date": "2026-11-08"
+    },
+    "docs/spice-protocol.md": {
+      "sha": "7d851ea71d3d545099beeb897d1b7fc7189fa229",
+      "date": "2026-11-08"
+    },
+    "docs/troubleshooting.md": {
+      "sha": "bb99a7efbb2b3e103c94588e8f5999453c19c92f",
+      "date": "2026-11-08"
+    },
+    "docs/web-frontend.md": {
+      "sha": "8cd4e811869c8118ab4d5fb99c088f592adf1de5",
+      "date": "2026-11-08"
+    },
+    "docs/web-mode-internals.md": {
+      "sha": "6a85aa2449fb6cf6b51ff1c367870345c8729861",
+      "date": "2026-11-08"
     },
     "examples/control-socket-demo.py": {
       "sha": "1e39ea70aaa51526508b15997706449a378ce09a",
