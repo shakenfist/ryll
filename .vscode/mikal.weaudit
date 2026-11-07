@@ -1250,6 +1250,94 @@
     {
       "path": "tools/web-smoke.sh",
       "author": "mikal"
+    },
+    {
+      "path": "AGENTS.md",
+      "author": "mikal"
+    },
+    {
+      "path": "ARCHITECTURE.md",
+      "author": "mikal"
+    },
+    {
+      "path": "Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "deny.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "Makefile",
+      "author": "mikal"
+    },
+    {
+      "path": "PLAN-TEMPLATE.md",
+      "author": "mikal"
+    },
+    {
+      "path": "README.md",
+      "author": "mikal"
+    },
+    {
+      "path": "STYLEGUIDE.md",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/lz4-fixtures/lz4_check.py",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/lz4-fixtures/make_fixtures.py",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/lz4-fixtures/qmp_drive.py",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/lz4-fixtures/requirements.txt",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/lz4-fixtures",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/rdp-smoke/Dockerfile",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/rdp-smoke",
+      "author": "mikal"
+    },
+    {
+      "path": "renovate.json",
+      "author": "mikal"
+    },
+    {
+      "path": ".gitleaksignore",
+      "author": "mikal"
+    },
+    {
+      "path": ".devcontainer/Dockerfile",
+      "author": "mikal"
+    },
+    {
+      "path": ".devcontainer",
+      "author": "mikal"
+    },
+    {
+      "path": ".cargo/audit.toml",
+      "author": "mikal"
+    },
+    {
+      "path": ".cargo",
+      "author": "mikal"
+    },
+    {
+      "path": ".pre-commit-config.yaml",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
