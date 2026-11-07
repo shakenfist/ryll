@@ -156,12 +156,30 @@ async fn spawn_server(
     spawn_server_with_line_limit(status, mirror, None).await
 }
 
+/// As [`spawn_server`], for a session that was started without
+/// `--enable-paste-as-keystrokes`.
+async fn spawn_server_without_paste(
+    status: Arc<MockStatusProvider>,
+    mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
+) -> (PathBuf, ServerHandle, TestInputs) {
+    spawn_server_inner(status, mirror, None, false).await
+}
+
 /// As [`spawn_server`], with the request-line limit lowered to
 /// `max_request_line` when given.
 async fn spawn_server_with_line_limit(
     status: Arc<MockStatusProvider>,
     mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
     max_request_line: Option<usize>,
+) -> (PathBuf, ServerHandle, TestInputs) {
+    spawn_server_inner(status, mirror, max_request_line, true).await
+}
+
+async fn spawn_server_inner(
+    status: Arc<MockStatusProvider>,
+    mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
+    max_request_line: Option<usize>,
+    paste_enabled: bool,
 ) -> (PathBuf, ServerHandle, TestInputs) {
     // Pick a unique socket path inside a temp dir.
     let dir = tempfile::tempdir().expect("tempdir");
@@ -191,6 +209,7 @@ async fn spawn_server_with_line_limit(
         agent_connected_rx,
         SessionHandles {
             input_tx,
+            paste_enabled,
             surface_mirror: mirror.clone(),
             clipboard: clipboard.clone(),
             resize_tx,
@@ -706,6 +725,36 @@ async fn paste_returns_immediately_and_emits_paste_completed() {
     assert_eq!(ev["event"], "paste_completed");
     assert_eq!(ev["data"]["request_id"], 42);
     assert_eq!(ev["data"]["chars_sent"], 2);
+
+    handle.stop().await;
+}
+
+/// A session that cannot type a paste refuses the request instead of
+/// answering `ok` and dropping it in the inputs channel, where the
+/// request would get no `paste_completed` and no `paste_failed` and a
+/// driver following the protocol document would wait forever.
+#[tokio::test]
+async fn paste_without_paste_as_keystrokes_is_refused() {
+    let status = MockStatusProvider::new(default_status());
+    let (path, handle, mut inputs) = spawn_server_without_paste(status, empty_mirror()).await;
+    let (mut r, mut w) = connect_client(&path).await;
+    hello(&mut r, &mut w).await;
+
+    send_request(&mut w, 9, "paste", serde_json::json!({ "text": "ab" })).await;
+    let resp = recv_line(&mut r).await;
+    assert_eq!(resp["ok"], false, "the paste was accepted: {resp}");
+    assert_eq!(resp["error"]["code"], "paste_not_enabled");
+    assert!(
+        resp["error"]["message"]
+            .as_str()
+            .expect("a message")
+            .contains("--enable-paste-as-keystrokes"),
+        "the message should name the flag: {resp}"
+    );
+    assert!(
+        inputs.input_rx.try_recv().is_err(),
+        "nothing should have been queued for the inputs channel"
+    );
 
     handle.stop().await;
 }

@@ -943,6 +943,7 @@ pub async fn run_headless(
         ));
         let handles = crate::control::SessionHandles {
             input_tx: input_tx_for_control,
+            paste_enabled: enable_paste,
             surface_mirror: surface_mirror.clone(),
             clipboard,
             resize_tx: resize_tx.clone(),

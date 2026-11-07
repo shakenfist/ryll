@@ -213,6 +213,10 @@ pub enum ErrorCode {
     /// A queue into the session was full; retry shortly.  Added in
     /// v1.3, returned by `resize`.
     QueueFull,
+    /// The session was not started with `--enable-paste-as-keystrokes`,
+    /// so `paste` cannot type anything.  Added in v1.7, returned by
+    /// `paste`.
+    PasteNotEnabled,
     NotImplemented,
     InternalError,
 }
