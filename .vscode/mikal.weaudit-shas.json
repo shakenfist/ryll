@@ -937,6 +937,14 @@
       "sha": "ea7d6b5bc018c5be3c40f270ea6c5b222631cea7",
       "date": "2026-07-26"
     },
+    "tools/check-parity-matrix.py": {
+      "sha": "7891e8c9d403ab30df6519b57c53dc6e45269b43",
+      "date": "2026-11-08"
+    },
+    "tools/check-slim-renderer.sh": {
+      "sha": "4b08391bd3ce170b2cf19a3dd0daa3a34fd31de9",
+      "date": "2026-11-08"
+    },
     "tools/ci-prune-reviews.sh": {
       "sha": "3c00a9489c0b571bfdd0d1f1170344cfc33b44ff",
       "date": "2026-11-03"
@@ -956,6 +964,18 @@
     "tools/homebrew-formula.rb": {
       "sha": "3d2b8e16f7c76d569274ed9f75041654847982c7",
       "date": "2026-10-16"
+    },
+    "tools/kasm/Dockerfile": {
+      "sha": "1cd5c29c397b4d01ba4b09035039b5c441734564",
+      "date": "2026-11-08"
+    },
+    "tools/kasm/custom_startup.sh": {
+      "sha": "7a92182090c34e42905d27cba201a329c6dd7905",
+      "date": "2026-11-08"
+    },
+    "tools/kasm/launch_config.json": {
+      "sha": "e8818b488d40d5ae70512bb023e81f5226c14411",
+      "date": "2026-11-08"
     },
     "tools/make-cloud-seed.sh": {
       "sha": "00f50deddb05a9189609a78a69e948aa8efb2d7f",
@@ -977,21 +997,57 @@
       "sha": "2771fe57b2233883b2d7ae1039d90ecfa718dab5",
       "date": "2026-10-16"
     },
+    "tools/propose-release.sh": {
+      "sha": "9be794dacc8a75fcea835b3eb6f9e8b532e6f79b",
+      "date": "2026-11-08"
+    },
     "tools/proxmox-smoke.py": {
       "sha": "63a243a0d330982e367945942ef188ef58b4d4e3",
       "date": "2026-10-05"
+    },
+    "tools/publish-crates.sh": {
+      "sha": "dbaeed48732ee891733436798aa8cf6d1100cb66",
+      "date": "2026-11-08"
+    },
+    "tools/rdp-measure.sh": {
+      "sha": "697ea111dcfe2c42cdb828a39bacf4c9bf79e32f",
+      "date": "2026-11-08"
+    },
+    "tools/rdp-smoke.py": {
+      "sha": "2aa4b3ead541b7b65a5aa90822b7c7dc542a4b4a",
+      "date": "2026-11-08"
+    },
+    "tools/release-version.sh": {
+      "sha": "972d2995fc2c2f6f194b383e4a0ace205aa7d9c8",
+      "date": "2026-11-08"
+    },
+    "tools/report-fuzz-failure.sh": {
+      "sha": "3d150ad6d5fffff3521927d219e644b0d445550d",
+      "date": "2026-11-08"
     },
     "tools/report-fuzz-run.sh": {
       "sha": "3b60592ec658db548536a3c9d5989d29c457adc1",
       "date": "2026-09-23"
     },
+    "tools/review-tracking.sh": {
+      "sha": "fcadd30b9cea7aec8c747c7f43ef1864bc01bbef",
+      "date": "2026-11-08"
+    },
     "tools/run-shellcheck.sh": {
       "sha": "a070aa57d15755cd3543756bad447c58da0253d7",
       "date": "2026-07-26"
     },
+    "tools/sign-release-tag.sh": {
+      "sha": "cc23ebc95fbcdeec23224323fe9bd9c36a85e585",
+      "date": "2026-11-08"
+    },
     "tools/start-desktop-qemu.sh": {
       "sha": "6d18104306851bcd1b1165fa47fa694da06af9f2",
       "date": "2026-09-23"
+    },
+    "tools/tag-release.sh": {
+      "sha": "16a49ce3cf6bfa3420093406c981401eaab19c90",
+      "date": "2026-11-08"
     },
     "tools/test-fuzz-targets.sh": {
       "sha": "f78dea5e65a3012838a13930a5f781bfb4b8cf68",
@@ -1004,6 +1060,10 @@
     "tools/test-proxmox-smoke.sh": {
       "sha": "b633d731487c6f457abb1786da2340fc2dbdc379",
       "date": "2026-10-05"
+    },
+    "tools/test-rdp-smoke.py": {
+      "sha": "6e1373befc811e7f3c4e965bcbe58d2f56ffa5ff",
+      "date": "2026-11-08"
     },
     "tools/test-report-fuzz-failure.sh": {
       "sha": "ba73b4de0f35e2c98b37fc9c2e7e7fcf23c3b60f",
@@ -1020,6 +1080,10 @@
     "tools/test_click.py": {
       "sha": "d7d0c9274bc1b9bc0d90a35c574bcd6960f904f0",
       "date": "2026-07-26"
+    },
+    "tools/web-smoke.sh": {
+      "sha": "2c7ed8d71edd16d30c2311c7e275fab8f4763232",
+      "date": "2026-11-08"
     },
     "tools/web-soak.sh": {
       "sha": "f320aa85e217ad9610042bd7c2ef62a03250cc22",

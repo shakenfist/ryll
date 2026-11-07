@@ -1182,6 +1182,74 @@
     {
       "path": "docs/web-mode-internals.md",
       "author": "mikal"
+    },
+    {
+      "path": "tools/kasm/custom_startup.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/kasm/Dockerfile",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/kasm/launch_config.json",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/kasm",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/check-parity-matrix.py",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/check-slim-renderer.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/propose-release.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/publish-crates.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/rdp-measure.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/rdp-smoke.py",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/release-version.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/report-fuzz-failure.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/review-tracking.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/sign-release-tag.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/tag-release.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/test-rdp-smoke.py",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/web-smoke.sh",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
