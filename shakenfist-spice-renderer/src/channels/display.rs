@@ -61,6 +61,7 @@ struct StreamState {
     frames_received: u64,
     frames_decoded_ok: u64,
     frames_decode_failed: u64,
+    frames_dropped_empty_dest: u64,
     last_frame_ts_secs: Option<f64>,
     last_decode_ok_ts_secs: Option<f64>,
     last_decode_duration_us: u32,
@@ -1140,6 +1141,7 @@ impl DisplayChannel {
             frames_received: s.frames_received,
             frames_decoded_ok: s.frames_decoded_ok,
             frames_decode_failed: s.frames_decode_failed,
+            frames_dropped_empty_dest: s.frames_dropped_empty_dest,
             last_frame_ts_secs: s.last_frame_ts_secs,
             last_decode_ok_ts_secs: s.last_decode_ok_ts_secs,
             last_decode_duration_us: s.last_decode_duration_us,
@@ -1842,6 +1844,7 @@ impl DisplayChannel {
                             created_at_secs: now,
                             frames_received: 0,
                             frames_decoded_ok: 0,
+                            frames_dropped_empty_dest: 0,
                             frames_decode_failed: 0,
                             last_frame_ts_secs: None,
                             last_decode_ok_ts_secs: None,
@@ -1974,6 +1977,15 @@ impl DisplayChannel {
                     ));
                     let w = right.saturating_sub(left);
                     let h = bottom.saturating_sub(top);
+                    // A dest rect whose right is at or left of its
+                    // left edge (or bottom at or above its top)
+                    // leaves no pixels to paint. The frame still
+                    // goes to the decoder, because an H.264 decoder
+                    // that misses a packet loses its reference
+                    // state, but nothing is emitted: the surface
+                    // would gain a 0-wide or 0-high image, and the
+                    // frame would count as painted when it was not.
+                    let empty_dest = w == 0 || h == 0;
 
                     // Codec-agnostic decode dispatch. Pre-refactor
                     // per-codec logic (DHT extract/inject for MJPEG)
@@ -2021,6 +2033,21 @@ impl DisplayChannel {
                     }
 
                     match decode_result {
+                        Ok(Some(_frame)) if empty_dest => {
+                            warn_once!(
+                                "display:stream_data:empty_dest",
+                                "display: stream {} dest rect ({},{})-({},{}) \
+                                 encloses no pixels; frame decoded but not \
+                                 painted",
+                                stream_id,
+                                left,
+                                top,
+                                right,
+                                bottom
+                            );
+                            stream.frames_dropped_empty_dest =
+                                stream.frames_dropped_empty_dest.saturating_add(1);
+                        }
                         Ok(Some(frame)) => {
                             debug!(
                                 "display: stream {} {} frame, cropped to {}x{} → ({},{})",
@@ -4402,6 +4429,22 @@ mod tests {
 
     /// A minimal 64x64 `SpiceMsgDisplayStreamCreate` payload, with no clip.
     fn stream_create_payload(stream_id: u32, codec_type: u8) -> Vec<u8> {
+        stream_create_payload_with_dest(
+            stream_id,
+            codec_type,
+            Rect {
+                top: 0,
+                left: 0,
+                bottom: 64,
+                right: 64,
+            },
+        )
+    }
+
+    /// As `stream_create_payload`, with the dest rect the server asks
+    /// for. A server chooses this rect, so it is free to send one that
+    /// encloses nothing.
+    fn stream_create_payload_with_dest(stream_id: u32, codec_type: u8, dest: Rect) -> Vec<u8> {
         let mut v = Vec::new();
         StreamCreate {
             surface_id: 0,
@@ -4413,12 +4456,7 @@ mod tests {
             stream_height: 64,
             src_width: 0,
             src_height: 0,
-            dest: Rect {
-                top: 0,
-                left: 0,
-                bottom: 64,
-                right: 64,
-            },
+            dest,
             clip: Clip::none(),
         }
         .write(&mut v);
@@ -4922,6 +4960,73 @@ mod tests {
         assert!(!channel.streams[&7].warned_never_decodes);
         assert_eq!(channel.streams[&8].frames_decoded_ok, 0);
         assert!(!channel.streams[&8].warned_never_decodes);
+    }
+
+    // A dest rect with right < left (or bottom < top) encloses no
+    // pixels. Such a frame used to be emitted as a 0-wide ImageReady
+    // and counted in `frames_decoded_ok`, which reads as "painted" in
+    // `stats`, in bug reports and in the stream counters.
+    #[cfg(all(feature = "h264-decode", feature = "encoder"))]
+    #[tokio::test]
+    async fn a_frame_with_an_inverted_dest_is_dropped_not_counted_as_decoded() {
+        // Inverted horizontally, and inverted vertically: either one
+        // leaves nothing to paint, and the two are separate edges of
+        // the same guard.
+        let inverted = [
+            Rect {
+                top: 0,
+                left: 64,
+                bottom: 64,
+                right: 0,
+            },
+            Rect {
+                top: 64,
+                left: 0,
+                bottom: 0,
+                right: 64,
+            },
+        ];
+        for dest in inverted {
+            let (mut channel, mut peers) = test_display_channel().await;
+            channel
+                .handle_message(
+                    display_server::STREAM_CREATE,
+                    &stream_create_payload_with_dest(7, SPICE_VIDEO_CODEC_TYPE_H264, dest),
+                )
+                .await
+                .expect("stream_create must not error");
+            let frames = h264_frames(12);
+            send_stream_frames(&mut channel, 7, &frames).await;
+
+            let stream = &channel.streams[&7];
+            assert_eq!(
+                stream.frames_received,
+                frames.len() as u64,
+                "{dest:?}: every frame should still reach the decoder"
+            );
+            assert_eq!(
+                stream.frames_decoded_ok, 0,
+                "{dest:?}: a frame that paints nothing is not a decode"
+            );
+            assert!(
+                stream.frames_dropped_empty_dest > 0,
+                "{dest:?}: the dropped frames should be counted somewhere"
+            );
+
+            // Nothing should have been handed to the renderer: a 0-wide
+            // or 0-high ImageReady is what the surface used to be
+            // offered.
+            let mut images = 0;
+            while let Ok(event) = peers.events.try_recv() {
+                if matches!(event, ChannelEvent::ImageReady { .. }) {
+                    images += 1;
+                }
+            }
+            assert_eq!(
+                images, 0,
+                "{dest:?}: an unpaintable frame was still emitted"
+            );
+        }
     }
 
     // The control socket's `stats` reads what the channel publishes. Fill
