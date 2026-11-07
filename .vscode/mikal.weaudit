@@ -810,6 +810,298 @@
     {
       "path": "shakenfist-spice-compression/src",
       "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/logging.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/constants.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/lib.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/link.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/renovate.yml",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/rdp.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/config.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/main.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/cursor.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/lib.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/clipboard.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/display.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/README.md",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/audio.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/input.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/tests/loopback.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/tests",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/server.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/tls.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/auth.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/control/protocol.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/display/surface.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/tests/control_socket.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/channels/webdav.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/pointer.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/channels/playback.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/capture_sink.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/display/clip.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/control/mod.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/event_bus.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/display/mod.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/session.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/clipboard.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/playback_sink.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/surface_mirror.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/encoder/task.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/control/server.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/control",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/channels/usbredir.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/channels/display.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/encoder/types.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/channels/test_support.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/README.md",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/channels/mod.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/session_state.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/channels/main_channel.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/display/damage.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/display",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/channels/inputs.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/snapshots.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/encoder/mod.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/tests/headless_connect_failure.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/tests",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/channels/volume.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/channels/cursor.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/channels",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/encoder/h264.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/encoder",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/lib.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/src/bridge.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/src/test_client.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/src",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],

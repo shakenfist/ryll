@@ -69,6 +69,10 @@
       "sha": "96df79911e5d8c7f0647056a4c8c327bdd6a2ad7",
       "date": "2026-10-31"
     },
+    ".github/workflows/renovate.yml": {
+      "sha": "75f8b1c062d1d7fdc0cfe0c9f1488ad19eafedba",
+      "date": "2026-11-07"
+    },
     ".github/workflows/supply-chain.yml": {
       "sha": "c855b8e116194dc365244a69aff28900f33023fe",
       "date": "2026-09-26"
@@ -124,6 +128,10 @@
     "examples/ryll-web.service": {
       "sha": "ffeba1d4155450125fa098094f1167ed0cdbc9d2",
       "date": "2026-09-17"
+    },
+    "ryll/Cargo.toml": {
+      "sha": "6e77411f25e9bb28b23bb146644cd9f05bd680fb",
+      "date": "2026-11-07"
     },
     "ryll/build.rs": {
       "sha": "b0803d125978073b943df8c6a6207879c41f5157",
@@ -181,6 +189,10 @@
       "sha": "058ef513df12824921acda54af01c9b1893f4197",
       "date": "2026-10-17"
     },
+    "ryll/src/config.rs": {
+      "sha": "efbbf14eda1d37f6dcb5ba08b50338517969f9ff",
+      "date": "2026-11-07"
+    },
     "ryll/src/display_gui.rs": {
       "sha": "e363fd1127f0d1201f7272ca4c3da13e2ec9a499",
       "date": "2026-10-17"
@@ -189,9 +201,17 @@
       "sha": "44b5e6e108ab73c57fadd40d5e279be56694ff12",
       "date": "2026-11-03"
     },
+    "ryll/src/main.rs": {
+      "sha": "0f224793a5248004e918e8ac7bcff62038a4a08e",
+      "date": "2026-11-07"
+    },
     "ryll/src/notifications.rs": {
       "sha": "cfd7c5df773b57965f15ed83526d46f5d217b747",
       "date": "2026-09-18"
+    },
+    "ryll/src/rdp.rs": {
+      "sha": "99087faff987742cc768af7e62b9ce7aae3ac458",
+      "date": "2026-11-07"
     },
     "ryll/src/reconnect_policy.rs": {
       "sha": "ea6dece117a787eda8c7eb2a8f01fbc41455f4a2",
@@ -389,9 +409,25 @@
       "sha": "4b3bd11c6946c6f9f27f4c5ff7aaf5008331b202",
       "date": "2026-10-20"
     },
+    "shakenfist-spice-protocol/src/constants.rs": {
+      "sha": "c2f0f6394339e79bd443ef40ed6d9dbef41a786f",
+      "date": "2026-11-05"
+    },
     "shakenfist-spice-protocol/src/host_subject.rs": {
       "sha": "af96836e04851d493d60e8aabe229ca3163dbd7d",
       "date": "2026-07-18"
+    },
+    "shakenfist-spice-protocol/src/lib.rs": {
+      "sha": "a773d5363bafa291f57b71025b28e3d128b6f883",
+      "date": "2026-11-05"
+    },
+    "shakenfist-spice-protocol/src/link.rs": {
+      "sha": "9a044803f14d07750ded5dffac6ef8f8a0d31eb9",
+      "date": "2026-11-05"
+    },
+    "shakenfist-spice-protocol/src/logging.rs": {
+      "sha": "421d82a4b1f1931122a4559a1262e84174d62c1b",
+      "date": "2026-11-05"
     },
     "shakenfist-spice-protocol/src/messages/agent_stream.rs": {
       "sha": "df3ccacd5fd3c6361b874811c85215b577f76164",
@@ -441,17 +477,133 @@
       "sha": "7a54174573c7ff672b5099de4de0e7e60ce00aaf",
       "date": "2026-10-20"
     },
+    "shakenfist-spice-rdp/Cargo.toml": {
+      "sha": "087835dbd25ab62b6cbc2ba02496f1e0b5521c1d",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-rdp/README.md": {
+      "sha": "dbfa2b0205b4e24ea601b92e6e326076ae1067ed",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-rdp/src/audio.rs": {
+      "sha": "c2deefebb02a3ae6cd5d31c20eccff0b57a9f6e2",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-rdp/src/auth.rs": {
+      "sha": "08a9e10cbcd8f0ccac8f3f9ed69b2ccfd6728d79",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-rdp/src/clipboard.rs": {
+      "sha": "957d1099766c17b05455b5b2511b0bb1265828c1",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-rdp/src/cursor.rs": {
+      "sha": "591778595d265fb0a25c1369d495250f5a24709f",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-rdp/src/display.rs": {
+      "sha": "3477add6f51451264a036928f2af4180ef47df0e",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-rdp/src/input.rs": {
+      "sha": "5d105b0a03b6ea4b01261be9d23601fea537157d",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-rdp/src/lib.rs": {
+      "sha": "d88abd5fde3216c3af7c5fa336853720c6e1bfd8",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-rdp/src/server.rs": {
+      "sha": "b15b4f11ae2e46869b385d885cbf6a4000a90295",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-rdp/src/tls.rs": {
+      "sha": "544ef01949a6140995091390e92d9ef71dae5707",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-rdp/tests/loopback.rs": {
+      "sha": "f72f9661d6d30f71bd234b34b97bfa954f3acfb7",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/Cargo.toml": {
+      "sha": "fba130c7527051b6936fbb4679067e4d0b76a1e3",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/README.md": {
+      "sha": "e85ae5e7398447de9a1833174114082bcd150647",
+      "date": "2026-11-07"
+    },
     "shakenfist-spice-renderer/src/byte_counter.rs": {
       "sha": "d9b32a0b373832330a33bbff2e950273eac1e34e",
       "date": "2026-07-21"
+    },
+    "shakenfist-spice-renderer/src/capture_sink.rs": {
+      "sha": "42a0ad4fa92d18ac82e769de430979e664f9a4d7",
+      "date": "2026-11-07"
     },
     "shakenfist-spice-renderer/src/channels/agent_queue.rs": {
       "sha": "00b3a1a61efee562e224e750312b38ff23cc12f6",
       "date": "2026-10-05"
     },
+    "shakenfist-spice-renderer/src/channels/cursor.rs": {
+      "sha": "47f13b1914fc8968c21afc6df472e13a2cde852f",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/src/channels/display.rs": {
+      "sha": "45cfd50945b6b4f17f6a5976133b1093251912c3",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/src/channels/inputs.rs": {
+      "sha": "f7531454f39d9e8bb977a90cb19dd7e4e9fe7800",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/src/channels/main_channel.rs": {
+      "sha": "9b9a37cfa2dd10aef115d57eb8e99776106e1e82",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/src/channels/mod.rs": {
+      "sha": "ed758739ab41d92503401b716a5fd149f72eb7ce",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/src/channels/playback.rs": {
+      "sha": "a38d094a625d3e5b48310548d40152ce61d2475b",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/src/channels/test_support.rs": {
+      "sha": "be4d5a1a4dd9a7a0e6245ee72c76c1ba5669841b",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/src/channels/usbredir.rs": {
+      "sha": "daa05d283c123568c992fdbc39c54c60a18cb864",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/src/channels/volume.rs": {
+      "sha": "c4d93576f940ad4089e4791164bbd114e3f1ffb4",
+      "date": "2026-11-07"
+    },
     "shakenfist-spice-renderer/src/channels/watchdog.rs": {
       "sha": "f5a71924c175312fc6ee96cd5e23f99703596048",
       "date": "2026-09-19"
+    },
+    "shakenfist-spice-renderer/src/channels/webdav.rs": {
+      "sha": "5b15a2c03adfbfd784a203458e683b45f71f527b",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/src/clipboard.rs": {
+      "sha": "9347d5d5e9b90231aede2adaabb55521e86bef32",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/src/control/mod.rs": {
+      "sha": "b807d6af9a8855f39a31d2e25e0f89e17c11f84e",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/src/control/protocol.rs": {
+      "sha": "cca0b44c0e705c1cddd6e1eb5c626801401693af",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/src/control/server.rs": {
+      "sha": "f82227fe518b4db43b50e2de5f229a85606e1b61",
+      "date": "2026-11-07"
     },
     "shakenfist-spice-renderer/src/device_config.rs": {
       "sha": "908c55fe61f547a541546bf450d3835820e76370",
@@ -461,13 +613,53 @@
       "sha": "11f9647ca7f5957b6df3583b9a5065884e650e5c",
       "date": "2026-09-19"
     },
+    "shakenfist-spice-renderer/src/display/clip.rs": {
+      "sha": "078035374f37aaa0630f1f538067d3805e58a30c",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/src/display/damage.rs": {
+      "sha": "e42b201bf9c53fa10cef048519ab31d218a00f1f",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/src/display/mod.rs": {
+      "sha": "6ad15ddd78d60a474403411f18f7874115cc589f",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/src/display/surface.rs": {
+      "sha": "6673deb73aad04ed901ea530e9f93d9b97d45191",
+      "date": "2026-11-07"
+    },
     "shakenfist-spice-renderer/src/encoder/frame_source.rs": {
       "sha": "793e763c867f67031b21226d94b9784cd848584e",
       "date": "2026-09-19"
     },
+    "shakenfist-spice-renderer/src/encoder/h264.rs": {
+      "sha": "2585e79f746e0805588a65a5c65133481b6e0f5c",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/src/encoder/mod.rs": {
+      "sha": "3ce7395dd32e5fc95869a05a5bfb40a37fbaaee3",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/src/encoder/task.rs": {
+      "sha": "35091b821452a2c46ed6b230147d3fc435d9c21e",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/src/encoder/types.rs": {
+      "sha": "1983ac9f5a058874e3894f188050bce525a6ad62",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/src/event_bus.rs": {
+      "sha": "7732353bb2846bc16b1b37674170c18dba3c4d8c",
+      "date": "2026-11-07"
+    },
     "shakenfist-spice-renderer/src/image_cache.rs": {
       "sha": "96afd58b68815692f90d4c7fed1ae6b98d52063c",
       "date": "2026-09-19"
+    },
+    "shakenfist-spice-renderer/src/lib.rs": {
+      "sha": "3c352efcd33d527f88037dace77970b55506c465",
+      "date": "2026-11-07"
     },
     "shakenfist-spice-renderer/src/log_config.rs": {
       "sha": "7339aea51a0a9ff9efbb09f489e17bae62df7315",
@@ -492,6 +684,30 @@
     "shakenfist-spice-renderer/src/opcode_counters.rs": {
       "sha": "6f04c73ca1a65cfe0cb5bda88a53e2633dfb0d02",
       "date": "2026-09-19"
+    },
+    "shakenfist-spice-renderer/src/playback_sink.rs": {
+      "sha": "f96cf82bbdb3188669b96611d03e9e9f311a9f06",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/src/pointer.rs": {
+      "sha": "57850ef107d48b82b58569cc6b3256ef5501d264",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/src/session.rs": {
+      "sha": "2a4c7201162947fd7b43592917049156be6fdf6e",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/src/session_state.rs": {
+      "sha": "674296d93e2942b6e6ddce665af0c7e81b768c60",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/src/snapshots.rs": {
+      "sha": "d73b827ef998237906536b58e0f4427352dbaaf1",
+      "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/src/surface_mirror.rs": {
+      "sha": "0210ba24e8daba7d9ad4566c52aa3e8470fe53b4",
+      "date": "2026-11-07"
     },
     "shakenfist-spice-renderer/src/traffic.rs": {
       "sha": "ef5d6e5db8499bf3eddb2beaeb0419d18c3e522c",
@@ -521,9 +737,17 @@
       "sha": "7f87d7fcda4646aef034dbae3ca07aa775d1d483",
       "date": "2026-07-21"
     },
+    "shakenfist-spice-renderer/tests/control_socket.rs": {
+      "sha": "525119a94d14354ff56719692c489cb33bf2fc8d",
+      "date": "2026-11-07"
+    },
     "shakenfist-spice-renderer/tests/encoder_smoke.rs": {
       "sha": "ddf75a7edc8fef716eaf555e4577a64a65ed4375",
       "date": "2026-08-18"
+    },
+    "shakenfist-spice-renderer/tests/headless_connect_failure.rs": {
+      "sha": "61dfb37eb973efec10fa13ff8cf9e4ea4ffde886",
+      "date": "2026-11-07"
     },
     "shakenfist-spice-renderer/tests/webrtc_h264_smoke.rs": {
       "sha": "6ee8eb06a3e01cd7997f1e62f3ec4ec4c27d8710",
@@ -553,6 +777,10 @@
       "sha": "70308378d11d123fbed6f75df2e54e2e887382f8",
       "date": "2026-07-22"
     },
+    "shakenfist-spice-webrtc/Cargo.toml": {
+      "sha": "e876cb00f34e44e5e7a0d5d986155ba268b8dd48",
+      "date": "2026-11-07"
+    },
     "shakenfist-spice-webrtc/README.md": {
       "sha": "19072e84e4fdec20fad7c35b04a26db76d5e35f0",
       "date": "2026-08-02"
@@ -561,6 +789,10 @@
       "sha": "03a8a93721957eef128a027ec0505554f88223e9",
       "date": "2026-09-19"
     },
+    "shakenfist-spice-webrtc/src/bridge.rs": {
+      "sha": "742265fda225e785a85d4e60fb101bbd448e622e",
+      "date": "2026-11-07"
+    },
     "shakenfist-spice-webrtc/src/lib.rs": {
       "sha": "f4ae5da82db95cfaf142f4bd59f52460c233d255",
       "date": "2026-09-19"
@@ -568,6 +800,10 @@
     "shakenfist-spice-webrtc/src/sticky.rs": {
       "sha": "fd60aa65416f0231bae4b185cc18183bba6210cc",
       "date": "2026-09-19"
+    },
+    "shakenfist-spice-webrtc/src/test_client.rs": {
+      "sha": "7c9611cbf30b9c77cdec2a4211f6bd2e2764da87",
+      "date": "2026-11-07"
     },
     "shakenfist-spice-webrtc/tests/lifecycle.rs": {
       "sha": "358f02d4af6b88acd5491765c494aefb31f750b6",
