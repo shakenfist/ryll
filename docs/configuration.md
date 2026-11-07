@@ -21,7 +21,7 @@ ryll [OPTIONS]
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--headless` | false | Run without GUI (for automated testing) |
+| `--headless` | false | Run without GUI (for automated testing). Mutually exclusive with `--web` and `--rdp`, which are refused together at parse time |
 | `--cadence` | false | Send automatic keystroke every 2 seconds |
 
 ### USB Device Redirection
@@ -64,7 +64,7 @@ window. The operator guide, including reverse-proxy and TLS setup, is
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--web` | false | Run as a SPICE → browser transcoder. Serves a browser shell that consumes the SPICE display via WebRTC, and prints a URL carrying a per-launch random token. Mutually exclusive with `--headless` and the GUI default |
+| `--web` | false | Run as a SPICE → browser transcoder. Serves a browser shell that consumes the SPICE display via WebRTC, and prints a URL carrying a per-launch random token. Mutually exclusive with `--headless` and the GUI default, and refused together with `--headless` at parse time |
 | `--web-host <ADDR>` | `127.0.0.1` | Bind address for the HTTP/HTTPS signalling listener only. Use `0.0.0.0` for LAN access. Has no effect on which addresses WebRTC media binds or advertises — that is `--web-media-addr` |
 | `--web-port <PORT>` | 0 (ephemeral) | TCP port for the signalling listener |
 | `--web-tls-cert <PATH>` | none | PEM-encoded TLS certificate chain. Serving over HTTPS requires `--web-tls-key` as well |
