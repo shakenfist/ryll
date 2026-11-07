@@ -262,6 +262,12 @@ pub async fn run_connection(
 
     let client = SpiceClient::new(config)?;
 
+    // Taken before `session_state` moves into the main channel: the
+    // display channel publishes the primary surface's size through
+    // this handle, and the main channel reads it to tell whether a
+    // resize it asked the guest for was applied.
+    let primary_surface_size = session_state.primary_surface_size();
+
     // Shared mm_time clock. The main channel writes to it from
     // `MAIN_INIT` and `MULTI_MEDIA_TIME`; the display channel reads
     // from it when building `STREAM_REPORT` payloads. Constructed
@@ -382,6 +388,7 @@ pub async fn run_connection(
                     channel_id,
                     stream,
                     events.clone(),
+                    primary_surface_size.clone(),
                     capture.clone(),
                     byte_counter.clone(),
                     traffic.clone(),
