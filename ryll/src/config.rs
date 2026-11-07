@@ -83,7 +83,8 @@ pub struct Args {
     #[arg(long, value_name = "PATH", requires = "direct", conflicts_with_all = ["url", "file"])]
     pub password_file: Option<PathBuf>,
 
-    /// Run in headless mode (no GUI)
+    /// Run in headless mode (no GUI). Mutually exclusive with
+    /// --web and --rdp; the conflict is declared on those flags.
     #[arg(long, default_value_t = false)]
     pub headless: bool,
 
@@ -227,7 +228,7 @@ pub struct Args {
     /// random token, and serves a browser shell that consumes
     /// the SPICE display via WebRTC. Mutually exclusive with
     /// --headless and the GUI default.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "headless")]
     pub web: bool,
 
     /// Bind address for --web mode (default 127.0.0.1).
@@ -1445,6 +1446,19 @@ delete-this-file=1\n";
         assert_eq!(args.rdp_security, RdpSecurityMode::Nla);
         assert_eq!(args.rdp_tls_cert, Some(PathBuf::from("cert.pem")));
         assert_eq!(args.rdp_tls_key, Some(PathBuf::from("key.pem")));
+    }
+
+    #[test]
+    fn web_conflicts_with_headless() {
+        for order in [["--web", "--headless"], ["--headless", "--web"]] {
+            let err = Args::try_parse_from(["ryll", order[0], order[1], "--file", "x.vv"])
+                .expect_err("--web and --headless should conflict");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{order:?}: {err}"
+            );
+        }
     }
 
     #[test]

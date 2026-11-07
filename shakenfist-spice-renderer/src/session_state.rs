@@ -24,6 +24,8 @@
 //! dropped when the main channel's task ends, so `changed()` on a
 //! receiver returns `Err` once the session is over.
 
+use std::sync::Arc;
+
 use tokio::sync::watch;
 
 /// The mouse mode before the server has announced one. Not a SPICE mode:
@@ -33,10 +35,38 @@ use tokio::sync::watch;
 pub const MOUSE_MODE_UNKNOWN: u32 = 0;
 
 /// The publishing side of a session's state. Owned by the main channel.
+///
+/// The primary surface's size is the exception to "owned by the main
+/// channel": the display channel is what sees a surface appear, and
+/// the main channel is what asked the guest to resize, so that one
+/// value is published from a handle the display channel holds too.
 #[derive(Debug)]
 pub struct SessionState {
     mouse_mode: watch::Sender<u32>,
     agent_connected: watch::Sender<bool>,
+    primary_surface_size: PrimarySurfaceSize,
+}
+
+/// A handle the display channel publishes the primary surface's size
+/// through, and the main channel reads to tell whether a resize it
+/// asked the guest for was ever applied.
+///
+/// `Arc` rather than a clone of the sender: a `watch::Sender` is
+/// single-producer, and both channels are separate tasks.
+#[derive(Debug, Clone)]
+pub struct PrimarySurfaceSize(Arc<watch::Sender<Option<(u32, u32)>>>);
+
+impl PrimarySurfaceSize {
+    /// The primary surface's size as last published. `None` before the
+    /// first `SURFACE_CREATE` for surface 0 of display channel 0.
+    pub fn get(&self) -> Option<(u32, u32)> {
+        *self.0.borrow()
+    }
+
+    /// Publish a new size for the primary surface.
+    pub fn publish(&self, width: u32, height: u32) {
+        self.0.send_replace(Some((width, height)));
+    }
 }
 
 /// The reading side of a session's state. Cheap to clone; each clone
@@ -57,10 +87,19 @@ impl SessionState {
     pub fn new() -> Self {
         let (mouse_mode, _) = watch::channel(MOUSE_MODE_UNKNOWN);
         let (agent_connected, _) = watch::channel(false);
+        let (primary_surface_size, _) = watch::channel(None);
         Self {
             mouse_mode,
             agent_connected,
+            primary_surface_size: PrimarySurfaceSize(Arc::new(primary_surface_size)),
         }
+    }
+
+    /// The handle the display channel publishes the primary surface's
+    /// size through. Taken before the `SessionState` moves into the
+    /// main channel.
+    pub fn primary_surface_size(&self) -> PrimarySurfaceSize {
+        self.primary_surface_size.clone()
     }
 
     /// A receiver bundle that has seen the current values, so its

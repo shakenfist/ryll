@@ -21,7 +21,7 @@ ryll [OPTIONS]
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--headless` | false | Run without GUI (for automated testing) |
+| `--headless` | false | Run without GUI (for automated testing). Mutually exclusive with `--web` and `--rdp`, which are refused together at parse time |
 | `--cadence` | false | Send automatic keystroke every 2 seconds |
 
 ### USB Device Redirection
@@ -64,7 +64,7 @@ window. The operator guide, including reverse-proxy and TLS setup, is
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--web` | false | Run as a SPICE → browser transcoder. Serves a browser shell that consumes the SPICE display via WebRTC, and prints a URL carrying a per-launch random token. Mutually exclusive with `--headless` and the GUI default |
+| `--web` | false | Run as a SPICE → browser transcoder. Serves a browser shell that consumes the SPICE display via WebRTC, and prints a URL carrying a per-launch random token. Mutually exclusive with `--headless` and the GUI default, and refused together with `--headless` at parse time |
 | `--web-host <ADDR>` | `127.0.0.1` | Bind address for the HTTP/HTTPS signalling listener only. Use `0.0.0.0` for LAN access. Has no effect on which addresses WebRTC media binds or advertises — that is `--web-media-addr` |
 | `--web-port <PORT>` | 0 (ephemeral) | TCP port for the signalling listener |
 | `--web-tls-cert <PATH>` | none | PEM-encoded TLS certificate chain. Serving over HTTPS requires `--web-tls-key` as well |
@@ -373,13 +373,27 @@ Ctrl+Shift+X, because ryll cannot tell them apart from those.
 
 ## Environment Variables
 
-Currently, ryll does not use environment variables for configuration. All
-settings are provided via command-line arguments or .vv files.
+`RUST_LOG` selects the logging filter, as described under
+[Logging](#logging). Every other setting is provided via
+command-line arguments or .vv files.
 
 ## Logging
 
 Ryll uses the `tracing` crate for logging. By default, INFO-level messages
 are shown. Use `-v` or `--verbose` for DEBUG-level output.
+
+`RUST_LOG` overrides that level when it is set, using `tracing`'s
+own directive syntax, so a single crate can be turned up without
+turning up the whole dependency tree:
+
+```bash
+RUST_LOG=info,shakenfist_spice_webrtc=debug ryll --file test.vv
+```
+
+`--verbose` still decides whether `/tmp/ryll.log` is written, and
+that file is filtered by the same directive. A `RUST_LOG` that does
+not parse is reported at WARN level and ignored, leaving the level
+`--verbose` asked for.
 
 Log output goes to stderr, so you can redirect stdout for data output:
 

@@ -1,4 +1,4 @@
-//! Wire types for the Ryll control-socket protocol (version 1.6).
+//! Wire types for the Ryll control-socket protocol (version 1.7).
 //!
 //! All types derive `serde::Serialize` / `serde::Deserialize` so they
 //! can be round-tripped through NDJSON without any manual parsing.
@@ -38,6 +38,11 @@
 //! test can see that audio arrives and decodes.  It is left out when no
 //! playback channel has linked, which includes every build without the
 //! `audio` feature.  Additive, so a minor bump.
+//!
+//! v1.6 → v1.7 added `frames_dropped_empty_dest` to each stream in the
+//! `stats` result: frames a server sent with a dest rect enclosing no
+//! pixels, which used to be counted as painted.  Additive, so a minor
+//! bump.
 
 use serde::{Deserialize, Serialize};
 use shakenfist_spice_protocol::display_server;
@@ -46,7 +51,7 @@ pub use crate::channels::RequestId;
 use crate::snapshots::{DisplaySnapshot, PlaybackCodec, PlaybackSnapshot, StreamSnapshot};
 
 /// Protocol version this server speaks.
-pub const PROTOCOL_VERSION: &str = "1.6";
+pub const PROTOCOL_VERSION: &str = "1.7";
 
 /// All v1 verb names the server recognises. Advertised in the `hello`
 /// response so clients can adapt at runtime rather than hard-coding
@@ -208,6 +213,10 @@ pub enum ErrorCode {
     /// A queue into the session was full; retry shortly.  Added in
     /// v1.3, returned by `resize`.
     QueueFull,
+    /// The session was not started with `--enable-paste-as-keystrokes`,
+    /// so `paste` cannot type anything.  Added in v1.7, returned by
+    /// `paste`.
+    PasteNotEnabled,
     NotImplemented,
     InternalError,
 }
@@ -464,6 +473,9 @@ pub struct StreamStats {
     pub frames_received: u64,
     pub frames_decoded_ok: u64,
     pub frames_decode_failed: u64,
+    /// Frames decoded but not painted, because the dest rect
+    /// encloses no pixels.
+    pub frames_dropped_empty_dest: u64,
     /// Session-relative seconds, on the clock both fields share.
     pub created_at_secs: f64,
     /// `null` while the stream is open.
@@ -496,6 +508,7 @@ impl From<&StreamSnapshot> for StreamStats {
             frames_received: s.frames_received,
             frames_decoded_ok: s.frames_decoded_ok,
             frames_decode_failed: s.frames_decode_failed,
+            frames_dropped_empty_dest: s.frames_dropped_empty_dest,
             created_at_secs: s.created_at_secs,
             destroyed_at_secs: s.destroyed_at_secs,
         }
