@@ -730,6 +730,9 @@ pub fn run_rdp(
             );
             let handles = shakenfist_spice_renderer::control::SessionHandles {
                 input_tx: input_tx_for_control,
+                // As in web mode, the SPICE-side inputs channel is
+                // started with paste disabled.
+                paste_enabled: false,
                 surface_mirror: surface_mirror.clone(),
                 clipboard,
                 resize_tx: resize_tx_for_control,

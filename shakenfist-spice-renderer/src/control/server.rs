@@ -85,6 +85,11 @@ pub trait StatusProvider: Send + Sync {
 pub struct SessionHandles {
     /// The inputs channel's queue, for `send_key` and `paste`.
     pub input_tx: mpsc::Sender<InputEvent>,
+    /// Whether this session can type a paste at all, which is
+    /// `--enable-paste-as-keystrokes` (or `--paste-text`). Without it
+    /// the inputs channel drops a `PasteText` event, so `paste` is
+    /// refused here rather than accepted and dropped there.
+    pub paste_enabled: bool,
     /// The live pixel store, for `screenshot`.
     pub surface_mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
     /// The clipboard the main channel was given, for `clipboard_set`
@@ -1041,7 +1046,13 @@ async fn dispatch_request(
             false,
         ),
         "paste" => (
-            handle_paste(id, request.params, client_state, &handles.input_tx),
+            handle_paste(
+                id,
+                request.params,
+                client_state,
+                &handles.input_tx,
+                handles.paste_enabled,
+            ),
             false,
         ),
         "screenshot" => (
@@ -1366,6 +1377,12 @@ fn handle_send_key(
 /// `--paste-text ""` behaviour), so we just queue the event and
 /// return `{}`.
 ///
+/// A session without `--enable-paste-as-keystrokes` cannot type
+/// anything, so `paste` is refused with `paste_not_enabled` instead of
+/// being accepted and dropped by the inputs channel. A paste that
+/// arrives while another is still typing is accepted here -- only the
+/// inputs channel knows that -- and fails with a `paste_failed` event.
+///
 /// `agent_not_connected` is intentionally NOT returned: paste in Ryll
 /// works by translating text to US-QWERTY scancodes and issuing
 /// `KeyDown`/`KeyUp` events through the SPICE inputs channel — it
@@ -1380,7 +1397,17 @@ fn handle_paste(
     params: serde_json::Value,
     client_state: &ClientState,
     input_tx: &mpsc::Sender<InputEvent>,
+    paste_enabled: bool,
 ) -> Response {
+    if !paste_enabled {
+        return Response::err(
+            id,
+            ErrorCode::PasteNotEnabled,
+            "this session was started without --enable-paste-as-keystrokes, \
+             so paste cannot type anything",
+        );
+    }
+
     let p: PasteParams = match serde_json::from_value(params) {
         Ok(v) => v,
         Err(e) => {

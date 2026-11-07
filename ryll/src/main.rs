@@ -894,6 +894,10 @@ fn run_web(
             );
             let handles = shakenfist_spice_renderer::control::SessionHandles {
                 input_tx: input_tx_for_control,
+                // Web mode starts the inputs channel with paste
+                // disabled (see the session spawn above), so a
+                // control-socket paste cannot type here.
+                paste_enabled: false,
                 surface_mirror: surface_mirror.clone(),
                 clipboard,
                 resize_tx: resize_tx_for_control,

@@ -54,7 +54,10 @@ Version history:
   feature.  Additive.
 - **1.7** — added `frames_dropped_empty_dest` to each stream in the
   `stats` result, counting frames a server sent with a dest rect that
-  encloses no pixels, which used to be counted as painted.  Additive.
+  encloses no pixels, which used to be counted as painted.  Added the
+  `paste_not_enabled` error code, returned by `paste` in a session
+  started without `--enable-paste-as-keystrokes`, which used to be
+  answered `ok` and then dropped with no event at all.  Additive.
 
 ---
 
@@ -514,6 +517,12 @@ Note: 57419 decimal is 0xE04B, the scancode for the left arrow key.
 Paste a string of text into the guest by translating it into US-QWERTY
 key events and queuing them for delivery.
 
+The session must have been started with
+`--enable-paste-as-keystrokes` (or `--paste-text`, which implies it).
+Without it there is nothing to type with, and the request is refused
+with `paste_not_enabled` rather than accepted. `--web` and `--rdp`
+sessions never enable it, so `paste` is refused there too.
+
 This verb is **asynchronous**. The response is returned as soon as the
 paste task has been queued, not when it has finished typing all the
 characters. Completion (or failure) is communicated as a
@@ -548,7 +557,18 @@ Verb-specific error codes:
 
 | Code | When |
 |------|------|
-| `agent_not_connected` | The SPICE vdagent is not currently connected. The paste infrastructure depends on the agent for clipboard operations. Wait for an `agent_connected` event with `connected: true` before retrying. |
+| `paste_not_enabled` | From v1.7. The session was started without `--enable-paste-as-keystrokes`, so nothing can be typed. Not retryable: it is a property of how the session was launched. |
+
+`agent_not_connected` is **not** returned by this verb, although it
+appears in the error-code list: paste translates text to scancodes and
+sends them on the SPICE inputs channel, and never uses the vdagent, so
+it works with `agent_connected: false`.
+
+A paste that arrives while another is still typing is accepted here --
+only the inputs channel knows one is in flight -- and then fails with a
+`paste_failed` event whose `reason` says so. Every dropped paste gets
+one: a request that is answered `ok` always ends in either
+`paste_completed` or `paste_failed`.
 
 Worked example:
 
@@ -567,6 +587,12 @@ Or on failure (e.g. an unrepresentable character mid-string):
 
 ```
 ← {"event": "paste_failed", "data": {"request_id": 6, "reason": "character U+2022 is not representable in US-QWERTY"}}
+```
+
+Or because a paste was already typing when this one arrived:
+
+```
+← {"event": "paste_failed", "data": {"request_id": 7, "reason": "a paste is already in progress"}}
 ```
 
 ---
@@ -1353,7 +1379,8 @@ The `code` field is a stable, machine-readable string. Do not parse
 `message` programmatically; it may change between minor versions.
 
 The following error codes are defined in v1.x (all were present in
-v1.0 except `queue_full`, added in v1.3):
+v1.0 except `queue_full`, added in v1.3, and `paste_not_enabled`,
+added in v1.7):
 
 | Code | Semantics |
 |------|-----------|
@@ -1363,10 +1390,11 @@ v1.0 except `queue_full`, added in v1.3):
 | `unknown_method` | The `method` field names a verb the server does not know. |
 | `bad_params` | The `params` object is missing a required field, has a field of the wrong type, or is not a JSON object at all. |
 | `bad_state` | The `state` field in a `send_key` request is not `"down"`, `"up"`, or `"press"`. |
-| `agent_not_connected` | A `paste` was requested but the SPICE vdagent is not currently connected. Not returned by `clipboard_set` or `resize`, which hold their request until the agent connects. |
+| `agent_not_connected` | Defined in v1.0 and returned by no verb in this implementation. `paste` does not use the vdagent, and `clipboard_set` and `resize` hold their request until the agent connects. |
 | `no_such_surface` | A `screenshot` was requested for a `surface_id` that does not exist in the current session. |
 | `unsupported_format` | A `screenshot` was requested with a `format` value other than `"png"` or `"rgba"`. |
 | `queue_full` | A queue into the session was full, so nothing was queued. Retryable after a short delay. Returned by `resize`. |
+| `paste_not_enabled` | A `paste` was requested in a session started without `--enable-paste-as-keystrokes`, so there is nothing to type with. Not retryable. Returned by `paste`. |
 | `not_implemented` | The method is recognised but not yet implemented. Should not appear in a complete implementation; retained in the code so partial builds have a stable code to return during incremental rollout of a new verb. |
 | `internal_error` | An unexpected condition occurred server-side. The `message` field will contain details. Report these as bugs. |
 
@@ -1425,8 +1453,9 @@ encoding. Version 1.3 added the clipboard and `resize` verbs and the
 `clipboard_changed` event. Version 1.4 added the `stats` verb. Version
 1.5 added the `input_rtt` event. Version 1.6 added the `stats`
 result's `playback` object. Version 1.7 (the current version) added
-the `stats` result's `frames_dropped_empty_dest` stream counter; see
-the version history at the top of this document.
+the `stats` result's `frames_dropped_empty_dest` stream counter and
+the `paste_not_enabled` error code; see the version history at the top
+of this document.
 
 ---
 
