@@ -832,14 +832,6 @@
       "author": "mikal"
     },
     {
-      "path": ".github/workflows/renovate.yml",
-      "author": "mikal"
-    },
-    {
-      "path": ".github/workflows",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/rdp.rs",
       "author": "mikal"
     },
