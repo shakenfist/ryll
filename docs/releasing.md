@@ -112,6 +112,17 @@ over in the environment (`-e CARGO_REGISTRY_TOKEN`), which cargo
 reads without a prior `cargo login`, so it is never written to
 `~/.cargo/credentials.toml` inside the container.
 
+The expiry is not free, so check it before starting a release rather
+than relying on the release to tell you. An expired token cannot
+leak publishing rights, but it is only read at publish time:
+`publish-crates` runs behind `sign-tag`, which is gated on the
+`release` environment's manual approval, so the failure surfaces
+after the tag is signed and the binaries are public.
+`tools/publish-crates.sh` runs `cargo publish` per crate under `set
+-e` with no already-published guard, so a token that expires mid-run
+leaves the earlier crates published and the rest to be done by hand
+-- a re-run would fail on the ones that already landed.
+
 ### PyPI Trusted Publishers and the `release` environment
 
 The `ryll` wheel publishes to PyPI using an OIDC Trusted

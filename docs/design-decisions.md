@@ -81,13 +81,18 @@ produced.
    based on the `win_head_dist` field from each GLZ header, rather than using
    a fixed cache size. This matches the server's reference window and prevents
    both premature eviction (corrupting cross-frame references) and unbounded
-   memory growth. Cross-frame corruption was traced to dictionary lifetime
-   rather than to the decoder: the control-byte parsing, pixel_flag and
-   image_flag decoding and the pixel copy loops were compared against
-   kerbside's Python `glz.py` and found faithful. So a hunt for corrupted GLZ
-   output starts with eviction, the `IMAGE_FLAGS_CACHE_ME` test before
-   caching, and the invalidation handlers that clear the dictionary, not with
-   the decompression algorithm.
+   memory growth. Cross-frame corruption is *not* explained by either the
+   dictionary's lifetime or the decoder, and a hunt for it should not restart
+   with them. All three dictionary-lifetime fixes landed -- this eviction, the
+   `IMAGE_FLAGS_CACHE_ME` test before caching, and the INVALIDATE_LIST and
+   INVAL_ALL_PIXMAPS handlers that clear the dictionary -- and the
+   coloured-noise band still reproduces across the top of the primary surface
+   during the BIOS/GRUB/kernel-boot window. The decoder was ruled out
+   separately: the control-byte parsing, pixel_flag and image_flag decoding
+   and the pixel copy loops were compared against kerbside's Python `glz.py`
+   and found faithful. The cause is still open; the surviving hypotheses and
+   the pcap entry point for chasing them are in
+   [OPEN-QUESTIONS.md](plans/OPEN-QUESTIONS.md).
 
 9. **Pcap TCP segmentation** - Large SPICE messages are split into multiple
    TCP segments in the pcap writer to avoid exceeding the IPv4 maximum packet
@@ -342,13 +347,13 @@ produced.
     the state, so a new feature gets a menu entry rather than another
     button. The glyph is the unicode `☰` rather than an image, matching
     the `🔇`/`🔊` buttons beside it and keeping the GUI free of an asset
-    pipeline. Side-panel entries are checkboxes, so the menu shows
-    whether their panel is open; one-shot actions are buttons, and those
-    with a host shortcut advertise it (see `HostShortcut`). Protocol
-    gaps are neither: a gap is a notification, so
-    `register_gap_notification_observer` pushes it into the notification
-    store and it is read from the bell and its side panel rather than
-    from a status-bar badge or a menu entry.
+    pipeline. Side-panel entries and persistent settings are checkboxes,
+    so the menu shows whether their panel is open; one-shot actions are
+    buttons, and those with a host shortcut advertise it (see
+    `HostShortcut`). Protocol gaps are neither: a gap is a notification,
+    so `register_gap_notification_observer` pushes it into the
+    notification store and it is read from the bell and its side panel
+    rather than from a status-bar badge or a menu entry.
 
 27. **The crates are workspace members, not separate repositories** -
     All seven crates live in this repository. A type change in
