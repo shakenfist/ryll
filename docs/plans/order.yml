@@ -6,7 +6,6 @@
 # master plan's execution table.
 
 - index.md: Plans index
-- PLAN-initial.md: Initial porting plan
 - PLAN-capture.md: Capture mode
 - PLAN-packaging.md: Packaging
 - PLAN-usb-redir.md: USB redirection
@@ -14,12 +13,10 @@
 - PLAN-bug-reports.md: Bug reports
 - PLAN-usb-ui.md: USB UI
 - PLAN-webdav.md: WebDAV
-- PLAN-crate-extraction.md: Crate extraction
 - PLAN-remaining-issues.md: Remaining issues
 - PLAN-display-iteration-followups.md: Display follow-ups
 - PLAN-pr20-followup.md: PR 20 follow-up
 - PLAN-pr23-followup.md: PR 23 follow-up
-- PLAN-deferred-debt.md: Deferred debt
 - PLAN-supply-chain-scanning.md: Supply-chain scanning
 - PLAN-supply-chain-followups.md: Supply-chain follow-ups
 - PLAN-screenshot-and-latency-hud.md: Screenshot and latency HUD
@@ -29,9 +26,7 @@
 - PLAN-bugreport-trigger-snapshot.md: Bug-report trigger snapshot
 - PLAN-macbook-bugreport-fixes.md: Macbook bug-report fixes
 - PLAN-paste-as-keystrokes.md: Paste-as-keystrokes fallback
-- PLAN-hamburger-menu.md: Hamburger menu
 - PLAN-notifications.md: Notifications system
-- PLAN-pr31-followup.md: PR 31 follow-up
 - PLAN-connection-properties.md: Connection properties
 - PLAN-display-window-sizing.md: Display window sizing
 - PLAN-web-frontend.md: Web frontend
@@ -46,7 +41,6 @@
 - PLAN-streaming-test-automation.md: Streaming test automation
 - OPEN-QUESTIONS.md: Open questions watch-list
 - PLAN-self-hosted-runners.md: Self-hosted runner migration
-- PLAN-pip-distribution.md: Pip-installable ryll
 - PLAN-webrtc-0.20-upgrade.md: webrtc-rs 0.20 upgrade
 - PLAN-two-stage-ci.md: Two-stage CI
 - PLAN-main-event-drops.md: Main-channel event drops
