@@ -344,10 +344,11 @@ produced.
     the `🔇`/`🔊` buttons beside it and keeping the GUI free of an asset
     pipeline. Side-panel entries are checkboxes, so the menu shows
     whether their panel is open; one-shot actions are buttons, and those
-    with a host shortcut advertise it (see `HostShortcut`). Protocol gap
-    counts stay a separate badge rather than moving into the menu,
-    because a notification is neither state nor a command and
-    notifications have their own home in the bell and its panel.
+    with a host shortcut advertise it (see `HostShortcut`). Protocol
+    gaps are neither: a gap is a notification, so
+    `register_gap_notification_observer` pushes it into the notification
+    store and it is read from the bell and its side panel rather than
+    from a status-bar badge or a menu entry.
 
 27. **The crates are workspace members, not separate repositories** -
     All seven crates live in this repository. A type change in

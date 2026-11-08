@@ -9,9 +9,9 @@
 //! Consumers who only need a subset can disable default
 //! features and opt in to the ones they need.
 //!
-//! All four decoders return a [`DecompressedImage`] on success,
-//! except `quic_decode`, which returns `Option<Vec<u8>>` and
-//! leaves the wrapping to the caller. That asymmetry is now in
+//! Three of the four decoders return a [`DecompressedImage`] on
+//! success. `quic_decode` returns `Option<Vec<u8>>` and leaves
+//! the wrapping to the caller. That asymmetry is now in
 //! a published API, so closing it is a breaking change rather
 //! than the free fix it would have been before the first
 //! release: see

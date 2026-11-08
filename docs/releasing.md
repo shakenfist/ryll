@@ -103,12 +103,13 @@ to the `shakenfist-spice-*` and `ryll` crate patterns rather than to
 the whole account, because a leaked account-wide token can publish
 updates to any crate the owner holds, transfer ownership and yank
 published versions. A one-shot publish of a *new* name needs only
-`publish-new`: the `0.0.0` name reservations were made with a
-`publish-new`-only token scoped to those three names and expiring in a
-day, so a leak could not have touched anything else. Both the release
-workflow and `make publish-crates` hand the token over in the
-environment (`-e CARGO_REGISTRY_TOKEN`), which cargo reads without a
-prior `cargo login`, so it is never written to
+`publish-new`: the first three `0.0.0` name reservations
+(`shakenfist-spice-compression`, `-protocol` and `-usbredir`) were
+made with a `publish-new`-only token scoped to just those names and
+expiring in a day, so a leak could not have touched anything else.
+Both the release workflow and `make publish-crates` hand the token
+over in the environment (`-e CARGO_REGISTRY_TOKEN`), which cargo
+reads without a prior `cargo login`, so it is never written to
 `~/.cargo/credentials.toml` inside the container.
 
 ### PyPI Trusted Publishers and the `release` environment
@@ -163,6 +164,13 @@ minimal `0.0.0` placeholder as soon as its workspace member exists,
 before the work that will fill it. The real release then supersedes the
 placeholder, which the resolver already prefers. Scope the token for
 that publish to `publish-new` only, as above.
+
+While the member sits at `0.0.0`, depend on it by `path` alone and
+leave the `version =` half of the dual spec off until it reaches its
+first real version. Cargo will not satisfy `^0.1` from `0.0.0` -- it
+fails the resolve with "candidate versions found which didn't match:
+0.0.0" -- so adding the qualifier early as forward preparation breaks
+the build rather than being the no-op it looks like.
 
 ### Host tools
 
