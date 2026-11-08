@@ -141,10 +141,6 @@
       "sha": "789383eaa2b614b16b52dda69a909dedf5559a9f",
       "date": "2026-10-22"
     },
-    "docs/ci.md": {
-      "sha": "1a06548a21fd97965ddbae97d689cb8d4cdc8c87",
-      "date": "2026-11-08"
-    },
     "docs/configuration.md": {
       "sha": "139433836ef6d78b0fd54ec9b3179735780c648b",
       "date": "2026-11-08"
@@ -248,10 +244,6 @@
     "examples/ryll-web.service": {
       "sha": "ffeba1d4155450125fa098094f1167ed0cdbc9d2",
       "date": "2026-09-17"
-    },
-    "renovate.json": {
-      "sha": "4b412e00c15c5ad12a68d6c19893f80505efba63",
-      "date": "2026-11-08"
     },
     "ryll/Cargo.toml": {
       "sha": "6e77411f25e9bb28b23bb146644cd9f05bd680fb",

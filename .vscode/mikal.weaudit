@@ -1104,10 +1104,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/ci.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/configuration.md",
       "author": "mikal"
     },
@@ -1305,10 +1301,6 @@
     },
     {
       "path": "tools/rdp-smoke",
-      "author": "mikal"
-    },
-    {
-      "path": "renovate.json",
       "author": "mikal"
     },
     {
