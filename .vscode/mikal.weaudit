@@ -1264,10 +1264,6 @@
       "author": "mikal"
     },
     {
-      "path": "deny.toml",
-      "author": "mikal"
-    },
-    {
       "path": "Makefile",
       "author": "mikal"
     },
@@ -1325,14 +1321,6 @@
     },
     {
       "path": ".devcontainer",
-      "author": "mikal"
-    },
-    {
-      "path": ".cargo/audit.toml",
-      "author": "mikal"
-    },
-    {
-      "path": ".cargo",
       "author": "mikal"
     },
     {
