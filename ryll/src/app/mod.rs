@@ -3713,12 +3713,22 @@ impl eframe::App for RyllApp {
                                         other => format!("codec{}", other),
                                     };
                                     let lifetime = (now_secs - s.created_at_secs).max(0.0);
+                                    // `frames` counts painted frames, so a
+                                    // stream whose dest rect encloses no
+                                    // pixels reads as zero while frames
+                                    // arrive. Say where they went.
+                                    let dropped = if s.frames_dropped_empty_dest > 0 {
+                                        format!(" dropped={}", s.frames_dropped_empty_dest)
+                                    } else {
+                                        String::new()
+                                    };
                                     ui.label(format!(
-                                        "codec={} {}x{} frames={} lifetime={:.0}s",
+                                        "codec={} {}x{} frames={}{} lifetime={:.0}s",
                                         codec,
                                         s.stream_width,
                                         s.stream_height,
                                         s.frames_decoded_ok,
+                                        dropped,
                                         lifetime,
                                     ));
                                 }

@@ -41,7 +41,10 @@
 //!
 //! v1.6 → v1.7 added `frames_dropped_empty_dest` to each stream in the
 //! `stats` result: frames a server sent with a dest rect enclosing no
-//! pixels, which used to be counted as painted.  Additive, so a minor
+//! pixels, which used to be counted as painted.  It also added the
+//! `paste_not_enabled` error code, which `paste` now returns in a
+//! session started without `--enable-paste-as-keystrokes` instead of
+//! accepting a paste nothing would type.  Both additive, so a minor
 //! bump.
 
 use serde::{Deserialize, Serialize};

@@ -8,7 +8,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::mm_clock::MmClock;
 use crate::opcode_counters::OpcodeCounters;
-use crate::session_state::SessionState;
+use crate::session_state::{PrimarySurface, SessionState};
 use crate::snapshots::{MainSnapshot, OutstandingResizeSnapshot};
 use crate::{
     ByteCounter, CaptureSink, ClipboardBackend, LogConfig, NotificationEntry, NotificationSource,
@@ -274,18 +274,31 @@ const STUCK_AGENT_MESSAGE: &str =
 /// accused, short enough that the user has not moved on.
 const RESIZE_OUTCOME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Seconds between a session-relative timestamp and now, floored at
+/// zero so a clock that has not moved cannot read as negative.
+///
+/// Worth a function because the stored value is a timestamp, not an
+/// age: logging it directly claimed a resize was requested as long ago
+/// as the session had been up.
+fn secs_since(then_secs: f64, now_secs: f64) -> f64 {
+    (now_secs - then_secs).max(0.0)
+}
+
 /// A resize sent to the guest agent, waiting to be judged.
 #[derive(Debug, Clone, Copy)]
 struct OutstandingResize {
     width: u32,
     height: u32,
-    /// The primary surface's size when the request went out. A guest
-    /// that applies the request creates a new primary surface, so an
-    /// unchanged size at the deadline means nothing happened. Compared
-    /// rather than matched against the requested size, because a guest
-    /// legitimately applies a nearby mode -- its driver pads, or its
-    /// desktop rounds -- and that is still the guest acting.
-    surface_before: Option<(u32, u32)>,
+    /// The primary surface when the request went out. A guest that
+    /// applies the request creates a new primary surface, so the same
+    /// surface at the deadline means nothing happened.
+    ///
+    /// Judged by the surface's generation rather than its size,
+    /// because a guest legitimately lands on the size it was already
+    /// at -- its driver pads the mode, its desktop rounds it -- and
+    /// that is still the guest acting. Comparing sizes accused such a
+    /// guest of ignoring the request.
+    surface_before: Option<PrimarySurface>,
     /// Session-relative seconds at which it was sent.
     sent_at_secs: f64,
 }
@@ -1524,18 +1537,33 @@ impl MainChannel {
         if self.send_agent_monitors_config(width, height).await? {
             self.last_sent_monitors_config = Some((width, height));
             self.pending_monitors_config = None;
-            // Start (or restart) the clock on the guest applying it.
-            // A newer request supersedes an older one: the user has
-            // moved on, and only the latest size is still wanted.
-            self.outstanding_resize = Some(OutstandingResize {
-                width,
-                height,
-                surface_before: self.state.primary_surface_size().get(),
-                sent_at_secs: self.traffic.elapsed().as_secs_f64(),
-            });
-            self.resize_outcome_deadline =
-                Some(tokio::time::Instant::now() + RESIZE_OUTCOME_TIMEOUT);
+            let surface_before = self.state.primary_surface_size().get();
             self.resize_requests_sent_count = self.resize_requests_sent_count.saturating_add(1);
+            if surface_before.is_some_and(|s| (s.width, s.height) == (width, height)) {
+                // The guest is already at that size, so there is
+                // nothing for it to apply and no new surface to wait
+                // for. Judging this would accuse every control client
+                // that polls `resize` with the size it just read.
+                debug!(
+                    "main: resize to {}x{} is the size the guest is already at;                      nothing to judge",
+                    width, height
+                );
+                self.outstanding_resize = None;
+                self.resize_outcome_deadline = None;
+            } else {
+                // Start (or restart) the clock on the guest applying
+                // it. A newer request supersedes an older one: the
+                // user has moved on, and only the latest size is
+                // still wanted.
+                self.outstanding_resize = Some(OutstandingResize {
+                    width,
+                    height,
+                    surface_before,
+                    sent_at_secs: self.traffic.elapsed().as_secs_f64(),
+                });
+                self.resize_outcome_deadline =
+                    Some(tokio::time::Instant::now() + RESIZE_OUTCOME_TIMEOUT);
+            }
         } else {
             debug!("main: monitors config: agent send queue full");
         }
@@ -1557,10 +1585,13 @@ impl MainChannel {
             return;
         };
         let now = self.state.primary_surface_size().get();
-        if now != outstanding.surface_before {
+        let generation_before = outstanding.surface_before.map(|s| s.generation);
+        if now.map(|s| s.generation) != generation_before {
             debug!(
                 "main: resize to {}x{} applied: primary surface is now {:?}",
-                outstanding.width, outstanding.height, now
+                outstanding.width,
+                outstanding.height,
+                now.map(|s| (s.width, s.height))
             );
             return;
         }
@@ -1573,7 +1604,12 @@ impl MainChannel {
         );
         warn!(
             "main: {} (requested {:.1}s ago, primary surface still {:?})",
-            message, outstanding.sent_at_secs, now
+            message,
+            secs_since(
+                outstanding.sent_at_secs,
+                self.traffic.elapsed().as_secs_f64()
+            ),
+            now.map(|s| (s.width, s.height))
         );
         let entry =
             NotificationEntry::new(NotifySeverity::Warn, NotificationSource::Internal, message);
@@ -2650,6 +2686,76 @@ mod tests {
                 messages[0].contains("1800x856"),
                 "the second request should be the one named: {}",
                 messages[0]
+            );
+        }
+
+        // A control client that polls `resize` with the size it just
+        // read from `status` asks for a size the guest is already at.
+        // There is nothing for the guest to apply and no new surface
+        // to wait for, so judging it would accuse a guest that did
+        // nothing wrong.
+        #[tokio::test]
+        async fn a_resize_to_the_size_the_guest_already_has_is_not_judged() {
+            let (mut channel, mut peers) = resize_channel().await;
+            channel.state.primary_surface_size().publish(1024, 768);
+
+            send_resize(&mut channel, 1024, 768).await;
+
+            assert_eq!(
+                channel.resize_requests_sent_count, 1,
+                "the request still went to the guest"
+            );
+            assert!(
+                channel.outstanding_resize.is_none(),
+                "there is nothing to judge"
+            );
+            assert!(channel.resize_outcome_deadline.is_none(), "so no deadline");
+
+            // And if the deadline somehow fires anyway, nothing is
+            // reported.
+            channel.check_resize_outcome().await;
+            assert_eq!(channel.resize_unapplied_count, 0);
+            assert_eq!(
+                notifications(&mut peers),
+                Vec::<String>::new(),
+                "a guest already at the requested size is not at fault"
+            );
+        }
+
+        // The padding case the doc comment promises: the guest acts,
+        // creating a new primary surface, but its driver lands back on
+        // the size it was already at. Judging by size called that a
+        // guest which had ignored the request.
+        #[tokio::test]
+        async fn a_guest_that_remakes_the_surface_at_the_same_size_is_not_accused() {
+            let (mut channel, mut peers) = resize_channel().await;
+            channel.state.primary_surface_size().publish(1024, 768);
+            send_resize(&mut channel, 1280, 1024).await;
+
+            // A new surface, same dimensions as the old one.
+            channel.state.primary_surface_size().publish(1024, 768);
+            channel.check_resize_outcome().await;
+
+            assert_eq!(channel.resize_unapplied_count, 0);
+            assert_eq!(
+                notifications(&mut peers),
+                Vec::<String>::new(),
+                "a new surface is the guest acting, whatever its size"
+            );
+        }
+
+        // The warning says how long ago the request went out. The
+        // field it is computed from is a session-relative timestamp,
+        // so logging it directly claimed an age as large as the
+        // session's own uptime.
+        #[test]
+        fn the_age_of_a_request_is_measured_from_when_it_was_sent() {
+            assert_eq!(secs_since(200.0, 205.0), 5.0);
+            assert_eq!(secs_since(0.5, 0.5), 0.0);
+            assert_eq!(
+                secs_since(205.0, 200.0),
+                0.0,
+                "a clock that went backwards reads as no time at all"
             );
         }
 

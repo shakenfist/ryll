@@ -904,8 +904,11 @@ the request, a Warn notification says "The guest did not apply the
 requested resolution WxH -- check that spice-vdagent is running in the
 guest's desktop session", and `resize_unapplied_count` grows. The size
 the guest picks need not be the one asked for -- a driver pads the mode,
-a desktop rounds it -- so any change to the primary surface counts as
-the guest having acted.
+a desktop rounds it -- so any new primary surface counts as the guest
+having acted, including one the same size as the old one. A request for
+the size the guest is already at is not judged at all: there is nothing
+for it to apply, and a control client polling `resize` with the size it
+just read would otherwise be told the guest had ignored it.
 
 The usual causes, in the order worth checking inside the guest:
 

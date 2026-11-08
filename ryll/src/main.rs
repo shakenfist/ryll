@@ -232,10 +232,18 @@ fn main() -> Result<()> {
     // could not be parsed. Doing it here rather than at parse time
     // keeps the message in the log the operator is already reading.
     if let Some((value, error)) = rejected_rust_log {
-        warn!(
+        let message = format!(
             "RUST_LOG={} could not be parsed ({}); logging at '{}' instead",
             value, error, directive
         );
+        if console_subscriber_active {
+            // console-subscriber owns the global subscriber in this
+            // mode and ryll's own logs go nowhere, so a warning here
+            // would be the silence this whole change is about.
+            eprintln!("ryll: {}", message);
+        } else {
+            warn!("{}", message);
+        }
     }
 
     // Initialize global settings for protocol logging

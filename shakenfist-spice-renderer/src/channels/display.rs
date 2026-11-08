@@ -519,6 +519,11 @@ fn warn_if_h264_never_decodes(stream_id: u32, stream: &mut StreamState) {
     if stream.codec_type != SPICE_VIDEO_CODEC_TYPE_H264
         || stream.warned_never_decodes
         || stream.frames_decoded_ok > 0
+        // A frame dropped for an empty dest rect decoded perfectly
+        // well; it just had nowhere to go. Telling the user to restart
+        // with --no-h264 over that would blame the decoder for the
+        // server's rectangle.
+        || stream.frames_dropped_empty_dest > 0
         || stream.frames_received < H264_NO_PICTURE_WARN_FRAMES
     {
         return;
@@ -1046,7 +1051,6 @@ impl DisplayChannel {
         Arc::new(GlzDictionary::with_cap(cap_bytes))
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         channel_id: u8,
@@ -2063,6 +2067,13 @@ impl DisplayChannel {
                             );
                             stream.frames_dropped_empty_dest =
                                 stream.frames_dropped_empty_dest.saturating_add(1);
+                            // The decode itself happened, so the
+                            // freshness fields `stats` and bug reports
+                            // read must move. Leaving them unset made a
+                            // stream whose frames all decoded look
+                            // stalled.
+                            stream.last_decode_ok_ts_secs = Some(now_secs);
+                            stream.last_decode_duration_us = decode_duration_us;
                         }
                         Ok(Some(frame)) => {
                             debug!(
@@ -4461,7 +4472,9 @@ mod tests {
             )
             .await
             .expect("surface_create must not error");
-        assert_eq!(primary.get(), Some((1992, 1256)));
+        let published = primary.get().expect("the primary surface is published");
+        assert_eq!((published.width, published.height), (1992, 1256));
+        assert_eq!(published.generation, 1, "the session's first surface");
 
         channel
             .handle_message(
@@ -4472,8 +4485,8 @@ mod tests {
             .expect("surface_create must not error");
         assert_eq!(
             primary.get(),
-            Some((1992, 1256)),
-            "an off-screen surface is not the primary one"
+            Some(published),
+            "an off-screen surface is not the primary one, not even a generation"
         );
     }
 
@@ -5097,6 +5110,19 @@ mod tests {
             assert_eq!(
                 images, 0,
                 "{dest:?}: an unpaintable frame was still emitted"
+            );
+
+            // The decoder is working, so the stream must not be
+            // accused of never decoding, and must not look stalled.
+            // Both followed from the drop, not from anything the
+            // server did wrong.
+            assert!(
+                !stream.warned_never_decodes,
+                "{dest:?}: a decoder that decoded every frame was blamed"
+            );
+            assert!(
+                stream.last_decode_ok_ts_secs.is_some(),
+                "{dest:?}: a decode happened, so the stream is not stale"
             );
         }
     }

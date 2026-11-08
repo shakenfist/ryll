@@ -47,25 +47,54 @@ pub struct SessionState {
     primary_surface_size: PrimarySurfaceSize,
 }
 
-/// A handle the display channel publishes the primary surface's size
+/// The primary surface as last published: its size, and a count of
+/// how many primary surfaces the session has seen.
+///
+/// The generation is what makes "did the guest act?" answerable. A
+/// guest that applies a resize creates a new primary surface, but its
+/// driver may pad the mode and its desktop may round it, so the new
+/// surface can be the same size as the old one -- and a resize to the
+/// size the guest is already at changes nothing by definition.
+/// Comparing sizes cannot tell either case from a guest that ignored
+/// the request; comparing generations can.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrimarySurface {
+    pub width: u32,
+    pub height: u32,
+    /// Primary `SURFACE_CREATE`s published so far, starting at 1.
+    pub generation: u64,
+}
+
+/// A handle the display channel publishes the primary surface
 /// through, and the main channel reads to tell whether a resize it
 /// asked the guest for was ever applied.
 ///
 /// `Arc` rather than a clone of the sender: a `watch::Sender` is
 /// single-producer, and both channels are separate tasks.
 #[derive(Debug, Clone)]
-pub struct PrimarySurfaceSize(Arc<watch::Sender<Option<(u32, u32)>>>);
+pub struct PrimarySurfaceSize(Arc<watch::Sender<Option<PrimarySurface>>>);
 
 impl PrimarySurfaceSize {
-    /// The primary surface's size as last published. `None` before the
-    /// first `SURFACE_CREATE` for surface 0 of display channel 0.
-    pub fn get(&self) -> Option<(u32, u32)> {
+    /// The primary surface as last published. `None` before the first
+    /// `SURFACE_CREATE` for surface 0 of display channel 0.
+    pub fn get(&self) -> Option<PrimarySurface> {
         *self.0.borrow()
     }
 
-    /// Publish a new size for the primary surface.
+    /// Publish a new primary surface, one generation on from the last.
+    ///
+    /// `send_modify` rather than a borrow and a send: it holds the
+    /// lock across the read and the write, so the generation cannot
+    /// skip or repeat.
     pub fn publish(&self, width: u32, height: u32) {
-        self.0.send_replace(Some((width, height)));
+        self.0.send_modify(|current| {
+            let generation = current.map_or(1, |p| p.generation.saturating_add(1));
+            *current = Some(PrimarySurface {
+                width,
+                height,
+                generation,
+            });
+        });
     }
 }
 
@@ -140,6 +169,29 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::{mpsc, Notify};
+
+    /// What the resize verdict in `MainChannel::check_resize_outcome`
+    /// rests on: two surfaces of the same size are still two surfaces.
+    #[test]
+    fn republishing_the_same_size_is_a_new_generation() {
+        let handle = SessionState::new().primary_surface_size();
+        assert!(handle.get().is_none(), "nothing published yet");
+
+        handle.publish(1024, 768);
+        let first = handle.get().expect("a surface was published");
+        assert_eq!(
+            (first.width, first.height, first.generation),
+            (1024, 768, 1)
+        );
+
+        handle.publish(1024, 768);
+        let second = handle.get().expect("a surface was published");
+        assert_eq!((second.width, second.height), (1024, 768));
+        assert_eq!(
+            second.generation, 2,
+            "the same size twice is two surfaces, not one"
+        );
+    }
 
     #[test]
     fn a_new_session_starts_unknown_and_without_an_agent() {

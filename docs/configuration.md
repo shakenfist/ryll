@@ -395,6 +395,14 @@ that file is filtered by the same directive. A `RUST_LOG` that does
 not parse is reported at WARN level and ignored, leaving the level
 `--verbose` asked for.
 
+`RUST_LOG` is not a replacement for `--verbose`. Many per-channel
+protocol lines are gated on `--verbose` itself as well as on the log
+level, so `RUST_LOG=debug` alone still logs less than `--verbose`
+does; pass both when you want those lines narrowed to one crate.
+Because the same directive filters the file, a restrictive `RUST_LOG`
+also thins `/tmp/ryll.log` -- worth knowing before following a
+troubleshooting step that says to run with `-v` and read that file.
+
 Log output goes to stderr, so you can redirect stdout for data output:
 
 ```bash
