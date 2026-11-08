@@ -37,4 +37,10 @@ ignore = [
     "RUSTSEC-2026-0370",
     "RUSTSEC-2026-0371",
     "RUSTSEC-2026-0372",
+
+    # pin-utils unmaintained (upstream archived after 0.1.1, no
+    # successor release); transitive via a renderer dev-dependency
+    # (rtp -> webrtc-util -> nix) and via ironrdp-connector -> sspi
+    # -> async-dnssd. See PLAN-supply-chain-followups.md item 6.
+    "RUSTSEC-2026-0441",
 ]
