@@ -161,7 +161,15 @@ below. When an ignore is resolved, delete both the
   only widely used macro, `pin_mut!`, has a std replacement
   in `core::pin::pin!` (stable since Rust 1.68), so the
   crates that still carry it have a cheap way out when they
-  get to it.
+  get to it. Neither path reaches a shipped artefact either:
+  the first is a dev-dependency used only by
+  `tests/webrtc_h264_smoke.rs`, and the second arrives
+  through `shakenfist-spice-rdp` behind the default-off `rdp`
+  feature, which release builds do not enable. That makes
+  this a weaker-risk acceptance than items 2 and 3, which are
+  in the shipped TLS path; the ignore exists only because
+  both scanners read the lockfile rather than a feature
+  resolution.
 - **Action plan:**
   1. Move the renderer's `webrtc_h264_smoke` dev-dependency
      from `rtp` 0.17 onto `rtc::rtp`, which the webrtc 0.20
@@ -247,3 +255,11 @@ This plan is complete when:
 - Consider a recurring monthly cron that opens an issue if
   new advisories appear (`cargo audit` in CI produces the
   signal; we need a mechanism to route it).
+- Fail CI on a set difference between the advisory IDs in
+  `deny.toml` and those in `.cargo/audit.toml`. Forgetting
+  `.cargo/audit.toml` already turns the `cargo audit` job
+  red, but the reverse is silent, so a stale entry in either
+  file survives until someone notices by hand -- which is how
+  the September 2026 sweep above found its four. A periodic
+  run with an empty ignore list would surface the same thing
+  from the other side, as IDs reported `advisory-not-detected`.
