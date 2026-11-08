@@ -242,3 +242,11 @@ If the symptom maps cleanly to existing phase work, link to
 that phase. If it doesn't, file a new standalone plan stub and
 link to it from the entry. Entries without a linked plan are a
 smell — the plan is where the history lives.
+
+One exception: where the investigation came from a plan that has
+since been retired, there is no live plan to link, so the entry
+carries the evidence inline and links the retired plan's pinned
+copy as the trail. Such an entry is longer than the others on
+purpose, and it cannot be closed by the linked plan reaching a
+conclusion — closing it means folding its content into the
+`docs/` page that owns the topic. Q6 is the current example.
