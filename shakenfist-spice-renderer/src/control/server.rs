@@ -1400,11 +1400,16 @@ fn handle_paste(
     paste_enabled: bool,
 ) -> Response {
     if !paste_enabled {
+        // Not "started without --enable-paste-as-keystrokes": `--web`
+        // and `--rdp` start the inputs channel with paste off however
+        // the session was launched, so that wording told an operator
+        // who did pass the flag something untrue and unactionable.
         return Response::err(
             id,
             ErrorCode::PasteNotEnabled,
-            "this session was started without --enable-paste-as-keystrokes, \
-             so paste cannot type anything",
+            "paste-as-keystrokes is not enabled for this session, so paste \
+             cannot type anything; it needs --enable-paste-as-keystrokes, \
+             which --web and --rdp sessions do not honour",
         );
     }
 

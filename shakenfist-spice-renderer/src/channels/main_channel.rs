@@ -299,8 +299,19 @@ struct OutstandingResize {
     /// that is still the guest acting. Comparing sizes accused such a
     /// guest of ignoring the request.
     surface_before: Option<PrimarySurface>,
-    /// Session-relative seconds at which it was sent.
+    /// Session-relative seconds at which it was queued.
     sent_at_secs: f64,
+    /// The `AgentSendQueue::delivered` figure at which this request
+    /// has actually left ryll.
+    ///
+    /// `send_agent_data_message` reports success once the message is
+    /// queued and as much of it as the server's tokens allow has gone
+    /// out, so a token-starved agent leaves the request sitting in
+    /// ryll's own queue. Judging it then would tell the operator to
+    /// check spice-vdagent about a message the guest has never been
+    /// offered -- and ryll already has a notification for that case
+    /// (`STUCK_AGENT_MESSAGE`).
+    deliver_target: u64,
 }
 
 /// Ceiling for `outstanding_agent_request_count`.
@@ -1233,6 +1244,19 @@ impl MainChannel {
                 self.outstanding_agent_request_count = 0;
                 // Queued messages were meant for the agent that just left.
                 self.agent_queue.discard_unstarted();
+                // Including, possibly, a resize: an agent that has gone
+                // cannot apply one, and a discarded message is never
+                // delivered, so leaving the request outstanding would
+                // keep re-arming its deadline for the rest of the
+                // session.
+                if let Some(outstanding) = self.outstanding_resize.take() {
+                    debug!(
+                        "main: dropping the unjudged resize to {}x{}: \
+                         the agent it was sent to has gone",
+                        outstanding.width, outstanding.height
+                    );
+                    self.resize_outcome_deadline = None;
+                }
                 // Not connected, so this ends any starvation episode.
                 self.note_agent_starvation();
             }
@@ -1545,7 +1569,8 @@ impl MainChannel {
                 // for. Judging this would accuse every control client
                 // that polls `resize` with the size it just read.
                 debug!(
-                    "main: resize to {}x{} is the size the guest is already at;                      nothing to judge",
+                    "main: resize to {}x{} is the size the guest is \
+                     already at; nothing to judge",
                     width, height
                 );
                 self.outstanding_resize = None;
@@ -1560,6 +1585,10 @@ impl MainChannel {
                     height,
                     surface_before,
                     sent_at_secs: self.traffic.elapsed().as_secs_f64(),
+                    // This message is the last of those still waiting,
+                    // so it is out once the queue has delivered that
+                    // many more.
+                    deliver_target: self.agent_queue.delivered() + self.agent_queue.len() as u64,
                 });
                 self.resize_outcome_deadline =
                     Some(tokio::time::Instant::now() + RESIZE_OUTCOME_TIMEOUT);
@@ -1584,6 +1613,29 @@ impl MainChannel {
         let Some(outstanding) = self.outstanding_resize.take() else {
             return;
         };
+
+        // Only the guest's own time counts. While the request is still
+        // in ryll's agent queue, waiting for tokens the agent is not
+        // returning, the guest has not been asked yet: give it another
+        // interval rather than blaming spice-vdagent for a message
+        // that never left. The starvation itself is reported
+        // separately (`STUCK_AGENT_MESSAGE`), and a request discarded
+        // with its agent is dropped at AGENT_DISCONNECTED rather than
+        // waiting here forever.
+        if self.agent_queue.delivered() < outstanding.deliver_target {
+            debug!(
+                "main: resize to {}x{} is still queued for the guest agent \
+                 ({} messages waiting); not judging it yet",
+                outstanding.width,
+                outstanding.height,
+                self.agent_queue.len()
+            );
+            self.outstanding_resize = Some(outstanding);
+            self.resize_outcome_deadline =
+                Some(tokio::time::Instant::now() + RESIZE_OUTCOME_TIMEOUT);
+            return;
+        }
+
         let now = self.state.primary_surface_size().get();
         let generation_before = outstanding.surface_before.map(|s| s.generation);
         if now.map(|s| s.generation) != generation_before {
@@ -2687,6 +2739,85 @@ mod tests {
                 "the second request should be the one named: {}",
                 messages[0]
             );
+        }
+
+        // The clock measures the guest's time, not ryll's. A
+        // token-starved agent leaves the request in ryll's own queue,
+        // where the guest has never been offered it, so the deadline
+        // waits instead of telling the operator to check
+        // spice-vdagent.
+        #[tokio::test]
+        async fn a_resize_still_queued_in_ryll_is_not_blamed_on_the_guest() {
+            let (mut channel, mut peers) = resize_channel().await;
+            // No tokens: the monitors config is queued and nothing goes
+            // out, which is what `send_agent_monitors_config` reports
+            // success for.
+            channel.agent_tokens = 0;
+            send_resize(&mut channel, 1992, 1256).await;
+            assert_eq!(channel.agent_queue.len(), 1);
+
+            channel.check_resize_outcome().await;
+
+            assert_eq!(channel.resize_unapplied_count, 0);
+            assert_eq!(
+                notifications(&mut peers),
+                Vec::<String>::new(),
+                "the guest has not been asked yet"
+            );
+            assert!(
+                channel.outstanding_resize.is_some(),
+                "the request should still be waiting to be judged"
+            );
+            assert!(
+                channel.resize_outcome_deadline.is_some(),
+                "the deadline should have been re-armed"
+            );
+
+            // Tokens come back, the request goes out, and the guest
+            // still does nothing: now it is the guest's silence.
+            channel.agent_tokens = 10;
+            channel
+                .flush_agent_queue()
+                .await
+                .expect("the queued config goes out");
+            channel.check_resize_outcome().await;
+
+            assert_eq!(channel.resize_unapplied_count, 1);
+            let messages = notifications(&mut peers);
+            assert_eq!(messages.len(), 1, "expected one notification: {messages:?}");
+            assert!(
+                messages[0].contains("1992x1256"),
+                "the notification should name the size: {}",
+                messages[0]
+            );
+        }
+
+        // An agent that has gone cannot apply a resize, and the
+        // message queued for it was discarded with it, so the request
+        // can never be judged: drop it rather than re-arming its
+        // deadline for the rest of the session.
+        #[tokio::test]
+        async fn a_resize_is_abandoned_when_the_agent_disconnects() {
+            let (mut channel, mut peers) = resize_channel().await;
+            channel.agent_tokens = 0;
+            send_resize(&mut channel, 1992, 1256).await;
+            assert!(channel.outstanding_resize.is_some());
+
+            channel
+                .handle_message(main_server::AGENT_DISCONNECTED, &[0, 0, 0, 0])
+                .await
+                .expect("the disconnect is handled");
+
+            assert!(
+                channel.outstanding_resize.is_none(),
+                "the request should have been dropped with its agent"
+            );
+            assert!(channel.resize_outcome_deadline.is_none());
+
+            // And a deadline that fires anyway judges nothing.
+            channel.check_resize_outcome().await;
+            assert_eq!(channel.resize_unapplied_count, 0);
+            assert_eq!(notifications(&mut peers), Vec::<String>::new());
         }
 
         // A control client that polls `resize` with the size it just

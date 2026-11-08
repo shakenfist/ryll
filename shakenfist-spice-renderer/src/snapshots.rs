@@ -607,8 +607,8 @@ pub struct MainSnapshot {
     /// raised a notification naming the size. Cumulative.
     pub resize_unapplied_count: u64,
     /// The display size sent to the agent and not yet judged, with
-    /// the session-relative seconds at which it went out. `None`
-    /// between requests.
+    /// the session-relative seconds at which it was queued for the
+    /// agent. `None` between requests.
     pub outstanding_resize: Option<OutstandingResizeSnapshot>,
 }
 

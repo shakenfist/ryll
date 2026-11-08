@@ -478,6 +478,14 @@ pub struct StreamStats {
     pub frames_decode_failed: u64,
     /// Frames decoded but not painted, because the dest rect
     /// encloses no pixels.
+    ///
+    /// `#[serde(default)]` because v1.6 and earlier do not send it:
+    /// minor versions interoperate in both directions, so a client
+    /// built against v1.7's types must still be able to read an older
+    /// server's `stats` reply. Every field a future minor version adds
+    /// needs the same, for the same reason; the fields above are in
+    /// every version that has this struct at all, so they do not.
+    #[serde(default)]
     pub frames_dropped_empty_dest: u64,
     /// Session-relative seconds, on the clock both fields share.
     pub created_at_secs: f64,
@@ -646,6 +654,32 @@ mod tests {
         assert!(json.contains("\"ok\":true"));
         assert!(json.contains("\"id\":1"));
         assert!(!json.contains("\"error\""));
+    }
+
+    // A client built against v1.7's types still has to read a v1.6
+    // server's reply: minor mismatches interoperate in both
+    // directions, and only the fields a minor version added can be
+    // missing. Without `#[serde(default)]` the whole `stats` result
+    // fails to deserialise rather than one counter reading zero.
+    #[test]
+    fn a_stream_from_an_older_server_deserialises_without_the_v1_7_counter() {
+        let v1_6 = serde_json::json!({
+            "stream_id": 3,
+            "surface_id": 0,
+            "codec": "h264",
+            "codec_type": 3,
+            "width": 1024,
+            "height": 768,
+            "frames_received": 460,
+            "frames_decoded_ok": 460,
+            "frames_decode_failed": 0,
+            "created_at_secs": 12.5,
+            "destroyed_at_secs": null,
+        });
+        let stream: StreamStats =
+            serde_json::from_value(v1_6).expect("a v1.6 stream should still parse");
+        assert_eq!(stream.frames_received, 460);
+        assert_eq!(stream.frames_dropped_empty_dest, 0);
     }
 
     #[test]

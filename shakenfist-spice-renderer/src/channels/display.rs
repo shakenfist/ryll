@@ -1190,14 +1190,20 @@ impl DisplayChannel {
     /// is useful even without a bug report.
     fn retire_stream(&mut self, stream_id: u32, state: &StreamState, destroyed_at: f64) {
         let lifetime = destroyed_at - state.created_at_secs;
+        // `decoded_ok` counts painted frames, so a stream whose dest
+        // rect enclosed no pixels reads as nothing decoded while
+        // frames arrived. Say where they went, as the GUI's stream
+        // panel does.
         info!(
             "display: stream_destroy id={} (lifetime={:.2}s, received={}, \
-             decoded_ok={}, decode_failed={}, last_frame_age={})",
+             decoded_ok={}, decode_failed={}, dropped_empty_dest={}, \
+             last_frame_age={})",
             stream_id,
             lifetime,
             state.frames_received,
             state.frames_decoded_ok,
             state.frames_decode_failed,
+            state.frames_dropped_empty_dest,
             state
                 .last_frame_ts_secs
                 .map(|t| format!("{:.2}s", destroyed_at - t))

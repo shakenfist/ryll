@@ -188,6 +188,7 @@ fn main() -> Result<()> {
     let rust_log = std::env::var("RUST_LOG").ok();
     let LogDirective {
         directive,
+        from_rust_log,
         rejected: rejected_rust_log,
     } = log_directive(args.verbose, rust_log.as_deref());
     // Each layer needs its own filter (`EnvFilter` is not `Clone`),
@@ -244,6 +245,25 @@ fn main() -> Result<()> {
         } else {
             warn!("{}", message);
         }
+    }
+
+    // Say which directive is in force. `RUST_LOG` filters
+    // /tmp/ryll.log as well as stderr, so one inherited from a shell
+    // or a systemd unit thins the file that docs/troubleshooting.md
+    // and every bug report rely on -- and a log missing what the
+    // troubleshooting steps ask for reads as a ryll bug. `--verbose`
+    // is documented as capturing debug, so an environment that
+    // overrides it is a warning rather than a note.
+    if console_subscriber_active {
+        eprintln!("ryll: logging at '{}'", directive);
+    } else if from_rust_log && args.verbose {
+        warn!(
+            "logging at RUST_LOG's '{}' rather than --verbose's debug; \
+             /tmp/ryll.log is filtered to the same directive",
+            directive
+        );
+    } else {
+        info!("logging at '{}'", directive);
     }
 
     // Initialize global settings for protocol logging
@@ -574,6 +594,17 @@ fn run_web(
     _obey_guest_size: bool,
 ) -> Result<()> {
     info!("Running in web mode");
+
+    // Web mode starts the SPICE inputs channel with paste off (see the
+    // `enable_paste` argument to `run_connection` below), so the flag
+    // does nothing here. Saying so beats leaving the operator to
+    // discover it from a `paste_not_enabled` refusal.
+    if args.enable_paste_as_keystrokes {
+        warn!(
+            "--enable-paste-as-keystrokes has no effect in --web mode: \
+             paste-as-keystrokes is a GUI and headless feature"
+        );
+    }
 
     let web_host = args.web_host.clone();
     let web_port = args.web_port;
@@ -1128,6 +1159,11 @@ fn run_gui(
 struct LogDirective {
     /// The directive handed to every `EnvFilter` the session builds.
     directive: String,
+    /// Whether `directive` came from `RUST_LOG` rather than from
+    /// `--verbose`'s default. The session says which, because
+    /// `RUST_LOG` thins /tmp/ryll.log as well as stderr and an
+    /// inherited one is easy to forget.
+    from_rust_log: bool,
     /// The `RUST_LOG` value that was set but could not be parsed,
     /// with the parse error, so the session can say it is logging
     /// under something else. `None` when `RUST_LOG` was unset,
@@ -1149,15 +1185,18 @@ fn log_directive(verbose: bool, rust_log: Option<&str>) -> LogDirective {
         Some(value) => match tracing_subscriber::EnvFilter::builder().parse(value) {
             Ok(_) => LogDirective {
                 directive: value.to_string(),
+                from_rust_log: true,
                 rejected: None,
             },
             Err(e) => LogDirective {
                 directive: default_directive.to_string(),
+                from_rust_log: false,
                 rejected: Some((value.to_string(), e.to_string())),
             },
         },
         None => LogDirective {
             directive: default_directive.to_string(),
+            from_rust_log: false,
             rejected: None,
         },
     }
@@ -1176,6 +1215,9 @@ mod tests {
         let verbose = log_directive(true, None);
         assert_eq!(verbose.directive, "debug");
         assert!(verbose.rejected.is_none());
+
+        assert!(!quiet.from_rust_log);
+        assert!(!verbose.from_rust_log);
     }
 
     #[test]
@@ -1189,6 +1231,9 @@ mod tests {
                 "verbose={verbose}"
             );
             assert!(chosen.rejected.is_none(), "verbose={verbose}");
+            // What the startup line reports: a directive from the
+            // environment, which also thins /tmp/ryll.log.
+            assert!(chosen.from_rust_log, "verbose={verbose}");
         }
     }
 
@@ -1198,6 +1243,7 @@ mod tests {
             let chosen = log_directive(true, Some(value));
             assert_eq!(chosen.directive, "debug", "{value:?}");
             assert!(chosen.rejected.is_none(), "{value:?}");
+            assert!(!chosen.from_rust_log, "{value:?}");
         }
     }
 
@@ -1205,6 +1251,10 @@ mod tests {
     fn an_unparseable_rust_log_falls_back_and_is_reported() {
         let chosen = log_directive(false, Some("ryll=nonsense"));
         assert_eq!(chosen.directive, "info");
+        assert!(
+            !chosen.from_rust_log,
+            "a rejected value is not the directive in force"
+        );
         let (value, error) = chosen.rejected.expect("the bad value should be reported");
         assert_eq!(value, "ryll=nonsense");
         assert!(!error.is_empty(), "the parse error should be carried too");

@@ -403,6 +403,11 @@ Because the same directive filters the file, a restrictive `RUST_LOG`
 also thins `/tmp/ryll.log` -- worth knowing before following a
 troubleshooting step that says to run with `-v` and read that file.
 
+Every session logs the directive it is using at startup (`logging at
+'info'`), so a log that is thinner than expected says why rather than
+leaving an inherited `RUST_LOG` to be guessed at. When `RUST_LOG`
+overrides `--verbose`, that line is a warning instead of a note.
+
 Log output goes to stderr, so you can redirect stdout for data output:
 
 ```bash

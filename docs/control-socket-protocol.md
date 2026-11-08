@@ -557,7 +557,7 @@ Verb-specific error codes:
 
 | Code | When |
 |------|------|
-| `paste_not_enabled` | From v1.7. The session was started without `--enable-paste-as-keystrokes`, so nothing can be typed. Not retryable: it is a property of how the session was launched. |
+| `paste_not_enabled` | From v1.7. Paste-as-keystrokes is not enabled for this session, so nothing can be typed: either `--enable-paste-as-keystrokes` was not passed, or the session is a `--web` or `--rdp` one, which never enable it. Not retryable: it is a property of how the session was launched. |
 
 `agent_not_connected` is **not** returned by this verb, although it
 appears in the error-code list: paste translates text to scancodes and
@@ -1402,7 +1402,7 @@ added in v1.7):
 | `no_such_surface` | A `screenshot` was requested for a `surface_id` that does not exist in the current session. |
 | `unsupported_format` | A `screenshot` was requested with a `format` value other than `"png"` or `"rgba"`. |
 | `queue_full` | A queue into the session was full, so nothing was queued. Retryable after a short delay. Returned by `resize`. |
-| `paste_not_enabled` | A `paste` was requested in a session started without `--enable-paste-as-keystrokes`, so there is nothing to type with. Not retryable. Returned by `paste`. |
+| `paste_not_enabled` | A `paste` was requested in a session that does not have paste-as-keystrokes enabled — `--enable-paste-as-keystrokes` was not passed, or the mode (`--web`, `--rdp`) does not honour it — so there is nothing to type with. Not retryable. Returned by `paste`. |
 | `not_implemented` | The method is recognised but not yet implemented. Should not appear in a complete implementation; retained in the code so partial builds have a stable code to return during incremental rollout of a new verb. |
 | `internal_error` | An unexpected condition occurred server-side. The `message` field will contain details. Report these as bugs. |
 
@@ -1450,6 +1450,14 @@ Forward-compatibility obligations:
   (they should never have arrived, but defensively discarding them is
   safer than panicking). Clients must also ignore unknown fields in
   response `result` objects; future minor versions may add fields.
+- **Clients** that deserialise a `result` into typed structs must also
+  tolerate fields a server older than themselves does not send, since a
+  minor mismatch is accepted in both directions. In this repository
+  that means every field added by a minor version is
+  `#[serde(default)]` in `control/protocol.rs` (the first is v1.7's
+  `frames_dropped_empty_dest`); fields present since the struct was
+  introduced need nothing, because no server that has the struct omits
+  them.
 - **Servers** must route unknown `method` values to the `unknown_method`
   error rather than panicking. Servers must also silently ignore unknown
   event names in `subscribe`/`unsubscribe` params.
