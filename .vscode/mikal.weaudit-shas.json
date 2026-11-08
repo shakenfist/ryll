@@ -1,6 +1,14 @@
 {
   "version": 1,
   "files": {
+    ".cargo/audit.toml": {
+      "sha": "01789d7e897c026166e9fa18c0dcf9878677f22e",
+      "date": "2026-11-08"
+    },
+    ".devcontainer/Dockerfile": {
+      "sha": "6c9fd633d49a305acf0f3d108692db3484b46e2e",
+      "date": "2026-11-08"
+    },
     ".devcontainer/devcontainer.json": {
       "sha": "49f7a86770a92824fecdde678d773bb02971deb7",
       "date": "2026-09-10"
@@ -81,33 +89,113 @@
       "sha": "699123a656b8063ccbc2898ade84ad60c8050f3d",
       "date": "2026-09-23"
     },
+    ".gitleaksignore": {
+      "sha": "1f53f681ae0be57f075ddf35696097b2771a9b0e",
+      "date": "2026-11-08"
+    },
+    ".pre-commit-config.yaml": {
+      "sha": "36a994221a7b007e4b519d1d6cde0158fcf064f2",
+      "date": "2026-11-08"
+    },
+    "AGENTS.md": {
+      "sha": "dc6306c3f286ce1146e16f347684a84435fee9ab",
+      "date": "2026-11-08"
+    },
+    "ARCHITECTURE.md": {
+      "sha": "158978bc13925ed6013bbd3e83ffc792cd64a0cd",
+      "date": "2026-11-08"
+    },
+    "Cargo.toml": {
+      "sha": "5f2bbfb6c452e5099443414951ce1a9d54d83be1",
+      "date": "2026-11-08"
+    },
     "MERGE-TEMPLATE.md": {
       "sha": "da51f6b87f9a89d7ab7cdd19cac6a741bc04cd43",
       "date": "2026-10-05"
+    },
+    "Makefile": {
+      "sha": "d66d7048a9e4ea37f797ec375878baf244735a36",
+      "date": "2026-11-08"
+    },
+    "PLAN-TEMPLATE.md": {
+      "sha": "5f63d3a6e67eafc022395259b69fb2024b71bf7d",
+      "date": "2026-11-08"
     },
     "PUSH-AUDIT.md": {
       "sha": "eb4fd3752f9d19ed6e9dbebf6ada1fc85584626e",
       "date": "2026-10-16"
     },
+    "README.md": {
+      "sha": "0668ae25b892fde9a87eecbfe8a2695d012be742",
+      "date": "2026-11-08"
+    },
     "REVIEW-STATE-TEMPLATE.md": {
       "sha": "6a462431712cca819d2b86ac012a8b3d9d10ae1a",
       "date": "2026-07-29"
+    },
+    "STYLEGUIDE.md": {
+      "sha": "68ed393511c539b39cfbef283cdebdb0d29952fc",
+      "date": "2026-11-08"
     },
     "clippy.toml": {
       "sha": "154626ef4e81f6aa3e7c271ef613fe017ad658f9",
       "date": "2026-09-23"
     },
+    "deny.toml": {
+      "sha": "a9f1c5f54d59167f16f571d03518524bf45ff527",
+      "date": "2026-11-08"
+    },
     "docs/channel-diagnostics-audit.md": {
       "sha": "789383eaa2b614b16b52dda69a909dedf5559a9f",
       "date": "2026-10-22"
+    },
+    "docs/ci.md": {
+      "sha": "1a06548a21fd97965ddbae97d689cb8d4cdc8c87",
+      "date": "2026-11-08"
+    },
+    "docs/configuration.md": {
+      "sha": "139433836ef6d78b0fd54ec9b3179735780c648b",
+      "date": "2026-11-08"
+    },
+    "docs/control-socket-protocol.md": {
+      "sha": "778ed59e708e7fc3153cba7f74a47266f60e64d8",
+      "date": "2026-11-08"
+    },
+    "docs/design-decisions.md": {
+      "sha": "9b8f2f2c5d063731d26405b4981cb8907eba8a3b",
+      "date": "2026-11-08"
     },
     "docs/development-macos.md": {
       "sha": "9fef25179d5ec56bb52e4a5b5edeecadcff74097",
       "date": "2026-09-17"
     },
+    "docs/development.md": {
+      "sha": "39f902177adb41b92666c651b11dcf75bc3b5249",
+      "date": "2026-11-08"
+    },
     "docs/device-redirection.md": {
       "sha": "851b7981637d7a0d7c9175b02c891cf0e73db7ce",
       "date": "2026-10-16"
+    },
+    "docs/diagnostics.md": {
+      "sha": "80222c3e3c04805500851aee2e1d970f4f012d29",
+      "date": "2026-11-08"
+    },
+    "docs/features.md": {
+      "sha": "169359dcd7d5b54e0fd0b3dbcaff58499683e39f",
+      "date": "2026-11-08"
+    },
+    "docs/index.md": {
+      "sha": "2c97e8ec7903966e139887718c3d63c530f4521f",
+      "date": "2026-11-08"
+    },
+    "docs/installation.md": {
+      "sha": "f129e1394b6f6b1827facc7305d52115f64b7068",
+      "date": "2026-11-08"
+    },
+    "docs/kasm-workspace.md": {
+      "sha": "2f68fd05593d2bd39db194a8f1d1ec33954149a4",
+      "date": "2026-11-08"
     },
     "docs/libvirt-spice-recommendations.md": {
       "sha": "8ca2b52c719afa9c327504c4734d6a2cc755e267",
@@ -117,9 +205,49 @@
       "sha": "518de92ccf3999ad33e5104a4a519d0d1fb24b51",
       "date": "2026-08-18"
     },
+    "docs/multi-mode-parity.md": {
+      "sha": "8ba5552c2ca0c60a6639d45209048b266b1a1c21",
+      "date": "2026-11-08"
+    },
     "docs/portability.md": {
       "sha": "dc06c44e9d9a0e7fe4888d35adb50908ab37fc7d",
       "date": "2026-10-16"
+    },
+    "docs/rdp-frontend.md": {
+      "sha": "9ce33d52e0c1e9c06019c6da21035e2292ae7b66",
+      "date": "2026-11-08"
+    },
+    "docs/rdp-mode-internals.md": {
+      "sha": "2ea9a8f852ed24b03efc3eb7c7e62b08209bda2d",
+      "date": "2026-11-08"
+    },
+    "docs/releasing.md": {
+      "sha": "e98219360e9c649258bea242d8e921cd0bc7165e",
+      "date": "2026-11-08"
+    },
+    "docs/rendering-pipeline.md": {
+      "sha": "fe45cc4b8988352eacdeff26cdc654731fa9159d",
+      "date": "2026-11-08"
+    },
+    "docs/session-lifecycle.md": {
+      "sha": "017806552696300e19cdd4463191a32e36cc6248",
+      "date": "2026-11-08"
+    },
+    "docs/spice-protocol.md": {
+      "sha": "7d851ea71d3d545099beeb897d1b7fc7189fa229",
+      "date": "2026-11-08"
+    },
+    "docs/troubleshooting.md": {
+      "sha": "bb99a7efbb2b3e103c94588e8f5999453c19c92f",
+      "date": "2026-11-08"
+    },
+    "docs/web-frontend.md": {
+      "sha": "8cd4e811869c8118ab4d5fb99c088f592adf1de5",
+      "date": "2026-11-08"
+    },
+    "docs/web-mode-internals.md": {
+      "sha": "6a85aa2449fb6cf6b51ff1c367870345c8729861",
+      "date": "2026-11-08"
     },
     "examples/control-socket-demo.py": {
       "sha": "1e39ea70aaa51526508b15997706449a378ce09a",
@@ -128,6 +256,10 @@
     "examples/ryll-web.service": {
       "sha": "ffeba1d4155450125fa098094f1167ed0cdbc9d2",
       "date": "2026-09-17"
+    },
+    "renovate.json": {
+      "sha": "4b412e00c15c5ad12a68d6c19893f80505efba63",
+      "date": "2026-11-08"
     },
     "ryll/Cargo.toml": {
       "sha": "6e77411f25e9bb28b23bb146644cd9f05bd680fb",
@@ -857,6 +989,14 @@
       "sha": "ea7d6b5bc018c5be3c40f270ea6c5b222631cea7",
       "date": "2026-07-26"
     },
+    "tools/check-parity-matrix.py": {
+      "sha": "7891e8c9d403ab30df6519b57c53dc6e45269b43",
+      "date": "2026-11-08"
+    },
+    "tools/check-slim-renderer.sh": {
+      "sha": "4b08391bd3ce170b2cf19a3dd0daa3a34fd31de9",
+      "date": "2026-11-08"
+    },
     "tools/ci-prune-reviews.sh": {
       "sha": "3c00a9489c0b571bfdd0d1f1170344cfc33b44ff",
       "date": "2026-11-03"
@@ -876,6 +1016,34 @@
     "tools/homebrew-formula.rb": {
       "sha": "3d2b8e16f7c76d569274ed9f75041654847982c7",
       "date": "2026-10-16"
+    },
+    "tools/kasm/Dockerfile": {
+      "sha": "1cd5c29c397b4d01ba4b09035039b5c441734564",
+      "date": "2026-11-08"
+    },
+    "tools/kasm/custom_startup.sh": {
+      "sha": "7a92182090c34e42905d27cba201a329c6dd7905",
+      "date": "2026-11-08"
+    },
+    "tools/kasm/launch_config.json": {
+      "sha": "e8818b488d40d5ae70512bb023e81f5226c14411",
+      "date": "2026-11-08"
+    },
+    "tools/lz4-fixtures/lz4_check.py": {
+      "sha": "b978138f5c7a0919db03b1d26f43f32c1f25de07",
+      "date": "2026-11-08"
+    },
+    "tools/lz4-fixtures/make_fixtures.py": {
+      "sha": "aa441c0520ff2e95e6dbf98678cb6663deff8e9a",
+      "date": "2026-11-08"
+    },
+    "tools/lz4-fixtures/qmp_drive.py": {
+      "sha": "58effd5fdb8f6ccf24dcea620080525880db07fe",
+      "date": "2026-11-08"
+    },
+    "tools/lz4-fixtures/requirements.txt": {
+      "sha": "b5cbfb0780335b87d71d50e49e48ad85a620b1a4",
+      "date": "2026-11-08"
     },
     "tools/make-cloud-seed.sh": {
       "sha": "00f50deddb05a9189609a78a69e948aa8efb2d7f",
@@ -897,21 +1065,61 @@
       "sha": "2771fe57b2233883b2d7ae1039d90ecfa718dab5",
       "date": "2026-10-16"
     },
+    "tools/propose-release.sh": {
+      "sha": "9be794dacc8a75fcea835b3eb6f9e8b532e6f79b",
+      "date": "2026-11-08"
+    },
     "tools/proxmox-smoke.py": {
       "sha": "63a243a0d330982e367945942ef188ef58b4d4e3",
       "date": "2026-10-05"
+    },
+    "tools/publish-crates.sh": {
+      "sha": "dbaeed48732ee891733436798aa8cf6d1100cb66",
+      "date": "2026-11-08"
+    },
+    "tools/rdp-measure.sh": {
+      "sha": "697ea111dcfe2c42cdb828a39bacf4c9bf79e32f",
+      "date": "2026-11-08"
+    },
+    "tools/rdp-smoke.py": {
+      "sha": "2aa4b3ead541b7b65a5aa90822b7c7dc542a4b4a",
+      "date": "2026-11-08"
+    },
+    "tools/rdp-smoke/Dockerfile": {
+      "sha": "36f4995de7230080307abfd7e60142cb056393a4",
+      "date": "2026-11-08"
+    },
+    "tools/release-version.sh": {
+      "sha": "972d2995fc2c2f6f194b383e4a0ace205aa7d9c8",
+      "date": "2026-11-08"
+    },
+    "tools/report-fuzz-failure.sh": {
+      "sha": "3d150ad6d5fffff3521927d219e644b0d445550d",
+      "date": "2026-11-08"
     },
     "tools/report-fuzz-run.sh": {
       "sha": "3b60592ec658db548536a3c9d5989d29c457adc1",
       "date": "2026-09-23"
     },
+    "tools/review-tracking.sh": {
+      "sha": "fcadd30b9cea7aec8c747c7f43ef1864bc01bbef",
+      "date": "2026-11-08"
+    },
     "tools/run-shellcheck.sh": {
       "sha": "a070aa57d15755cd3543756bad447c58da0253d7",
       "date": "2026-07-26"
     },
+    "tools/sign-release-tag.sh": {
+      "sha": "cc23ebc95fbcdeec23224323fe9bd9c36a85e585",
+      "date": "2026-11-08"
+    },
     "tools/start-desktop-qemu.sh": {
       "sha": "6d18104306851bcd1b1165fa47fa694da06af9f2",
       "date": "2026-09-23"
+    },
+    "tools/tag-release.sh": {
+      "sha": "16a49ce3cf6bfa3420093406c981401eaab19c90",
+      "date": "2026-11-08"
     },
     "tools/test-fuzz-targets.sh": {
       "sha": "f78dea5e65a3012838a13930a5f781bfb4b8cf68",
@@ -924,6 +1132,10 @@
     "tools/test-proxmox-smoke.sh": {
       "sha": "b633d731487c6f457abb1786da2340fc2dbdc379",
       "date": "2026-10-05"
+    },
+    "tools/test-rdp-smoke.py": {
+      "sha": "6e1373befc811e7f3c4e965bcbe58d2f56ffa5ff",
+      "date": "2026-11-08"
     },
     "tools/test-report-fuzz-failure.sh": {
       "sha": "ba73b4de0f35e2c98b37fc9c2e7e7fcf23c3b60f",
@@ -940,6 +1152,10 @@
     "tools/test_click.py": {
       "sha": "d7d0c9274bc1b9bc0d90a35c574bcd6960f904f0",
       "date": "2026-07-26"
+    },
+    "tools/web-smoke.sh": {
+      "sha": "2c7ed8d71edd16d30c2311c7e275fab8f4763232",
+      "date": "2026-11-08"
     },
     "tools/web-soak.sh": {
       "sha": "f320aa85e217ad9610042bd7c2ef62a03250cc22",

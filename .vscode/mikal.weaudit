@@ -1102,6 +1102,242 @@
     {
       "path": "shakenfist-spice-webrtc",
       "author": "mikal"
+    },
+    {
+      "path": "docs/ci.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/configuration.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/control-socket-protocol.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/design-decisions.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/development.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/diagnostics.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/features.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/index.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/installation.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/kasm-workspace.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/multi-mode-parity.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/rdp-frontend.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/rdp-mode-internals.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/releasing.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/rendering-pipeline.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/session-lifecycle.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/spice-protocol.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/troubleshooting.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/web-frontend.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/web-mode-internals.md",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/kasm/custom_startup.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/kasm/Dockerfile",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/kasm/launch_config.json",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/kasm",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/check-parity-matrix.py",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/check-slim-renderer.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/propose-release.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/publish-crates.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/rdp-measure.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/rdp-smoke.py",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/release-version.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/report-fuzz-failure.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/review-tracking.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/sign-release-tag.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/tag-release.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/test-rdp-smoke.py",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/web-smoke.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "AGENTS.md",
+      "author": "mikal"
+    },
+    {
+      "path": "ARCHITECTURE.md",
+      "author": "mikal"
+    },
+    {
+      "path": "Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "deny.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "Makefile",
+      "author": "mikal"
+    },
+    {
+      "path": "PLAN-TEMPLATE.md",
+      "author": "mikal"
+    },
+    {
+      "path": "README.md",
+      "author": "mikal"
+    },
+    {
+      "path": "STYLEGUIDE.md",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/lz4-fixtures/lz4_check.py",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/lz4-fixtures/make_fixtures.py",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/lz4-fixtures/qmp_drive.py",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/lz4-fixtures/requirements.txt",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/lz4-fixtures",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/rdp-smoke/Dockerfile",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/rdp-smoke",
+      "author": "mikal"
+    },
+    {
+      "path": "renovate.json",
+      "author": "mikal"
+    },
+    {
+      "path": ".gitleaksignore",
+      "author": "mikal"
+    },
+    {
+      "path": ".devcontainer/Dockerfile",
+      "author": "mikal"
+    },
+    {
+      "path": ".devcontainer",
+      "author": "mikal"
+    },
+    {
+      "path": ".cargo/audit.toml",
+      "author": "mikal"
+    },
+    {
+      "path": ".cargo",
+      "author": "mikal"
+    },
+    {
+      "path": ".pre-commit-config.yaml",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
