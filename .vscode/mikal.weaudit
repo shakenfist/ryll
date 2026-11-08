@@ -676,10 +676,6 @@
       "author": "mikal"
     },
     {
-      "path": ".github/workflows/release.yml",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/input_egui.rs",
       "author": "mikal"
     },
@@ -760,10 +756,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-compression/src/lib.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-compression/Cargo.toml",
       "author": "mikal"
     },
@@ -805,10 +797,6 @@
     },
     {
       "path": "shakenfist-spice-compression/src/video.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-compression/src",
       "author": "mikal"
     },
     {
@@ -1104,10 +1092,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/design-decisions.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/development.md",
       "author": "mikal"
     },
@@ -1124,10 +1108,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/installation.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/kasm-workspace.md",
       "author": "mikal"
     },
@@ -1141,10 +1121,6 @@
     },
     {
       "path": "docs/rdp-mode-internals.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/releasing.md",
       "author": "mikal"
     },
     {
@@ -1241,10 +1217,6 @@
     },
     {
       "path": "AGENTS.md",
-      "author": "mikal"
-    },
-    {
-      "path": "ARCHITECTURE.md",
       "author": "mikal"
     },
     {

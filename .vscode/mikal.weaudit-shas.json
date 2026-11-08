@@ -69,10 +69,6 @@
       "sha": "a9b1485db379f8081f08a4ddd0a829014228dee2",
       "date": "2026-10-31"
     },
-    ".github/workflows/release.yml": {
-      "sha": "96df79911e5d8c7f0647056a4c8c327bdd6a2ad7",
-      "date": "2026-10-31"
-    },
     ".github/workflows/supply-chain.yml": {
       "sha": "c855b8e116194dc365244a69aff28900f33023fe",
       "date": "2026-09-26"
@@ -91,10 +87,6 @@
     },
     "AGENTS.md": {
       "sha": "dc6306c3f286ce1146e16f347684a84435fee9ab",
-      "date": "2026-11-08"
-    },
-    "ARCHITECTURE.md": {
-      "sha": "158978bc13925ed6013bbd3e83ffc792cd64a0cd",
       "date": "2026-11-08"
     },
     "Cargo.toml": {
@@ -145,10 +137,6 @@
       "sha": "778ed59e708e7fc3153cba7f74a47266f60e64d8",
       "date": "2026-11-08"
     },
-    "docs/design-decisions.md": {
-      "sha": "9b8f2f2c5d063731d26405b4981cb8907eba8a3b",
-      "date": "2026-11-08"
-    },
     "docs/development-macos.md": {
       "sha": "9fef25179d5ec56bb52e4a5b5edeecadcff74097",
       "date": "2026-09-17"
@@ -171,10 +159,6 @@
     },
     "docs/index.md": {
       "sha": "2c97e8ec7903966e139887718c3d63c530f4521f",
-      "date": "2026-11-08"
-    },
-    "docs/installation.md": {
-      "sha": "f129e1394b6f6b1827facc7305d52115f64b7068",
       "date": "2026-11-08"
     },
     "docs/kasm-workspace.md": {
@@ -203,10 +187,6 @@
     },
     "docs/rdp-mode-internals.md": {
       "sha": "2ea9a8f852ed24b03efc3eb7c7e62b08209bda2d",
-      "date": "2026-11-08"
-    },
-    "docs/releasing.md": {
-      "sha": "e98219360e9c649258bea242d8e921cd0bc7165e",
       "date": "2026-11-08"
     },
     "docs/rendering-pipeline.md": {
@@ -423,10 +403,6 @@
     },
     "shakenfist-spice-compression/src/jpeg.rs": {
       "sha": "323af8a3a8f73b7139b62f8183544b53e01aa8ed",
-      "date": "2026-11-04"
-    },
-    "shakenfist-spice-compression/src/lib.rs": {
-      "sha": "8b675cc8818b5c3017a9574d871ae7fa215a2819",
       "date": "2026-11-04"
     },
     "shakenfist-spice-compression/src/limits.rs": {
