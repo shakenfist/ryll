@@ -374,8 +374,18 @@ Ctrl+Shift+X, because ryll cannot tell them apart from those.
 ## Environment Variables
 
 `RUST_LOG` selects the logging filter, as described under
-[Logging](#logging). Every other setting is provided via
-command-line arguments or .vv files.
+[Logging](#logging).
+
+`RYLL_TOKIO_CONSOLE=1` starts the
+[tokio-console](https://github.com/tokio-rs/console) subscriber, in a
+build made with `--features tokio-console` and
+`RUSTFLAGS="--cfg tokio_unstable"` (`make build-tokio-console`); other
+builds ignore it. The console subscriber takes over as the global
+tracing subscriber, so ryll's own log lines go nowhere while it is
+active.
+
+Every other setting is provided via command-line arguments or .vv
+files.
 
 ## Logging
 
@@ -387,8 +397,16 @@ own directive syntax, so a single crate can be turned up without
 turning up the whole dependency tree:
 
 ```bash
-RUST_LOG=info,shakenfist_spice_webrtc=debug ryll --file test.vv
+RUST_LOG=shakenfist_spice_webrtc=debug ryll --file test.vv
 ```
+
+A value that names only targets, as that one does, leaves everything
+else at info: ryll reads it as `info,shakenfist_spice_webrtc=debug`.
+Taken literally, `tracing` would switch every other target off,
+ryll's own warnings included. To make the rest quieter, give a level
+of its own: `RUST_LOG=warn,shakenfist_spice_webrtc=debug`. The rest
+stays at info under `--verbose` too, since narrowing is what
+`RUST_LOG` is for.
 
 `--verbose` still decides whether `/tmp/ryll.log` is written, and
 that file is filtered by the same directive. A `RUST_LOG` that does

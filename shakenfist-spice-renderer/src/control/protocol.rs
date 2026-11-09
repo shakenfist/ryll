@@ -43,9 +43,10 @@
 //! `stats` result: frames a server sent with a dest rect enclosing no
 //! pixels, which used to be counted as painted.  It also added the
 //! `paste_not_enabled` error code, which `paste` now returns in a
-//! session started without `--enable-paste-as-keystrokes` instead of
-//! accepting a paste nothing would type.  Both additive, so a minor
-//! bump.
+//! session started without `--enable-paste-as-keystrokes`.  The field
+//! and the code are additive, so a minor bump; the `paste` answer
+//! changes on purpose, because v1.6's `ok` there was never true --
+//! nothing was typed and no event followed.
 
 use serde::{Deserialize, Serialize};
 use shakenfist_spice_protocol::display_server;

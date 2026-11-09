@@ -2060,17 +2060,19 @@ impl DisplayChannel {
 
                     match decode_result {
                         Ok(Some(_frame)) if empty_dest => {
-                            warn_once!(
-                                "display:stream_data:empty_dest",
-                                "display: stream {} dest rect ({},{})-({},{}) \
-                                 encloses no pixels; frame decoded but not \
-                                 painted",
-                                stream_id,
-                                left,
-                                top,
-                                right,
-                                bottom
-                            );
+                            // Once per stream, like the never-decodes
+                            // warning: the counter says how many, and a
+                            // second stream with the same problem still
+                            // gets its line.
+                            if stream.frames_dropped_empty_dest == 0 {
+                                warn!(
+                                    "display: stream {} dest rect ({},{})-({},{}) \
+                                     encloses no pixels; frame decoded but not \
+                                     painted (further frames are counted in \
+                                     frames_dropped_empty_dest)",
+                                    stream_id, left, top, right, bottom
+                                );
+                            }
                             stream.frames_dropped_empty_dest =
                                 stream.frames_dropped_empty_dest.saturating_add(1);
                             // The decode itself happened, so the

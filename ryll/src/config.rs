@@ -208,8 +208,12 @@ pub struct Args {
     #[arg(long)]
     pub enable_paste_as_keystrokes: bool,
 
-    /// String to type as keystrokes in headless mode (implies --enable-paste-as-keystrokes)
-    #[arg(long = "paste-text")]
+    /// String to type as keystrokes in headless mode (implies --enable-paste-as-keystrokes).
+    /// Only headless mode types it, so it is refused without --headless rather
+    /// than accepted and ignored. The conflicts are spelled out because clap
+    /// waives a `requires` when a flag that conflicts with the required one is
+    /// present, which would let `--web --paste-text` through.
+    #[arg(long = "paste-text", requires = "headless", conflicts_with_all = ["web", "rdp"])]
     pub paste_text: Option<String>,
 
     /// Inter-character delay for paste-as-keystrokes in milliseconds
@@ -1459,6 +1463,35 @@ delete-this-file=1\n";
                 "{order:?}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn paste_text_requires_headless() {
+        // The GUI, --web and --rdp would each accept the text and type
+        // none of it. The GUI is caught by `requires`; --web and --rdp
+        // need the conflict, because clap excuses a requirement that a
+        // conflicting flag rules out.
+        use clap::error::ErrorKind;
+        for (mode, kind) in [
+            (&[][..], ErrorKind::MissingRequiredArgument),
+            (&["--web"][..], ErrorKind::ArgumentConflict),
+            (&["--rdp"][..], ErrorKind::ArgumentConflict),
+        ] {
+            let mut argv = vec!["ryll", "--paste-text", "hello", "--file", "x.vv"];
+            argv.extend_from_slice(mode);
+            let err = Args::try_parse_from(&argv).expect_err("--paste-text without --headless");
+            assert_eq!(err.kind(), kind, "{mode:?}: {err}");
+        }
+        let args = Args::try_parse_from([
+            "ryll",
+            "--headless",
+            "--paste-text",
+            "hello",
+            "--file",
+            "x.vv",
+        ])
+        .expect("--paste-text with --headless");
+        assert_eq!(args.paste_text.as_deref(), Some("hello"));
     }
 
     #[test]

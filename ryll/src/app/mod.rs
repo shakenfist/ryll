@@ -40,7 +40,7 @@ use crate::settings;
 use crate::streaming_state::{self, StreamingState};
 use shakenfist_spice_protocol::link::H264Offer;
 use shakenfist_spice_protocol::{ChannelType, NotifySeverity, MOUSE_MODE_SERVER};
-use shakenfist_spice_renderer::channels::{DisplaySize, VolumeControl};
+use shakenfist_spice_renderer::channels::{DisplaySize, PasteFailureKind, VolumeControl};
 use shakenfist_spice_renderer::metrics::RuntimeMetrics;
 use shakenfist_spice_renderer::usb::{self, DeviceSource, UsbDeviceInfo};
 use shakenfist_spice_renderer::{
@@ -1892,6 +1892,24 @@ impl RyllApp {
                         NotifySeverity::Info,
                         NotificationSource::Internal,
                         format!("Pasted {} chars ({}ms)", chars, elapsed_ms),
+                    );
+                }
+
+                ChannelEvent::PasteFailed {
+                    kind: PasteFailureKind::InProgress,
+                    reason,
+                    ..
+                } => {
+                    // A second Ctrl+Alt+V while a long paste is still
+                    // typing. Nothing is wrong with either paste, so
+                    // a note rather than the blocking error window,
+                    // which would also hold off the next paste until
+                    // it was dismissed.
+                    info!("app: paste refused: {}", reason);
+                    self.push_notification(
+                        NotifySeverity::Info,
+                        NotificationSource::Internal,
+                        "Paste ignored: the previous paste is still being typed".to_string(),
                     );
                 }
 

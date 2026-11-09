@@ -901,8 +901,11 @@ which is the only evidence ryll gets.
 
 So ryll watches for that surface. If none arrives within 5 seconds of
 the request, a Warn notification says "The guest did not apply the
-requested resolution WxH -- check that spice-vdagent is running in the
-guest's desktop session", and `resize_unapplied_count` grows. The size
+requested display resolution -- check that spice-vdagent is running in
+the guest's desktop session", the log line beside it names the size,
+and `resize_unapplied_count` grows. The notification's text is the
+same for every size, so dragging a window edge on such a guest folds
+into one entry rather than one per size it passed through. The size
 the guest picks need not be the one asked for -- a driver pads the mode,
 a desktop rounds it -- so any new primary surface counts as the guest
 having acted, including one the same size as the old one. A request for
@@ -923,7 +926,11 @@ The usual causes, in the order worth checking inside the guest:
 
 - the per-user `spice-vdagent` is not running in the desktop session
   (the system `spice-vdagentd` answering the capabilities exchange at
-  connect is not enough): `pgrep -a spice-vdagent`;
+  connect is not enough): `pgrep -a spice-vdagent`. That includes a
+  guest still booting or sitting at its login screen, where the first
+  resize ryll sends on connect can arrive before any desktop session
+  has an agent; if the warning appeared only then, resize again once
+  the desktop is up before looking further;
 - the desktop does not honour agent-driven resizes, which some Wayland
   sessions do not;
 - the display driver has no such mode: `xrandr` in the guest.

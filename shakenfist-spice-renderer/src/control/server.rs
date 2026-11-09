@@ -872,6 +872,7 @@ fn translate_event(event: &ChannelEvent, state: &ClientState) -> Option<Event> {
         ChannelEvent::PasteFailed {
             reason,
             request_id: Some(request_id),
+            ..
         } => {
             state.complete_paste(request_id);
 

@@ -274,6 +274,14 @@ const STUCK_AGENT_MESSAGE: &str =
 /// accused, short enough that the user has not moved on.
 const RESIZE_OUTCOME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Stable text of the unapplied-resize notification. It names no size
+/// so that repeats fold: the notification store merges entries only
+/// when their text matches, and dragging a window edge on a guest that
+/// ignores resizes otherwise leaves one entry per size it settled on.
+/// The size goes in the log line instead.
+const RESIZE_UNAPPLIED_MESSAGE: &str = "The guest did not apply the requested display resolution \
+     -- check that spice-vdagent is running in the guest's desktop session";
+
 /// Seconds between a session-relative timestamp and now, floored at
 /// zero so a clock that has not moved cannot read as negative.
 ///
@@ -1649,22 +1657,22 @@ impl MainChannel {
         }
 
         self.resize_unapplied_count = self.resize_unapplied_count.saturating_add(1);
-        let message = format!(
-            "The guest did not apply the requested resolution {}x{} -- check that \
-             spice-vdagent is running in the guest's desktop session",
-            outstanding.width, outstanding.height
-        );
         warn!(
-            "main: {} (requested {:.1}s ago, primary surface still {:?})",
-            message,
+            "main: {} (requested {}x{} {:.1}s ago, primary surface still {:?})",
+            RESIZE_UNAPPLIED_MESSAGE,
+            outstanding.width,
+            outstanding.height,
             secs_since(
                 outstanding.sent_at_secs,
                 self.traffic.elapsed().as_secs_f64()
             ),
             now.map(|s| (s.width, s.height))
         );
-        let entry =
-            NotificationEntry::new(NotifySeverity::Warn, NotificationSource::Internal, message);
+        let entry = NotificationEntry::new(
+            NotifySeverity::Warn,
+            NotificationSource::Internal,
+            RESIZE_UNAPPLIED_MESSAGE.to_string(),
+        );
         self.events.emit(ChannelEvent::Notification(entry)).await;
     }
 
@@ -2675,9 +2683,13 @@ mod tests {
             assert_eq!(channel.resize_unapplied_count, 1);
             let messages = notifications(&mut peers);
             assert_eq!(messages.len(), 1, "expected one notification: {messages:?}");
+            // The same text for every size, so the notification store
+            // folds a run of them into one entry. The size is in the
+            // log line.
+            assert_eq!(messages[0], RESIZE_UNAPPLIED_MESSAGE);
             assert!(
-                messages[0].contains("1992x1256"),
-                "the notification should name the size: {}",
+                !messages[0].contains("1992"),
+                "a size in the text stops repeats folding: {}",
                 messages[0]
             );
             assert!(
@@ -2729,16 +2741,17 @@ mod tests {
             assert_eq!(channel.resize_unapplied_count, 0);
 
             send_resize(&mut channel, 1800, 856).await;
+            let judged = channel.outstanding_resize.map(|r| (r.width, r.height));
+            assert_eq!(
+                judged,
+                Some((1800, 856)),
+                "the second request is the one judged"
+            );
             channel.check_resize_outcome().await;
 
             assert_eq!(channel.resize_unapplied_count, 1);
             let messages = notifications(&mut peers);
-            assert_eq!(messages.len(), 1, "expected one notification: {messages:?}");
-            assert!(
-                messages[0].contains("1800x856"),
-                "the second request should be the one named: {}",
-                messages[0]
-            );
+            assert_eq!(messages, [RESIZE_UNAPPLIED_MESSAGE]);
         }
 
         // The clock measures the guest's time, not ryll's. A
@@ -2784,12 +2797,7 @@ mod tests {
 
             assert_eq!(channel.resize_unapplied_count, 1);
             let messages = notifications(&mut peers);
-            assert_eq!(messages.len(), 1, "expected one notification: {messages:?}");
-            assert!(
-                messages[0].contains("1992x1256"),
-                "the notification should name the size: {}",
-                messages[0]
-            );
+            assert_eq!(messages, [RESIZE_UNAPPLIED_MESSAGE]);
         }
 
         // An agent that has gone cannot apply a resize, and the

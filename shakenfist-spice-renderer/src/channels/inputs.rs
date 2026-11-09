@@ -22,7 +22,9 @@ use shakenfist_spice_protocol::{
     inputs_client, inputs_server, keyboard_modifiers, ChannelType, NotifySeverity,
 };
 
-use super::{ChannelEvent, DisconnectReason, EventSink, InputEvent, MAX_MESSAGE_BODY};
+use super::{
+    ChannelEvent, DisconnectReason, EventSink, InputEvent, PasteFailureKind, MAX_MESSAGE_BODY,
+};
 
 /// spice-gtk throttles motion messages to this many pending before an ACK
 const MOTION_ACK_BUNCH: u32 = 4;
@@ -868,7 +870,11 @@ impl InputsChannel {
                             .to_string();
                     warn!("inputs: {}, ignoring paste", reason);
                     self.events
-                        .emit(ChannelEvent::PasteFailed { reason, request_id })
+                        .emit(ChannelEvent::PasteFailed {
+                            reason,
+                            kind: PasteFailureKind::NotEnabled,
+                            request_id,
+                        })
                         .await;
                     return Ok(());
                 }
@@ -876,7 +882,11 @@ impl InputsChannel {
                     let reason = "a paste is already in progress".to_string();
                     warn!("inputs: {}, ignoring paste", reason);
                     self.events
-                        .emit(ChannelEvent::PasteFailed { reason, request_id })
+                        .emit(ChannelEvent::PasteFailed {
+                            reason,
+                            kind: PasteFailureKind::InProgress,
+                            request_id,
+                        })
                         .await;
                     return Ok(());
                 }
@@ -907,7 +917,11 @@ impl InputsChannel {
                         );
                         error!("inputs: {}", reason);
                         self.events
-                            .emit(ChannelEvent::PasteFailed { reason, request_id })
+                            .emit(ChannelEvent::PasteFailed {
+                                reason,
+                                kind: PasteFailureKind::Unrepresentable,
+                                request_id,
+                            })
                             .await;
                         return Ok(());
                     }
@@ -1108,7 +1122,11 @@ impl InputsChannel {
                 info!("inputs: paste cancelled by cancellation token");
                 self.paste_state = None;
                 self.events
-                    .emit(ChannelEvent::PasteFailed { reason, request_id })
+                    .emit(ChannelEvent::PasteFailed {
+                        reason,
+                        kind: PasteFailureKind::Cancelled,
+                        request_id,
+                    })
                     .await;
                 return Ok(());
             }
@@ -2623,6 +2641,7 @@ mod tests {
 
         use std::time::Duration;
 
+        use crate::channels::PasteFailureKind;
         use shakenfist_spice_protocol::messages::{
             make_message, InputsInit, KeyModifiers, MessageHeader, Ping, ReceiveBuffer, SetAck,
             WireType,
@@ -2671,16 +2690,23 @@ mod tests {
             }
         }
 
-        /// The reason from the next `PasteFailed` the channel emitted,
-        /// and the request it belongs to.
-        fn next_paste_failure(peers: &mut TestChannelPeers) -> (String, Option<i64>) {
+        /// The reason and kind of the next `PasteFailed` the channel
+        /// emitted, and the request it belongs to.
+        fn next_paste_failure(
+            peers: &mut TestChannelPeers,
+        ) -> (String, PasteFailureKind, Option<i64>) {
             while let Ok(event) = peers.events.try_recv() {
-                if let crate::channels::ChannelEvent::PasteFailed { reason, request_id } = event {
+                if let crate::channels::ChannelEvent::PasteFailed {
+                    reason,
+                    kind,
+                    request_id,
+                } = event
+                {
                     let id = match request_id {
                         Some(crate::channels::RequestId::Int(i)) => Some(i),
                         _ => None,
                     };
-                    return (reason, id);
+                    return (reason, kind, id);
                 }
             }
             panic!("the channel emitted no PasteFailed");
@@ -2697,8 +2723,9 @@ mod tests {
                 .handle_input_event(paste_request(5))
                 .await
                 .expect("a dropped paste is not an error");
-            let (reason, request_id) = next_paste_failure(&mut peers);
+            let (reason, kind, request_id) = next_paste_failure(&mut peers);
             assert_eq!(request_id, Some(5));
+            assert_eq!(kind, PasteFailureKind::NotEnabled);
             assert!(
                 reason.contains("--enable-paste-as-keystrokes"),
                 "the reason should name the flag: {reason}"
@@ -2724,8 +2751,11 @@ mod tests {
                 .handle_input_event(paste_request(6))
                 .await
                 .expect("a dropped paste is not an error");
-            let (reason, request_id) = next_paste_failure(&mut peers);
+            let (reason, kind, request_id) = next_paste_failure(&mut peers);
             assert_eq!(request_id, Some(6), "the failure named the wrong request");
+            // What lets the GUI answer a second Ctrl+Alt+V with a note
+            // rather than the blocking paste-error window.
+            assert_eq!(kind, PasteFailureKind::InProgress);
             assert!(
                 reason.contains("already in progress"),
                 "the reason should say why: {reason}"

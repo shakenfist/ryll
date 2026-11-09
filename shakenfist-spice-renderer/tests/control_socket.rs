@@ -51,7 +51,7 @@ use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-use shakenfist_spice_renderer::channels::{ChannelEvent, InputEvent};
+use shakenfist_spice_renderer::channels::{ChannelEvent, InputEvent, PasteFailureKind};
 use shakenfist_spice_renderer::control::protocol::{RequestId, StatusResult, SurfaceInfo};
 use shakenfist_spice_renderer::control::server::{Server, SessionHandles, StatusProvider};
 use shakenfist_spice_renderer::make_scancode;
@@ -785,6 +785,7 @@ async fn paste_failed_emits_event() {
         .event_tx
         .send(ChannelEvent::PasteFailed {
             reason: "cancelled".into(),
+            kind: PasteFailureKind::Cancelled,
             request_id: Some(RequestId::Int(7)),
         })
         .expect("broadcast send");

@@ -56,8 +56,11 @@ Version history:
   `stats` result, counting frames a server sent with a dest rect that
   encloses no pixels, which used to be counted as painted.  Added the
   `paste_not_enabled` error code, returned by `paste` in a session
-  started without `--enable-paste-as-keystrokes`, which used to be
-  answered `ok` and then dropped with no event at all.  Additive.
+  started without `--enable-paste-as-keystrokes`.  The field and the
+  code are additive; the `paste` answer is a deliberate behaviour
+  change: in such a session v1.6 answered `ok` and then typed nothing
+  and sent no event, so a client that took that `ok` as success was
+  already wrong, and now hears so.
 
 ---
 
@@ -317,7 +320,7 @@ Result fields:
 |-------|------|-------------|
 | `server_name` | string | Always `"ryll"` in this implementation. |
 | `protocol_version` | string | The version the server will speak. In v1.x this is `"1.7"`; older servers reported `"1.0"`, `"1.1"`, `"1.2"`, `"1.3"`, `"1.4"`, `"1.5"` or `"1.6"`. Clients should not compare for exact equality — see the compat note below. |
-| `supported_methods` | array of string | The complete set of verb names the server recognises. Clients should use this list rather than hard-coding expectations, especially when connecting to a newer server. |
+| `supported_methods` | array of string | The complete set of verb names the server recognises. Clients should use this list rather than hard-coding expectations, especially when connecting to a newer server. It is the server's verb catalogue, not a promise about this session: a listed verb can still be refused because of how the session was started -- `paste` answers `paste_not_enabled` in a session without paste-as-keystrokes. |
 | `supported_events` | array of string | The complete set of event names the server can emit. |
 
 ### Hello response — version mismatch

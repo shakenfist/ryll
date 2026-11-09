@@ -1079,7 +1079,9 @@ pub async fn run_headless(
                             chars, elapsed_ms
                         );
                     }
-                    ChannelEvent::PasteFailed { reason, request_id } => {
+                    ChannelEvent::PasteFailed {
+                        reason, request_id, ..
+                    } => {
                         if paste_failure_is_fatal(request_id.as_ref()) {
                             error!("headless: paste failed: {}", reason);
                             paste_failed = true;
