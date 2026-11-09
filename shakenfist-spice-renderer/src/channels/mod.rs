@@ -225,6 +225,23 @@ impl EventSink {
     }
 }
 
+/// Why a paste-as-keystrokes request typed nothing, or stopped short.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PasteFailureKind {
+    /// The session was started without paste-as-keystrokes.
+    NotEnabled,
+    /// Another paste was still being typed, so this one was refused
+    /// before typing anything. Nothing is wrong with the text; it can
+    /// be sent again once the first paste completes.
+    InProgress,
+    /// The text has characters with no US-QWERTY scancode.
+    Unrepresentable,
+    /// The paste was cancelled part-way, because its requester went
+    /// away.
+    Cancelled,
+}
+
 /// Why a channel's connection ended, when it ended without an error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -415,11 +432,15 @@ pub enum ChannelEvent {
         request_id: Option<RequestId>,
     },
 
-    /// Paste-as-keystrokes failed (unrepresentable characters).
+    /// Paste-as-keystrokes did not type its text, or not all of it.
     ///
-    /// `request_id` mirrors the semantics of `PasteCompleted`.
+    /// `request_id` mirrors the semantics of `PasteCompleted`. `kind`
+    /// says which way it failed, so a frontend can treat a refusal
+    /// that needs no action (one paste already typing) differently
+    /// from one that does; `reason` is the text to show.
     PasteFailed {
         reason: String,
+        kind: PasteFailureKind,
         request_id: Option<RequestId>,
     },
 

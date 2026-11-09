@@ -272,6 +272,7 @@ mod tests {
             frames_received: 0,
             frames_decoded_ok: 0,
             frames_decode_failed: 0,
+            frames_dropped_empty_dest: 0,
             last_frame_ts_secs: None,
             last_decode_ok_ts_secs: None,
             last_decode_duration_us: 0,

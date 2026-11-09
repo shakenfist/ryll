@@ -35,6 +35,15 @@ struct PendingMessage {
 #[derive(Default)]
 pub(crate) struct AgentSendQueue {
     messages: VecDeque<PendingMessage>,
+    /// Messages whose last chunk has been handed to the writer, since
+    /// the queue was made. A caller that needs to know whether a
+    /// message it queued has actually left ryll records
+    /// `delivered() + len()` just after pushing it -- its message is
+    /// the last of those still waiting -- and watches for `delivered()`
+    /// to reach that figure. `discard_unstarted` never advances it, so
+    /// a message dropped with the agent it was meant for is reported
+    /// as never delivered, which is what it is.
+    delivered: u64,
 }
 
 impl AgentSendQueue {
@@ -62,6 +71,7 @@ impl AgentSendQueue {
         front.sent = end;
         if front.sent == front.data.len() {
             self.messages.pop_front();
+            self.delivered = self.delivered.saturating_add(1);
         }
         Some(chunk)
     }
@@ -86,6 +96,11 @@ impl AgentSendQueue {
     /// Number of whole or partial messages still waiting.
     pub(crate) fn len(&self) -> usize {
         self.messages.len()
+    }
+
+    /// Messages fully handed to the writer so far; see `delivered`.
+    pub(crate) fn delivered(&self) -> u64 {
+        self.delivered
     }
 }
 
@@ -135,6 +150,53 @@ mod tests {
         let reassembled: Vec<u8> = first.into_iter().chain(rest).flatten().collect();
         assert_eq!(&reassembled[..big.len()], &big[..]);
         assert!(queue.is_empty());
+    }
+
+    // `delivered` is what tells the main channel whether a message it
+    // queued has left ryll: a resize still waiting for tokens has not
+    // been offered to the guest, so the guest cannot be blamed for not
+    // applying it. It counts whole messages, so a large message part
+    // way out does not count, and the figure a caller recorded at push
+    // time stays meaningful as other messages queue behind it.
+    #[test]
+    fn delivered_counts_only_whole_messages_as_they_go_out() {
+        let mut queue = AgentSendQueue::default();
+        assert_eq!(queue.delivered(), 0);
+
+        // A monitors config behind a two-chunk clipboard message: the
+        // target to watch for is 2.
+        assert!(queue.push(message(2 * MAX_AGENT_CHUNK, 1)));
+        assert!(queue.push(message(28, 2)));
+        let target = queue.delivered() + queue.len() as u64;
+        assert_eq!(target, 2);
+
+        assert_eq!(drain(&mut queue, 1).len(), 1);
+        assert_eq!(
+            queue.delivered(),
+            0,
+            "a message part way out has not been delivered"
+        );
+        assert_eq!(drain(&mut queue, 1).len(), 1);
+        assert_eq!(queue.delivered(), 1);
+        assert!(queue.delivered() < target, "the resize is still queued");
+
+        assert_eq!(drain(&mut queue, 1).len(), 1);
+        assert_eq!(queue.delivered(), target);
+    }
+
+    // A message dropped with the agent it was meant for was never
+    // offered to any guest, so it must not count as delivered.
+    #[test]
+    fn discarding_the_queue_delivers_nothing() {
+        let mut queue = AgentSendQueue::default();
+        assert!(queue.push(message(28, 1)));
+        let target = queue.delivered() + queue.len() as u64;
+
+        queue.discard_unstarted();
+
+        assert!(queue.is_empty());
+        assert_eq!(queue.delivered(), 0);
+        assert!(queue.delivered() < target);
     }
 
     #[test]

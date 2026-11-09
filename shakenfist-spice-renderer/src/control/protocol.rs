@@ -1,4 +1,4 @@
-//! Wire types for the Ryll control-socket protocol (version 1.6).
+//! Wire types for the Ryll control-socket protocol (version 1.7).
 //!
 //! All types derive `serde::Serialize` / `serde::Deserialize` so they
 //! can be round-tripped through NDJSON without any manual parsing.
@@ -38,6 +38,15 @@
 //! test can see that audio arrives and decodes.  It is left out when no
 //! playback channel has linked, which includes every build without the
 //! `audio` feature.  Additive, so a minor bump.
+//!
+//! v1.6 → v1.7 added `frames_dropped_empty_dest` to each stream in the
+//! `stats` result: frames a server sent with a dest rect enclosing no
+//! pixels, which used to be counted as painted.  It also added the
+//! `paste_not_enabled` error code, which `paste` now returns in a
+//! session started without `--enable-paste-as-keystrokes`.  The field
+//! and the code are additive, so a minor bump; the `paste` answer
+//! changes on purpose, because v1.6's `ok` there was never true --
+//! nothing was typed and no event followed.
 
 use serde::{Deserialize, Serialize};
 use shakenfist_spice_protocol::display_server;
@@ -46,7 +55,7 @@ pub use crate::channels::RequestId;
 use crate::snapshots::{DisplaySnapshot, PlaybackCodec, PlaybackSnapshot, StreamSnapshot};
 
 /// Protocol version this server speaks.
-pub const PROTOCOL_VERSION: &str = "1.6";
+pub const PROTOCOL_VERSION: &str = "1.7";
 
 /// All v1 verb names the server recognises. Advertised in the `hello`
 /// response so clients can adapt at runtime rather than hard-coding
@@ -208,6 +217,10 @@ pub enum ErrorCode {
     /// A queue into the session was full; retry shortly.  Added in
     /// v1.3, returned by `resize`.
     QueueFull,
+    /// The session was not started with `--enable-paste-as-keystrokes`,
+    /// so `paste` cannot type anything.  Added in v1.7, returned by
+    /// `paste`.
+    PasteNotEnabled,
     NotImplemented,
     InternalError,
 }
@@ -464,6 +477,17 @@ pub struct StreamStats {
     pub frames_received: u64,
     pub frames_decoded_ok: u64,
     pub frames_decode_failed: u64,
+    /// Frames decoded but not painted, because the dest rect
+    /// encloses no pixels.
+    ///
+    /// `#[serde(default)]` because v1.6 and earlier do not send it:
+    /// minor versions interoperate in both directions, so a client
+    /// built against v1.7's types must still be able to read an older
+    /// server's `stats` reply. Every field a future minor version adds
+    /// needs the same, for the same reason; the fields above are in
+    /// every version that has this struct at all, so they do not.
+    #[serde(default)]
+    pub frames_dropped_empty_dest: u64,
     /// Session-relative seconds, on the clock both fields share.
     pub created_at_secs: f64,
     /// `null` while the stream is open.
@@ -496,6 +520,7 @@ impl From<&StreamSnapshot> for StreamStats {
             frames_received: s.frames_received,
             frames_decoded_ok: s.frames_decoded_ok,
             frames_decode_failed: s.frames_decode_failed,
+            frames_dropped_empty_dest: s.frames_dropped_empty_dest,
             created_at_secs: s.created_at_secs,
             destroyed_at_secs: s.destroyed_at_secs,
         }
@@ -630,6 +655,32 @@ mod tests {
         assert!(json.contains("\"ok\":true"));
         assert!(json.contains("\"id\":1"));
         assert!(!json.contains("\"error\""));
+    }
+
+    // A client built against v1.7's types still has to read a v1.6
+    // server's reply: minor mismatches interoperate in both
+    // directions, and only the fields a minor version added can be
+    // missing. Without `#[serde(default)]` the whole `stats` result
+    // fails to deserialise rather than one counter reading zero.
+    #[test]
+    fn a_stream_from_an_older_server_deserialises_without_the_v1_7_counter() {
+        let v1_6 = serde_json::json!({
+            "stream_id": 3,
+            "surface_id": 0,
+            "codec": "h264",
+            "codec_type": 3,
+            "width": 1024,
+            "height": 768,
+            "frames_received": 460,
+            "frames_decoded_ok": 460,
+            "frames_decode_failed": 0,
+            "created_at_secs": 12.5,
+            "destroyed_at_secs": null,
+        });
+        let stream: StreamStats =
+            serde_json::from_value(v1_6).expect("a v1.6 stream should still parse");
+        assert_eq!(stream.frames_received, 460);
+        assert_eq!(stream.frames_dropped_empty_dest, 0);
     }
 
     #[test]

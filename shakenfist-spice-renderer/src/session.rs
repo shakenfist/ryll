@@ -43,7 +43,7 @@ use crate::channels::UsbredirChannel;
 use crate::channels::WebdavChannel;
 use crate::channels::{
     ChannelEvent, CursorChannel, DisplayChannel, EventSink, InputEvent, InputsChannel, MainChannel,
-    PlaybackChannel, UsbCommand, VolumeControl, WebdavCommand,
+    PlaybackChannel, RequestId, UsbCommand, VolumeControl, WebdavCommand,
 };
 use crate::clipboard::ClipboardBackend;
 use crate::device_config::{ShareDirConfig, VirtualDiskConfig};
@@ -262,6 +262,12 @@ pub async fn run_connection(
 
     let client = SpiceClient::new(config)?;
 
+    // Taken before `session_state` moves into the main channel: the
+    // display channel publishes the primary surface's size through
+    // this handle, and the main channel reads it to tell whether a
+    // resize it asked the guest for was applied.
+    let primary_surface_size = session_state.primary_surface_size();
+
     // Shared mm_time clock. The main channel writes to it from
     // `MAIN_INIT` and `MULTI_MEDIA_TIME`; the display channel reads
     // from it when building `STREAM_REPORT` payloads. Constructed
@@ -382,6 +388,7 @@ pub async fn run_connection(
                     channel_id,
                     stream,
                     events.clone(),
+                    primary_surface_size.clone(),
                     capture.clone(),
                     byte_counter.clone(),
                     traffic.clone(),
@@ -943,6 +950,7 @@ pub async fn run_headless(
         ));
         let handles = crate::control::SessionHandles {
             input_tx: input_tx_for_control,
+            paste_enabled: enable_paste,
             surface_mirror: surface_mirror.clone(),
             clipboard,
             resize_tx: resize_tx.clone(),
@@ -1071,9 +1079,15 @@ pub async fn run_headless(
                             chars, elapsed_ms
                         );
                     }
-                    ChannelEvent::PasteFailed { reason, .. } => {
-                        error!("headless: paste failed: {}", reason);
-                        paste_failed = true;
+                    ChannelEvent::PasteFailed {
+                        reason, request_id, ..
+                    } => {
+                        if paste_failure_is_fatal(request_id.as_ref()) {
+                            error!("headless: paste failed: {}", reason);
+                            paste_failed = true;
+                        } else {
+                            warn!("headless: control-socket paste failed: {}", reason);
+                        }
                     }
                     ChannelEvent::Error { channel, message } => {
                         error!("Error on {}: {}", channel.name(), message);
@@ -1165,6 +1179,22 @@ pub async fn run_headless(
 
     info!("Headless mode finished");
     Ok(())
+}
+
+/// Whether a `PasteFailed` event should make `run_headless` exit
+/// non-zero.
+///
+/// Only the paste the run was launched to perform does: `--paste-text`
+/// carries no `request_id`, and a session that could not type it did
+/// not do its job. A control-socket paste carries the requester's id
+/// and is answered with a `paste_failed` event naming it, and the
+/// protocol document tells clients that a refusal -- a paste arriving
+/// while another is typing, text that will not translate -- is a
+/// normal per-request outcome. Failing the whole session on one would
+/// let any client kill a long-running headless run with a second
+/// `paste`.
+fn paste_failure_is_fatal(request_id: Option<&RequestId>) -> bool {
+    request_id.is_none()
 }
 
 /// What `run_connection` does with one entry of the server's channel
@@ -1274,6 +1304,25 @@ fn connection_outcome(join: Option<ConnectionJoin>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // An external driver that pipelines two `paste` requests gets one
+    // refusal per request and carries on; before this split, that
+    // refusal failed the whole headless run, because every
+    // `PasteFailed` set the exit flag. The `--paste-text` paste, which
+    // has no requester to answer, still decides the exit status.
+    #[test]
+    fn only_the_cli_paste_decides_the_headless_exit_status() {
+        assert!(
+            paste_failure_is_fatal(None),
+            "--paste-text is what the run was launched to do"
+        );
+        for request_id in [RequestId::Int(7), RequestId::Str("a".to_string())] {
+            assert!(
+                !paste_failure_is_fatal(Some(&request_id)),
+                "a control-socket paste is answered per request: {request_id:?}"
+            );
+        }
+    }
 
     fn opened(plan: &[(ChannelType, u8, ChannelLink)]) -> Vec<(ChannelType, u8)> {
         plan.iter()

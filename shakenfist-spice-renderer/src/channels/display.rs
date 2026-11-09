@@ -11,6 +11,7 @@ use crate::display::clip::{clip_area, ClipArea, Ltrb, MAX_CLIP_RECTS};
 use crate::image_cache::BoundedImageCache;
 use crate::mm_clock::MmClock;
 use crate::opcode_counters::OpcodeCounters;
+use crate::session_state::PrimarySurfaceSize;
 use crate::snapshots::{DecodeResult, DisplaySnapshot, StreamSnapshot};
 use crate::{
     ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, TrafficSink,
@@ -61,6 +62,7 @@ struct StreamState {
     frames_received: u64,
     frames_decoded_ok: u64,
     frames_decode_failed: u64,
+    frames_dropped_empty_dest: u64,
     last_frame_ts_secs: Option<f64>,
     last_decode_ok_ts_secs: Option<f64>,
     last_decode_duration_us: u32,
@@ -517,6 +519,11 @@ fn warn_if_h264_never_decodes(stream_id: u32, stream: &mut StreamState) {
     if stream.codec_type != SPICE_VIDEO_CODEC_TYPE_H264
         || stream.warned_never_decodes
         || stream.frames_decoded_ok > 0
+        // A frame dropped for an empty dest rect decoded perfectly
+        // well; it just had nowhere to go. Telling the user to restart
+        // with --no-h264 over that would blame the decoder for the
+        // server's rectangle.
+        || stream.frames_dropped_empty_dest > 0
         || stream.frames_received < H264_NO_PICTURE_WARN_FRAMES
     {
         return;
@@ -911,6 +918,10 @@ pub struct DisplayChannel {
     channel_id: u8,
     stream: SpiceStream,
     events: EventSink,
+    /// Where the primary surface's size is published, so the main
+    /// channel can tell whether a resize it asked the guest for was
+    /// ever applied. Only channel 0's surface 0 is published.
+    primary_surface_size: PrimarySurfaceSize,
     buffer: ReceiveBuffer,
     glz_dictionary: SharedGlzDictionary,
     /// MJPEG decoder backend selected once at construction via
@@ -1045,6 +1056,7 @@ impl DisplayChannel {
         channel_id: u8,
         stream: SpiceStream,
         events: EventSink,
+        primary_surface_size: PrimarySurfaceSize,
         capture: Option<Arc<dyn CaptureSink>>,
         byte_counter: Arc<ByteCounter>,
         traffic: Arc<dyn TrafficSink>,
@@ -1060,6 +1072,7 @@ impl DisplayChannel {
             channel_id,
             stream,
             events,
+            primary_surface_size,
             buffer: ReceiveBuffer::with_capacity(1024 * 1024),
             glz_dictionary,
             jpeg_decoder: best_for_platform(),
@@ -1140,6 +1153,7 @@ impl DisplayChannel {
             frames_received: s.frames_received,
             frames_decoded_ok: s.frames_decoded_ok,
             frames_decode_failed: s.frames_decode_failed,
+            frames_dropped_empty_dest: s.frames_dropped_empty_dest,
             last_frame_ts_secs: s.last_frame_ts_secs,
             last_decode_ok_ts_secs: s.last_decode_ok_ts_secs,
             last_decode_duration_us: s.last_decode_duration_us,
@@ -1176,14 +1190,20 @@ impl DisplayChannel {
     /// is useful even without a bug report.
     fn retire_stream(&mut self, stream_id: u32, state: &StreamState, destroyed_at: f64) {
         let lifetime = destroyed_at - state.created_at_secs;
+        // `decoded_ok` counts painted frames, so a stream whose dest
+        // rect enclosed no pixels reads as nothing decoded while
+        // frames arrived. Say where they went, as the GUI's stream
+        // panel does.
         info!(
             "display: stream_destroy id={} (lifetime={:.2}s, received={}, \
-             decoded_ok={}, decode_failed={}, last_frame_age={})",
+             decoded_ok={}, decode_failed={}, dropped_empty_dest={}, \
+             last_frame_age={})",
             stream_id,
             lifetime,
             state.frames_received,
             state.frames_decoded_ok,
             state.frames_decode_failed,
+            state.frames_dropped_empty_dest,
             state
                 .last_frame_ts_secs
                 .map(|t| format!("{:.2}s", destroyed_at - t))
@@ -1434,6 +1454,14 @@ impl DisplayChannel {
                         surface.format,
                         surface.flags
                     ));
+                }
+
+                // The primary surface is the evidence that a guest
+                // applied a resize ryll asked for; see the main
+                // channel's `resize_outcome_deadline`.
+                if self.channel_id == 0 && surface.surface_id == 0 {
+                    self.primary_surface_size
+                        .publish(surface.width, surface.height);
                 }
 
                 self.events
@@ -1842,6 +1870,7 @@ impl DisplayChannel {
                             created_at_secs: now,
                             frames_received: 0,
                             frames_decoded_ok: 0,
+                            frames_dropped_empty_dest: 0,
                             frames_decode_failed: 0,
                             last_frame_ts_secs: None,
                             last_decode_ok_ts_secs: None,
@@ -1974,6 +2003,15 @@ impl DisplayChannel {
                     ));
                     let w = right.saturating_sub(left);
                     let h = bottom.saturating_sub(top);
+                    // A dest rect whose right is at or left of its
+                    // left edge (or bottom at or above its top)
+                    // leaves no pixels to paint. The frame still
+                    // goes to the decoder, because an H.264 decoder
+                    // that misses a packet loses its reference
+                    // state, but nothing is emitted: the surface
+                    // would gain a 0-wide or 0-high image, and the
+                    // frame would count as painted when it was not.
+                    let empty_dest = w == 0 || h == 0;
 
                     // Codec-agnostic decode dispatch. Pre-refactor
                     // per-codec logic (DHT extract/inject for MJPEG)
@@ -2021,6 +2059,30 @@ impl DisplayChannel {
                     }
 
                     match decode_result {
+                        Ok(Some(_frame)) if empty_dest => {
+                            // Once per stream, like the never-decodes
+                            // warning: the counter says how many, and a
+                            // second stream with the same problem still
+                            // gets its line.
+                            if stream.frames_dropped_empty_dest == 0 {
+                                warn!(
+                                    "display: stream {} dest rect ({},{})-({},{}) \
+                                     encloses no pixels; frame decoded but not \
+                                     painted (further frames are counted in \
+                                     frames_dropped_empty_dest)",
+                                    stream_id, left, top, right, bottom
+                                );
+                            }
+                            stream.frames_dropped_empty_dest =
+                                stream.frames_dropped_empty_dest.saturating_add(1);
+                            // The decode itself happened, so the
+                            // freshness fields `stats` and bug reports
+                            // read must move. Leaving them unset made a
+                            // stream whose frames all decoded look
+                            // stalled.
+                            stream.last_decode_ok_ts_secs = Some(now_secs);
+                            stream.last_decode_duration_us = decode_duration_us;
+                        }
                         Ok(Some(frame)) => {
                             debug!(
                                 "display: stream {} {} frame, cropped to {}x{} → ({},{})",
@@ -4359,11 +4421,22 @@ mod tests {
 
     /// Build a `DisplayChannel` wired to a loopback socket.
     async fn test_display_channel() -> (DisplayChannel, TestChannelPeers) {
+        let (channel, peers, _primary) = test_display_channel_full().await;
+        (channel, peers)
+    }
+
+    /// A channel, its peers, and the handle it publishes the primary
+    /// surface's size through. The `SessionState` the handle came from
+    /// is dropped at once: the handle holds the sender itself, as it
+    /// does in a session once the main channel's task has ended.
+    async fn test_display_channel_full() -> (DisplayChannel, TestChannelPeers, PrimarySurfaceSize) {
         let (stream, events, peers) = loopback().await;
+        let primary = crate::session_state::SessionState::new().primary_surface_size();
         let channel = DisplayChannel::new(
             0,
             stream,
             events,
+            primary.clone(),
             None,
             Arc::new(ByteCounter::new()),
             Arc::new(NullTraffic::new()),
@@ -4375,7 +4448,54 @@ mod tests {
             1024 * 1024,
             image_compression::AUTO_GLZ,
         );
-        (channel, peers)
+        (channel, peers, primary)
+    }
+
+    /// A `SpiceMsgSurfaceCreate` payload for `surface_id`.
+    fn surface_create_payload(surface_id: u32, width: u32, height: u32) -> Vec<u8> {
+        let mut v = Vec::new();
+        SurfaceCreate {
+            surface_id,
+            width,
+            height,
+            format: 32,
+            flags: 1,
+        }
+        .write(&mut v);
+        v
+    }
+
+    // The main channel judges a resize it asked the guest for by
+    // whether a new primary surface appears, so the display channel
+    // has to publish that surface and only that surface (#485).
+    #[tokio::test]
+    async fn a_primary_surface_create_is_published() {
+        let (mut channel, _peers, primary) = test_display_channel_full().await;
+        assert_eq!(primary.get(), None, "nothing is published before a surface");
+
+        channel
+            .handle_message(
+                display_server::SURFACE_CREATE,
+                &surface_create_payload(0, 1992, 1256),
+            )
+            .await
+            .expect("surface_create must not error");
+        let published = primary.get().expect("the primary surface is published");
+        assert_eq!((published.width, published.height), (1992, 1256));
+        assert_eq!(published.generation, 1, "the session's first surface");
+
+        channel
+            .handle_message(
+                display_server::SURFACE_CREATE,
+                &surface_create_payload(4, 640, 480),
+            )
+            .await
+            .expect("surface_create must not error");
+        assert_eq!(
+            primary.get(),
+            Some(published),
+            "an off-screen surface is not the primary one, not even a generation"
+        );
     }
 
     // spice-server sends INVAL_ALL_PALETTES on every connect (#446). With
@@ -4402,6 +4522,22 @@ mod tests {
 
     /// A minimal 64x64 `SpiceMsgDisplayStreamCreate` payload, with no clip.
     fn stream_create_payload(stream_id: u32, codec_type: u8) -> Vec<u8> {
+        stream_create_payload_with_dest(
+            stream_id,
+            codec_type,
+            Rect {
+                top: 0,
+                left: 0,
+                bottom: 64,
+                right: 64,
+            },
+        )
+    }
+
+    /// As `stream_create_payload`, with the dest rect the server asks
+    /// for. A server chooses this rect, so it is free to send one that
+    /// encloses nothing.
+    fn stream_create_payload_with_dest(stream_id: u32, codec_type: u8, dest: Rect) -> Vec<u8> {
         let mut v = Vec::new();
         StreamCreate {
             surface_id: 0,
@@ -4413,12 +4549,7 @@ mod tests {
             stream_height: 64,
             src_width: 0,
             src_height: 0,
-            dest: Rect {
-                top: 0,
-                left: 0,
-                bottom: 64,
-                right: 64,
-            },
+            dest,
             clip: Clip::none(),
         }
         .write(&mut v);
@@ -4922,6 +5053,86 @@ mod tests {
         assert!(!channel.streams[&7].warned_never_decodes);
         assert_eq!(channel.streams[&8].frames_decoded_ok, 0);
         assert!(!channel.streams[&8].warned_never_decodes);
+    }
+
+    // A dest rect with right < left (or bottom < top) encloses no
+    // pixels. Such a frame used to be emitted as a 0-wide ImageReady
+    // and counted in `frames_decoded_ok`, which reads as "painted" in
+    // `stats`, in bug reports and in the stream counters.
+    #[cfg(all(feature = "h264-decode", feature = "encoder"))]
+    #[tokio::test]
+    async fn a_frame_with_an_inverted_dest_is_dropped_not_counted_as_decoded() {
+        // Inverted horizontally, and inverted vertically: either one
+        // leaves nothing to paint, and the two are separate edges of
+        // the same guard.
+        let inverted = [
+            Rect {
+                top: 0,
+                left: 64,
+                bottom: 64,
+                right: 0,
+            },
+            Rect {
+                top: 64,
+                left: 0,
+                bottom: 0,
+                right: 64,
+            },
+        ];
+        for dest in inverted {
+            let (mut channel, mut peers) = test_display_channel().await;
+            channel
+                .handle_message(
+                    display_server::STREAM_CREATE,
+                    &stream_create_payload_with_dest(7, SPICE_VIDEO_CODEC_TYPE_H264, dest),
+                )
+                .await
+                .expect("stream_create must not error");
+            let frames = h264_frames(12);
+            send_stream_frames(&mut channel, 7, &frames).await;
+
+            let stream = &channel.streams[&7];
+            assert_eq!(
+                stream.frames_received,
+                frames.len() as u64,
+                "{dest:?}: every frame should still reach the decoder"
+            );
+            assert_eq!(
+                stream.frames_decoded_ok, 0,
+                "{dest:?}: a frame that paints nothing is not a decode"
+            );
+            assert!(
+                stream.frames_dropped_empty_dest > 0,
+                "{dest:?}: the dropped frames should be counted somewhere"
+            );
+
+            // Nothing should have been handed to the renderer: a 0-wide
+            // or 0-high ImageReady is what the surface used to be
+            // offered.
+            let mut images = 0;
+            while let Ok(event) = peers.events.try_recv() {
+                if matches!(event, ChannelEvent::ImageReady { .. }) {
+                    images += 1;
+                }
+            }
+            assert_eq!(
+                images, 0,
+                "{dest:?}: an unpaintable frame was still emitted"
+            );
+
+            // The decoder is working, so the stream must not be
+            // accused of never decoding, and must not look stalled.
+            // Both followed from the drop, not from anything the
+            // server did wrong.
+            assert!(
+                !stream.warned_never_decodes,
+                "{dest:?}: a decoder that decoded every frame was blamed"
+            );
+            assert!(
+                stream.last_decode_ok_ts_secs.is_some(),
+                "{dest:?}: a decode happened, so the stream is not stale"
+            );
+        }
     }
 
     // The control socket's `stats` reads what the channel publishes. Fill

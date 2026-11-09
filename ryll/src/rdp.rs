@@ -467,6 +467,15 @@ pub fn run_rdp(
 ) -> Result<()> {
     info!("Running in RDP mode");
 
+    // As in web mode, every SPICE attempt is started with paste off
+    // (see `SpiceAttempts::run`), so the flag does nothing here.
+    if args.enable_paste_as_keystrokes {
+        warn!(
+            "--enable-paste-as-keystrokes has no effect in --rdp mode: \
+             paste-as-keystrokes is a GUI and headless feature"
+        );
+    }
+
     let rdp_host = args.rdp_host;
     let rdp_port = args.rdp_port;
     let security = match args.rdp_security {
@@ -730,6 +739,9 @@ pub fn run_rdp(
             );
             let handles = shakenfist_spice_renderer::control::SessionHandles {
                 input_tx: input_tx_for_control,
+                // As in web mode, the SPICE-side inputs channel is
+                // started with paste disabled.
+                paste_enabled: false,
                 surface_mirror: surface_mirror.clone(),
                 clipboard,
                 resize_tx: resize_tx_for_control,

@@ -2426,6 +2426,7 @@ mod tests {
     use crate::notifications::NotificationStore;
     use serde_json::json;
     use shakenfist_spice_protocol::link::H264Offer;
+    use shakenfist_spice_renderer::snapshots::OutstandingResizeSnapshot;
 
     #[test]
     fn test_ring_buffer_push_and_evict() {
@@ -2559,6 +2560,7 @@ mod tests {
             frames_received: 240,
             frames_decoded_ok: 200,
             frames_decode_failed: 40,
+            frames_dropped_empty_dest: 0,
             last_frame_ts_secs: Some(45.5),
             last_decode_ok_ts_secs: Some(45.4),
             last_decode_duration_us: 18_321,
@@ -2609,6 +2611,7 @@ mod tests {
             frames_received: 30,
             frames_decoded_ok: 28,
             frames_decode_failed: 2,
+            frames_dropped_empty_dest: 1,
             last_frame_ts_secs: Some(6.0),
             last_decode_ok_ts_secs: Some(6.0),
             last_decode_duration_us: 17_500,
@@ -2669,6 +2672,10 @@ mod tests {
         assert_eq!(stream["frames_received"], json!(240));
         assert_eq!(stream["frames_decoded_ok"], json!(200));
         assert_eq!(stream["frames_decode_failed"], json!(40));
+        // Frames decoded but never painted. Documented alongside the
+        // two counters above, and the reason a live stream can read
+        // `frames_decoded_ok: 0` without anything being broken.
+        assert_eq!(stream["frames_dropped_empty_dest"], json!(0));
         assert_eq!(stream["last_frame_ts_secs"], json!(45.5));
         assert_eq!(stream["last_decode_ok_ts_secs"], json!(45.4));
         assert_eq!(stream["last_decode_duration_us"], json!(18_321));
@@ -2688,6 +2695,7 @@ mod tests {
         assert_eq!(destroyed.len(), 1);
         assert_eq!(destroyed[0]["stream_id"], json!(37));
         assert_eq!(destroyed[0]["destroyed_at_secs"], json!(6.25));
+        assert_eq!(destroyed[0]["frames_dropped_empty_dest"], json!(1));
 
         // STREAM_ACTIVATE_REPORT fields: verify that
         // activation state and last-sent-report mirrors are
@@ -2884,6 +2892,14 @@ mod tests {
             queued_agent_message_count: 2,
             agent_starved_since_ts_secs: Some(41.25),
             agent_stall_count: 1,
+            // Unapplied-resize detection.
+            resize_requests_sent_count: 3,
+            resize_unapplied_count: 1,
+            outstanding_resize: Some(OutstandingResizeSnapshot {
+                width: 1992,
+                height: 1256,
+                sent_at_secs: 52.5,
+            }),
             ..Default::default()
         };
         snap.messages_recv_by_opcode.insert(10, 3);
@@ -2914,6 +2930,13 @@ mod tests {
         assert_eq!(v["queued_agent_message_count"], json!(2));
         assert_eq!(v["agent_starved_since_ts_secs"], json!(41.25));
         assert_eq!(v["agent_stall_count"], json!(1));
+        // Unapplied-resize fields, as docs/troubleshooting.md names
+        // them.
+        assert_eq!(v["resize_requests_sent_count"], json!(3));
+        assert_eq!(v["resize_unapplied_count"], json!(1));
+        assert_eq!(v["outstanding_resize"]["width"], json!(1992));
+        assert_eq!(v["outstanding_resize"]["height"], json!(1256));
+        assert_eq!(v["outstanding_resize"]["sent_at_secs"], json!(52.5));
     }
 
     #[test]

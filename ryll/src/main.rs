@@ -68,7 +68,7 @@ use clap::Parser;
 #[cfg(feature = "gui")]
 use eframe::egui;
 use shakenfist_spice_protocol::link::H264Offer;
-use tracing::{info, warn, Level};
+use tracing::{info, warn};
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
 
@@ -175,20 +175,30 @@ fn main() -> Result<()> {
 
     // Set up logging.
     //
-    // This is a plain level filter, so `RUST_LOG` is ignored and
-    // `--verbose` is all-or-nothing: debug for the whole dependency
-    // tree, webrtc-rs included, which is roughly 250x the log volume
-    // and enough to move a CPU measurement. `EnvFilter` would fix it;
-    // see #313, and the workaround in docs/development.md.
-    let log_level = if args.verbose {
-        Level::DEBUG
-    } else {
-        Level::INFO
-    };
+    // `RUST_LOG` wins when it is set, so an operator can ask for one
+    // crate -- `RUST_LOG=shakenfist_spice_webrtc=debug`, which
+    // `log_directive` reads as that crate at debug and the rest at
+    // info -- instead of debug for the whole dependency tree, which
+    // is roughly 250x the log volume and enough to move a CPU
+    // measurement a soak is trying to take. With `RUST_LOG` unset,
+    // `--verbose` keeps its old meaning: debug everywhere, info
+    // otherwise.
+    //
+    // Both the stderr layer and the /tmp/ryll.log layer take the same
+    // directive. The file is where the volume goes, so narrowing only
+    // stderr would not reduce the cost of logging at all.
+    let rust_log = std::env::var("RUST_LOG").ok();
+    let LogDirective {
+        directive,
+        from_rust_log,
+        rejected: rejected_rust_log,
+    } = log_directive(args.verbose, rust_log.as_deref());
+    // Each layer needs its own filter (`EnvFilter` is not `Clone`),
+    // and `log_directive` has already parsed what it returns, so
+    // these cannot fail.
+    let make_filter = || tracing_subscriber::EnvFilter::new(directive.clone());
 
-    let level_filter = tracing_subscriber::filter::LevelFilter::from_level(log_level);
-
-    let stderr_layer = fmt::layer().with_target(false).with_filter(level_filter);
+    let stderr_layer = fmt::layer().with_target(false).with_filter(make_filter());
 
     // When verbose, also log to /tmp/ryll.log
     let _file_guard;
@@ -209,7 +219,7 @@ fn main() -> Result<()> {
             .with_target(false)
             .with_ansi(false)
             .with_writer(non_blocking)
-            .with_filter(tracing_subscriber::filter::LevelFilter::DEBUG);
+            .with_filter(make_filter());
 
         tracing_subscriber::registry()
             .with(stderr_layer)
@@ -220,6 +230,43 @@ fn main() -> Result<()> {
         _file_guard = None;
         tracing_subscriber::registry().with(stderr_layer).init();
     };
+
+    // Now that a subscriber is installed, report a `RUST_LOG` that
+    // could not be parsed. Doing it here rather than at parse time
+    // keeps the message in the log the operator is already reading.
+    if let Some((value, error)) = rejected_rust_log {
+        let message = format!(
+            "RUST_LOG={} could not be parsed ({}); logging at '{}' instead",
+            value, error, directive
+        );
+        if console_subscriber_active {
+            // console-subscriber owns the global subscriber in this
+            // mode and ryll's own logs go nowhere, so a warning here
+            // would be the silence this whole change is about.
+            eprintln!("ryll: {}", message);
+        } else {
+            warn!("{}", message);
+        }
+    }
+
+    // Say which directive is in force. `RUST_LOG` filters
+    // /tmp/ryll.log as well as stderr, so one inherited from a shell
+    // or a systemd unit thins the file that docs/troubleshooting.md
+    // and every bug report rely on -- and a log missing what the
+    // troubleshooting steps ask for reads as a ryll bug. `--verbose`
+    // is documented as capturing debug, so an environment that
+    // overrides it is a warning rather than a note.
+    if console_subscriber_active {
+        eprintln!("ryll: logging at '{}'", directive);
+    } else if from_rust_log && args.verbose {
+        warn!(
+            "logging at RUST_LOG's '{}' rather than --verbose's debug; \
+             /tmp/ryll.log is filtered to the same directive",
+            directive
+        );
+    } else {
+        info!("logging at '{}'", directive);
+    }
 
     // Initialize global settings for protocol logging
     settings::init(args.verbose, args.intimate);
@@ -550,6 +597,17 @@ fn run_web(
 ) -> Result<()> {
     info!("Running in web mode");
 
+    // Web mode starts the SPICE inputs channel with paste off (see the
+    // `enable_paste` argument to `run_connection` below), so the flag
+    // does nothing here. Saying so beats leaving the operator to
+    // discover it from a `paste_not_enabled` refusal.
+    if args.enable_paste_as_keystrokes {
+        warn!(
+            "--enable-paste-as-keystrokes has no effect in --web mode: \
+             paste-as-keystrokes is a GUI and headless feature"
+        );
+    }
+
     let web_host = args.web_host.clone();
     let web_port = args.web_port;
     let web_tls_cert = args.web_tls_cert.clone();
@@ -877,6 +935,10 @@ fn run_web(
             );
             let handles = shakenfist_spice_renderer::control::SessionHandles {
                 input_tx: input_tx_for_control,
+                // Web mode starts the inputs channel with paste
+                // disabled (see the session spawn above), so a
+                // control-socket paste cannot type here.
+                paste_enabled: false,
                 surface_mirror: surface_mirror.clone(),
                 clipboard,
                 resize_tx: resize_tx_for_control,
@@ -1032,7 +1094,8 @@ fn run_gui(
 
     let cadence = args.cadence;
     let monitors = args.monitors;
-    let enable_paste = args.enable_paste_as_keystrokes || args.paste_text.is_some();
+    // `--paste-text` requires `--headless`, so it never reaches here.
+    let enable_paste = args.enable_paste_as_keystrokes;
     let paste_char_delay_ms = args.paste_char_delay_ms;
     let bug_report_dir = args.bug_report_dir.clone();
     let debug_single_thread_runtime = args.debug_single_thread_runtime;
@@ -1095,9 +1158,211 @@ fn run_gui(
     result
 }
 
+/// The tracing directive a session logs under.
+struct LogDirective {
+    /// The directive handed to every `EnvFilter` the session builds.
+    directive: String,
+    /// Whether `directive` came from `RUST_LOG` rather than from
+    /// `--verbose`'s default. The session says which, because
+    /// `RUST_LOG` thins /tmp/ryll.log as well as stderr and an
+    /// inherited one is easy to forget.
+    from_rust_log: bool,
+    /// The `RUST_LOG` value that was set but could not be parsed,
+    /// with the parse error, so the session can say it is logging
+    /// under something else. `None` when `RUST_LOG` was unset,
+    /// empty, or usable.
+    rejected: Option<(String, String)>,
+}
+
+/// The level everything not named in a `RUST_LOG` logs at, when the
+/// value names no level of its own; see [`log_directive`].
+const RUST_LOG_BASE_LEVEL: &str = "info";
+
+/// Whether a `RUST_LOG` value sets a level for every target, rather
+/// than only for the targets (or spans) it names.
+///
+/// `EnvFilter` disables everything a directive set does not match, so
+/// `RUST_LOG=shakenfist_spice_webrtc=debug` on its own turns off every
+/// other target -- ryll's included. A bare level (`info`, `WARN`, `3`)
+/// is what sets the rest; a span directive such as `[connect]=debug`
+/// has no target but only applies inside that span, so it does not.
+fn sets_a_global_level(rust_log: &str) -> bool {
+    rust_log.split(',').any(|d| {
+        d.trim()
+            .parse::<tracing_subscriber::filter::LevelFilter>()
+            .is_ok()
+    })
+}
+
+/// Choose the tracing directive: `RUST_LOG` when it is set and
+/// parses, otherwise `--verbose`'s all-or-nothing meaning.
+///
+/// An empty or whitespace-only `RUST_LOG` is treated as unset, which
+/// is how the shell leaves it after `RUST_LOG= ryll ...`. A value
+/// that does not parse is reported rather than used: `EnvFilter`
+/// would otherwise accept the directives it understood and silently
+/// drop the rest, which reads as a logging bug rather than a typo.
+///
+/// A value that names only targets is turned up from
+/// [`RUST_LOG_BASE_LEVEL`] rather than from silence:
+/// `RUST_LOG=shakenfist_spice_webrtc=debug` means debug there and
+/// info everywhere else. Taken literally it would switch off every
+/// other target, including ryll's own warnings and the startup line
+/// that says which directive is in force -- the one line written to
+/// explain a log that is thinner than expected. The base is info
+/// even under `--verbose`, because `RUST_LOG` is there to narrow:
+/// debug everywhere is what it replaces. A value that wants the rest
+/// quieter says so with a level of its own (`warn,ryll=debug`).
+fn log_directive(verbose: bool, rust_log: Option<&str>) -> LogDirective {
+    let default_directive = if verbose { "debug" } else { "info" };
+    match rust_log.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(value) => match tracing_subscriber::EnvFilter::builder().parse(value) {
+            Ok(_) => LogDirective {
+                directive: if sets_a_global_level(value) {
+                    value.to_string()
+                } else {
+                    format!("{},{}", RUST_LOG_BASE_LEVEL, value)
+                },
+                from_rust_log: true,
+                rejected: None,
+            },
+            Err(e) => LogDirective {
+                directive: default_directive.to_string(),
+                from_rust_log: false,
+                rejected: Some((value.to_string(), e.to_string())),
+            },
+        },
+        None => LogDirective {
+            directive: default_directive.to_string(),
+            from_rust_log: false,
+            rejected: None,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rust_log_unset_keeps_verbose_all_or_nothing() {
+        let quiet = log_directive(false, None);
+        assert_eq!(quiet.directive, "info");
+        assert!(quiet.rejected.is_none());
+
+        let verbose = log_directive(true, None);
+        assert_eq!(verbose.directive, "debug");
+        assert!(verbose.rejected.is_none());
+
+        assert!(!quiet.from_rust_log);
+        assert!(!verbose.from_rust_log);
+    }
+
+    #[test]
+    fn rust_log_narrows_to_one_crate() {
+        // The case #313 was filed for: debug from one crate without
+        // debug from the whole dependency tree.
+        for verbose in [false, true] {
+            let chosen = log_directive(verbose, Some("info,shakenfist_spice_webrtc=debug"));
+            assert_eq!(
+                chosen.directive, "info,shakenfist_spice_webrtc=debug",
+                "verbose={verbose}"
+            );
+            assert!(chosen.rejected.is_none(), "verbose={verbose}");
+            // What the startup line reports: a directive from the
+            // environment, which also thins /tmp/ryll.log.
+            assert!(chosen.from_rust_log, "verbose={verbose}");
+        }
+    }
+
+    #[test]
+    fn a_target_only_rust_log_keeps_info_everywhere_else() {
+        // `EnvFilter` would switch off every target the value does not
+        // name -- ryll's own logs, and the startup line that says
+        // which directive is in force, among them.
+        for verbose in [false, true] {
+            for (value, expected) in [
+                (
+                    "shakenfist_spice_webrtc=debug",
+                    "info,shakenfist_spice_webrtc=debug",
+                ),
+                ("ryll=trace,webrtc=debug", "info,ryll=trace,webrtc=debug"),
+                ("[connect]=debug", "info,[connect]=debug"),
+            ] {
+                let chosen = log_directive(verbose, Some(value));
+                assert_eq!(chosen.directive, expected, "verbose={verbose} {value:?}");
+                assert!(chosen.from_rust_log, "verbose={verbose} {value:?}");
+                assert!(chosen.rejected.is_none(), "verbose={verbose} {value:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_rust_log_with_its_own_level_is_used_as_given() {
+        for value in ["warn", "WARN,ryll=debug", "ryll=debug,error", "off", "3"] {
+            let chosen = log_directive(true, Some(value));
+            assert_eq!(chosen.directive, value, "{value:?}");
+            assert!(chosen.from_rust_log, "{value:?}");
+        }
+    }
+
+    /// Whether an info event from ryll gets through `directive`.
+    fn ryll_info_enabled(directive: &str) -> bool {
+        let subscriber =
+            tracing_subscriber::registry().with(tracing_subscriber::EnvFilter::new(directive));
+        tracing::subscriber::with_default(
+            subscriber,
+            || tracing::enabled!(target: "ryll", tracing::Level::INFO),
+        )
+    }
+
+    #[test]
+    fn the_chosen_directive_lets_ryll_log_at_info() {
+        // The property the base level exists for, checked against the
+        // filter rather than the string: whatever targets `RUST_LOG`
+        // names, ryll's own info lines -- the startup line among them
+        // -- still get through.
+        for value in [
+            "shakenfist_spice_webrtc=debug",
+            "[connect]=debug",
+            "info,x=debug",
+        ] {
+            assert!(
+                ryll_info_enabled(&log_directive(false, Some(value)).directive),
+                "{value:?}"
+            );
+        }
+        // And the probe can tell: taken literally, a target-only value
+        // switches ryll off.
+        assert!(!ryll_info_enabled("shakenfist_spice_webrtc=debug"));
+        // A value that asks for the rest to be quieter is obeyed.
+        assert!(!ryll_info_enabled(
+            &log_directive(false, Some("warn,x=debug")).directive
+        ));
+    }
+
+    #[test]
+    fn an_empty_rust_log_is_treated_as_unset() {
+        for value in ["", "   "] {
+            let chosen = log_directive(true, Some(value));
+            assert_eq!(chosen.directive, "debug", "{value:?}");
+            assert!(chosen.rejected.is_none(), "{value:?}");
+            assert!(!chosen.from_rust_log, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn an_unparseable_rust_log_falls_back_and_is_reported() {
+        let chosen = log_directive(false, Some("ryll=nonsense"));
+        assert_eq!(chosen.directive, "info");
+        assert!(
+            !chosen.from_rust_log,
+            "a rejected value is not the directive in force"
+        );
+        let (value, error) = chosen.rejected.expect("the bad value should be reported");
+        assert_eq!(value, "ryll=nonsense");
+        assert!(!error.is_empty(), "the parse error should be carried too");
+    }
 
     /// The cancel bridge installed by `run_web` mirrors the inline
     /// pattern in `run_headless`: a 100 ms poll loop that flips a

@@ -22,7 +22,9 @@ use shakenfist_spice_protocol::{
     inputs_client, inputs_server, keyboard_modifiers, ChannelType, NotifySeverity,
 };
 
-use super::{ChannelEvent, DisconnectReason, EventSink, InputEvent, MAX_MESSAGE_BODY};
+use super::{
+    ChannelEvent, DisconnectReason, EventSink, InputEvent, PasteFailureKind, MAX_MESSAGE_BODY,
+};
 
 /// spice-gtk throttles motion messages to this many pending before an ACK
 const MOTION_ACK_BUNCH: u32 = 4;
@@ -856,12 +858,36 @@ impl InputsChannel {
                 request_id,
                 cancel,
             } => {
+                // A dropped paste still owes its requester an
+                // outcome. Without one, a control-socket client that
+                // waits for `paste_completed` or `paste_failed`, as
+                // the protocol document tells it to, waits forever,
+                // and the server's in-flight entry for the request is
+                // never cleared.
                 if !self.enable_paste {
-                    warn!("inputs: paste-as-keystrokes not enabled, ignoring");
+                    let reason =
+                        "paste-as-keystrokes is not enabled; pass --enable-paste-as-keystrokes"
+                            .to_string();
+                    warn!("inputs: {}, ignoring paste", reason);
+                    self.events
+                        .emit(ChannelEvent::PasteFailed {
+                            reason,
+                            kind: PasteFailureKind::NotEnabled,
+                            request_id,
+                        })
+                        .await;
                     return Ok(());
                 }
                 if self.paste_state.is_some() {
-                    warn!("inputs: paste already in progress, ignoring");
+                    let reason = "a paste is already in progress".to_string();
+                    warn!("inputs: {}, ignoring paste", reason);
+                    self.events
+                        .emit(ChannelEvent::PasteFailed {
+                            reason,
+                            kind: PasteFailureKind::InProgress,
+                            request_id,
+                        })
+                        .await;
                     return Ok(());
                 }
 
@@ -891,7 +917,11 @@ impl InputsChannel {
                         );
                         error!("inputs: {}", reason);
                         self.events
-                            .emit(ChannelEvent::PasteFailed { reason, request_id })
+                            .emit(ChannelEvent::PasteFailed {
+                                reason,
+                                kind: PasteFailureKind::Unrepresentable,
+                                request_id,
+                            })
                             .await;
                         return Ok(());
                     }
@@ -1092,7 +1122,11 @@ impl InputsChannel {
                 info!("inputs: paste cancelled by cancellation token");
                 self.paste_state = None;
                 self.events
-                    .emit(ChannelEvent::PasteFailed { reason, request_id })
+                    .emit(ChannelEvent::PasteFailed {
+                        reason,
+                        kind: PasteFailureKind::Cancelled,
+                        request_id,
+                    })
                     .await;
                 return Ok(());
             }
@@ -2607,6 +2641,7 @@ mod tests {
 
         use std::time::Duration;
 
+        use crate::channels::PasteFailureKind;
         use shakenfist_spice_protocol::messages::{
             make_message, InputsInit, KeyModifiers, MessageHeader, Ping, ReceiveBuffer, SetAck,
             WireType,
@@ -2621,6 +2656,14 @@ mod tests {
         use crate::{ByteCounter, LogConfig};
 
         async fn test_inputs_channel() -> (InputsChannel, TestChannelPeers) {
+            test_inputs_channel_with_paste(false).await
+        }
+
+        /// A channel whose session was (or was not) started with
+        /// `--enable-paste-as-keystrokes`.
+        async fn test_inputs_channel_with_paste(
+            enable_paste: bool,
+        ) -> (InputsChannel, TestChannelPeers) {
             let (stream, events, peers) = loopback().await;
             let (_input_tx, input_rx) = mpsc::channel(1);
             let channel = InputsChannel::new(
@@ -2631,10 +2674,92 @@ mod tests {
                 Arc::new(ByteCounter::new()),
                 Arc::new(NullTraffic::new()),
                 Arc::new(Mutex::new(InputsSnapshot::default())),
-                false,
+                enable_paste,
                 LogConfig::default(),
             );
             (channel, peers)
+        }
+
+        /// A `PasteText` for request `id`.
+        fn paste_request(id: i64) -> InputEvent {
+            InputEvent::PasteText {
+                text: "ab".to_string(),
+                char_delay_ms: 0,
+                request_id: Some(crate::channels::RequestId::Int(id)),
+                cancel: None,
+            }
+        }
+
+        /// The reason and kind of the next `PasteFailed` the channel
+        /// emitted, and the request it belongs to.
+        fn next_paste_failure(
+            peers: &mut TestChannelPeers,
+        ) -> (String, PasteFailureKind, Option<i64>) {
+            while let Ok(event) = peers.events.try_recv() {
+                if let crate::channels::ChannelEvent::PasteFailed {
+                    reason,
+                    kind,
+                    request_id,
+                } = event
+                {
+                    let id = match request_id {
+                        Some(crate::channels::RequestId::Int(i)) => Some(i),
+                        _ => None,
+                    };
+                    return (reason, kind, id);
+                }
+            }
+            panic!("the channel emitted no PasteFailed");
+        }
+
+        // A paste the channel will not type still owes its requester an
+        // outcome: a control-socket client told to wait for
+        // `paste_completed` or `paste_failed` otherwise waits forever,
+        // and the server's in-flight entry is never cleared (#589).
+        #[tokio::test]
+        async fn a_paste_dropped_because_it_is_not_enabled_is_reported() {
+            let (mut channel, mut peers) = test_inputs_channel_with_paste(false).await;
+            channel
+                .handle_input_event(paste_request(5))
+                .await
+                .expect("a dropped paste is not an error");
+            let (reason, kind, request_id) = next_paste_failure(&mut peers);
+            assert_eq!(request_id, Some(5));
+            assert_eq!(kind, PasteFailureKind::NotEnabled);
+            assert!(
+                reason.contains("--enable-paste-as-keystrokes"),
+                "the reason should name the flag: {reason}"
+            );
+            assert!(
+                channel.paste_state.is_none(),
+                "nothing should be typing after a refused paste"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_paste_dropped_because_one_is_in_flight_is_reported() {
+            let (mut channel, mut peers) = test_inputs_channel_with_paste(true).await;
+            channel
+                .handle_input_event(paste_request(5))
+                .await
+                .expect("the first paste starts");
+            assert!(
+                channel.paste_state.is_some(),
+                "the first paste should be typing"
+            );
+            channel
+                .handle_input_event(paste_request(6))
+                .await
+                .expect("a dropped paste is not an error");
+            let (reason, kind, request_id) = next_paste_failure(&mut peers);
+            assert_eq!(request_id, Some(6), "the failure named the wrong request");
+            // What lets the GUI answer a second Ctrl+Alt+V with a note
+            // rather than the blocking paste-error window.
+            assert_eq!(kind, PasteFailureKind::InProgress);
+            assert!(
+                reason.contains("already in progress"),
+                "the reason should say why: {reason}"
+            );
         }
 
         #[tokio::test]

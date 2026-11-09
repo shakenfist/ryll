@@ -40,7 +40,7 @@ use crate::settings;
 use crate::streaming_state::{self, StreamingState};
 use shakenfist_spice_protocol::link::H264Offer;
 use shakenfist_spice_protocol::{ChannelType, NotifySeverity, MOUSE_MODE_SERVER};
-use shakenfist_spice_renderer::channels::{DisplaySize, VolumeControl};
+use shakenfist_spice_renderer::channels::{DisplaySize, PasteFailureKind, VolumeControl};
 use shakenfist_spice_renderer::metrics::RuntimeMetrics;
 use shakenfist_spice_renderer::usb::{self, DeviceSource, UsbDeviceInfo};
 use shakenfist_spice_renderer::{
@@ -1895,6 +1895,24 @@ impl RyllApp {
                     );
                 }
 
+                ChannelEvent::PasteFailed {
+                    kind: PasteFailureKind::InProgress,
+                    reason,
+                    ..
+                } => {
+                    // A second Ctrl+Alt+V while a long paste is still
+                    // typing. Nothing is wrong with either paste, so
+                    // a note rather than the blocking error window,
+                    // which would also hold off the next paste until
+                    // it was dismissed.
+                    info!("app: paste refused: {}", reason);
+                    self.push_notification(
+                        NotifySeverity::Info,
+                        NotificationSource::Internal,
+                        "Paste ignored: the previous paste is still being typed".to_string(),
+                    );
+                }
+
                 ChannelEvent::PasteFailed { reason, .. } => {
                     error!("app: paste failed: {}", reason);
                     self.paste_error_message = Some(reason);
@@ -3713,12 +3731,22 @@ impl eframe::App for RyllApp {
                                         other => format!("codec{}", other),
                                     };
                                     let lifetime = (now_secs - s.created_at_secs).max(0.0);
+                                    // `frames` counts painted frames, so a
+                                    // stream whose dest rect encloses no
+                                    // pixels reads as zero while frames
+                                    // arrive. Say where they went.
+                                    let dropped = if s.frames_dropped_empty_dest > 0 {
+                                        format!(" dropped={}", s.frames_dropped_empty_dest)
+                                    } else {
+                                        String::new()
+                                    };
                                     ui.label(format!(
-                                        "codec={} {}x{} frames={} lifetime={:.0}s",
+                                        "codec={} {}x{} frames={}{} lifetime={:.0}s",
                                         codec,
                                         s.stream_width,
                                         s.stream_height,
                                         s.frames_decoded_ok,
+                                        dropped,
                                         lifetime,
                                     ));
                                 }

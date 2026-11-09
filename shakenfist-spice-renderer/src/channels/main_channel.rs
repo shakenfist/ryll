@@ -8,8 +8,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::mm_clock::MmClock;
 use crate::opcode_counters::OpcodeCounters;
-use crate::session_state::SessionState;
-use crate::snapshots::MainSnapshot;
+use crate::session_state::{PrimarySurface, SessionState};
+use crate::snapshots::{MainSnapshot, OutstandingResizeSnapshot};
 use crate::{
     ByteCounter, CaptureSink, ClipboardBackend, LogConfig, NotificationEntry, NotificationSource,
     TrafficSink,
@@ -263,6 +263,65 @@ const STUCK_AGENT_NOTIFY_INTERVAL: std::time::Duration = std::time::Duration::fr
 const STUCK_AGENT_MESSAGE: &str =
     "Guest agent is not accepting messages (clipboard and display resize are on hold)";
 
+/// How long the guest has to apply a resize before ryll says it did
+/// not.
+///
+/// The evidence is a fresh primary `SURFACE_CREATE`, which the display
+/// channel publishes through `SessionState`. A guest that honours the
+/// request redraws in well under a second; one that cannot (no session
+/// vdagent, a desktop that ignores agent-driven resizes, a driver with
+/// no such mode) never does. Long enough that a loaded guest is not
+/// accused, short enough that the user has not moved on.
+const RESIZE_OUTCOME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Stable text of the unapplied-resize notification. It names no size
+/// so that repeats fold: the notification store merges entries only
+/// when their text matches, and dragging a window edge on a guest that
+/// ignores resizes otherwise leaves one entry per size it settled on.
+/// The size goes in the log line instead.
+const RESIZE_UNAPPLIED_MESSAGE: &str = "The guest did not apply the requested display resolution \
+     -- check that spice-vdagent is running in the guest's desktop session";
+
+/// Seconds between a session-relative timestamp and now, floored at
+/// zero so a clock that has not moved cannot read as negative.
+///
+/// Worth a function because the stored value is a timestamp, not an
+/// age: logging it directly claimed a resize was requested as long ago
+/// as the session had been up.
+fn secs_since(then_secs: f64, now_secs: f64) -> f64 {
+    (now_secs - then_secs).max(0.0)
+}
+
+/// A resize sent to the guest agent, waiting to be judged.
+#[derive(Debug, Clone, Copy)]
+struct OutstandingResize {
+    width: u32,
+    height: u32,
+    /// The primary surface when the request went out. A guest that
+    /// applies the request creates a new primary surface, so the same
+    /// surface at the deadline means nothing happened.
+    ///
+    /// Judged by the surface's generation rather than its size,
+    /// because a guest legitimately lands on the size it was already
+    /// at -- its driver pads the mode, its desktop rounds it -- and
+    /// that is still the guest acting. Comparing sizes accused such a
+    /// guest of ignoring the request.
+    surface_before: Option<PrimarySurface>,
+    /// Session-relative seconds at which it was queued.
+    sent_at_secs: f64,
+    /// The `AgentSendQueue::delivered` figure at which this request
+    /// has actually left ryll.
+    ///
+    /// `send_agent_data_message` reports success once the message is
+    /// queued and as much of it as the server's tokens allow has gone
+    /// out, so a token-starved agent leaves the request sitting in
+    /// ryll's own queue. Judging it then would tell the operator to
+    /// check spice-vdagent about a message the guest has never been
+    /// offered -- and ryll already has a notification for that case
+    /// (`STUCK_AGENT_MESSAGE`).
+    deliver_target: u64,
+}
+
 /// Ceiling for `outstanding_agent_request_count`.
 ///
 /// On QXL guests spice-server hands MONITORS_CONFIG to the display
@@ -331,6 +390,16 @@ pub struct MainChannel {
     /// many sizes reaches the agent as the one it settled on.
     resize_debounce: Option<tokio::time::Instant>,
     last_sent_monitors_config: Option<(u32, u32)>,
+    /// The resize sent to the agent and not yet accounted for, and the
+    /// primary surface's size when it went out. See
+    /// `check_resize_outcome`.
+    outstanding_resize: Option<OutstandingResize>,
+    /// When to judge `outstanding_resize`, while one is outstanding.
+    resize_outcome_deadline: Option<tokio::time::Instant>,
+    /// Resizes sent to the agent, and the ones the guest never
+    /// applied. Mirrored into `MainSnapshot`.
+    resize_requests_sent_count: u64,
+    resize_unapplied_count: u64,
     last_clipboard_hash: Option<u64>,
     /// The clipboard backend's generation at the last poll that read
     /// it, for a backend that keeps one; a poll that finds it unchanged
@@ -462,6 +531,10 @@ impl MainChannel {
             pending_monitors_config: None,
             resize_debounce: None,
             last_sent_monitors_config: None,
+            outstanding_resize: None,
+            resize_outcome_deadline: None,
+            resize_requests_sent_count: 0,
+            resize_unapplied_count: 0,
             guest_caps_received: false,
             guest_clipboard_selection: None,
             channels_requested: false,
@@ -632,6 +705,14 @@ impl MainChannel {
                 }
             };
 
+            let resize_outcome_deadline = self.resize_outcome_deadline;
+            let resize_outcome_sleep = async {
+                match resize_outcome_deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            };
+
             tokio::select! {
                 n = async {
                     match stream {
@@ -690,6 +771,11 @@ impl MainChannel {
                         self.events.emit(ChannelEvent::MonitorsConfig { width, height }).await;
                         self.maybe_send_agent_monitors_config().await?;
                     }
+                }
+                _ = resize_outcome_sleep => {
+                    last_arm = "resize_outcome_sleep";
+                    self.check_resize_outcome().await;
+                    last_arm = "resize_outcome_sleep_done";
                 }
                 _ = async {
                     match &mut clipboard_interval {
@@ -1166,6 +1252,19 @@ impl MainChannel {
                 self.outstanding_agent_request_count = 0;
                 // Queued messages were meant for the agent that just left.
                 self.agent_queue.discard_unstarted();
+                // Including, possibly, a resize: an agent that has gone
+                // cannot apply one, and a discarded message is never
+                // delivered, so leaving the request outstanding would
+                // keep re-arming its deadline for the rest of the
+                // session.
+                if let Some(outstanding) = self.outstanding_resize.take() {
+                    debug!(
+                        "main: dropping the unjudged resize to {}x{}: \
+                         the agent it was sent to has gone",
+                        outstanding.width, outstanding.height
+                    );
+                    self.resize_outcome_deadline = None;
+                }
                 // Not connected, so this ends any starvation episode.
                 self.note_agent_starvation();
             }
@@ -1261,6 +1360,13 @@ impl MainChannel {
         snap.queued_agent_message_count = self.agent_queue.len() as u32;
         snap.agent_starved_since_ts_secs = self.agent_starved_since_ts_secs;
         snap.agent_stall_count = self.agent_stall_count;
+        snap.resize_requests_sent_count = self.resize_requests_sent_count;
+        snap.resize_unapplied_count = self.resize_unapplied_count;
+        snap.outstanding_resize = self.outstanding_resize.map(|r| OutstandingResizeSnapshot {
+            width: r.width,
+            height: r.height,
+            sent_at_secs: r.sent_at_secs,
+        });
     }
 
     async fn request_channels_list(&mut self) -> Result<()> {
@@ -1463,11 +1569,111 @@ impl MainChannel {
         if self.send_agent_monitors_config(width, height).await? {
             self.last_sent_monitors_config = Some((width, height));
             self.pending_monitors_config = None;
+            let surface_before = self.state.primary_surface_size().get();
+            self.resize_requests_sent_count = self.resize_requests_sent_count.saturating_add(1);
+            if surface_before.is_some_and(|s| (s.width, s.height) == (width, height)) {
+                // The guest is already at that size, so there is
+                // nothing for it to apply and no new surface to wait
+                // for. Judging this would accuse every control client
+                // that polls `resize` with the size it just read.
+                debug!(
+                    "main: resize to {}x{} is the size the guest is \
+                     already at; nothing to judge",
+                    width, height
+                );
+                self.outstanding_resize = None;
+                self.resize_outcome_deadline = None;
+            } else {
+                // Start (or restart) the clock on the guest applying
+                // it. A newer request supersedes an older one: the
+                // user has moved on, and only the latest size is
+                // still wanted.
+                self.outstanding_resize = Some(OutstandingResize {
+                    width,
+                    height,
+                    surface_before,
+                    sent_at_secs: self.traffic.elapsed().as_secs_f64(),
+                    // This message is the last of those still waiting,
+                    // so it is out once the queue has delivered that
+                    // many more.
+                    deliver_target: self.agent_queue.delivered() + self.agent_queue.len() as u64,
+                });
+                self.resize_outcome_deadline =
+                    Some(tokio::time::Instant::now() + RESIZE_OUTCOME_TIMEOUT);
+            }
         } else {
             debug!("main: monitors config: agent send queue full");
         }
 
         Ok(())
+    }
+
+    /// Judge the outstanding resize now its deadline has passed.
+    ///
+    /// ryll does its half of a resize and then has no way to know the
+    /// guest ignored it: the request is fire-and-forget, the agent
+    /// sends no reply on a QXL guest, and from the user's side an
+    /// unapplied resize is indistinguishable from a ryll bug (#485).
+    /// So say so, once per request, naming the size and the usual
+    /// cause.
+    async fn check_resize_outcome(&mut self) {
+        self.resize_outcome_deadline = None;
+        let Some(outstanding) = self.outstanding_resize.take() else {
+            return;
+        };
+
+        // Only the guest's own time counts. While the request is still
+        // in ryll's agent queue, waiting for tokens the agent is not
+        // returning, the guest has not been asked yet: give it another
+        // interval rather than blaming spice-vdagent for a message
+        // that never left. The starvation itself is reported
+        // separately (`STUCK_AGENT_MESSAGE`), and a request discarded
+        // with its agent is dropped at AGENT_DISCONNECTED rather than
+        // waiting here forever.
+        if self.agent_queue.delivered() < outstanding.deliver_target {
+            debug!(
+                "main: resize to {}x{} is still queued for the guest agent \
+                 ({} messages waiting); not judging it yet",
+                outstanding.width,
+                outstanding.height,
+                self.agent_queue.len()
+            );
+            self.outstanding_resize = Some(outstanding);
+            self.resize_outcome_deadline =
+                Some(tokio::time::Instant::now() + RESIZE_OUTCOME_TIMEOUT);
+            return;
+        }
+
+        let now = self.state.primary_surface_size().get();
+        let generation_before = outstanding.surface_before.map(|s| s.generation);
+        if now.map(|s| s.generation) != generation_before {
+            debug!(
+                "main: resize to {}x{} applied: primary surface is now {:?}",
+                outstanding.width,
+                outstanding.height,
+                now.map(|s| (s.width, s.height))
+            );
+            return;
+        }
+
+        self.resize_unapplied_count = self.resize_unapplied_count.saturating_add(1);
+        warn!(
+            "main: {} (requested {}x{} {:.1}s ago, primary surface still {:?})",
+            RESIZE_UNAPPLIED_MESSAGE,
+            outstanding.width,
+            outstanding.height,
+            secs_since(
+                outstanding.sent_at_secs,
+                self.traffic.elapsed().as_secs_f64()
+            ),
+            now.map(|s| (s.width, s.height))
+        );
+        let entry = NotificationEntry::new(
+            NotifySeverity::Warn,
+            NotificationSource::Internal,
+            RESIZE_UNAPPLIED_MESSAGE.to_string(),
+        );
+        self.events.emit(ChannelEvent::Notification(entry)).await;
     }
 
     async fn send_agent_monitors_config(&mut self, width: u32, height: u32) -> Result<bool> {
@@ -2415,6 +2621,280 @@ mod tests {
                     2, 0, 0, 0, // size
                     2, 0, // mode: SPICE_MOUSE_MODE_CLIENT
                 ]
+            );
+        }
+
+        /// A channel whose agent is connected with tokens to spare, so
+        /// a monitors config it is given goes out.
+        async fn resize_channel() -> (MainChannel, TestChannelPeers) {
+            let (mut channel, peers) = test_main_channel().await;
+            channel.agent_connected = true;
+            channel.agent_caps_announced = true;
+            channel.agent_tokens = 10;
+            (channel, peers)
+        }
+
+        /// Send `width` x `height` to the agent now, skipping the
+        /// debounce the run loop would wait out.
+        async fn send_resize(channel: &mut MainChannel, width: u32, height: u32) {
+            channel.note_display_size(DisplaySize::Requested(width, height));
+            channel.resize_debounce = None;
+            channel
+                .maybe_send_agent_monitors_config()
+                .await
+                .expect("the monitors config goes out");
+        }
+
+        /// The messages of every `Notification` the channel emitted.
+        fn notifications(peers: &mut TestChannelPeers) -> Vec<String> {
+            let mut out = Vec::new();
+            while let Ok(event) = peers.events.try_recv() {
+                if let ChannelEvent::Notification(entry) = event {
+                    out.push(entry.message);
+                }
+            }
+            out
+        }
+
+        // ryll does its half of a resize and cannot tell that the guest
+        // ignored it: the request is fire-and-forget and a QXL guest's
+        // agent never replies. From the user's side that is
+        // indistinguishable from a ryll bug, so say so (#485).
+        #[tokio::test]
+        async fn a_resize_the_guest_never_applies_is_reported() {
+            let (mut channel, mut peers) = resize_channel().await;
+            send_resize(&mut channel, 1992, 1256).await;
+            assert_eq!(channel.resize_requests_sent_count, 1);
+
+            // A bug report taken while the request is outstanding says
+            // what was asked for.
+            channel.update_snapshot();
+            let outstanding = channel
+                .snapshot
+                .lock()
+                .expect("snapshot")
+                .outstanding_resize
+                .expect("the request should be in the snapshot");
+            assert_eq!((outstanding.width, outstanding.height), (1992, 1256));
+
+            // The guest does nothing: no new primary surface arrives.
+            channel.check_resize_outcome().await;
+
+            assert_eq!(channel.resize_unapplied_count, 1);
+            let messages = notifications(&mut peers);
+            assert_eq!(messages.len(), 1, "expected one notification: {messages:?}");
+            // The same text for every size, so the notification store
+            // folds a run of them into one entry. The size is in the
+            // log line.
+            assert_eq!(messages[0], RESIZE_UNAPPLIED_MESSAGE);
+            assert!(
+                !messages[0].contains("1992"),
+                "a size in the text stops repeats folding: {}",
+                messages[0]
+            );
+            assert!(
+                messages[0].contains("spice-vdagent"),
+                "the notification should name the usual cause: {}",
+                messages[0]
+            );
+
+            channel.update_snapshot();
+            assert!(
+                channel
+                    .snapshot
+                    .lock()
+                    .expect("snapshot")
+                    .outstanding_resize
+                    .is_none(),
+                "the request should be judged and cleared"
+            );
+        }
+
+        // A guest that acts on the request creates a new primary
+        // surface. Its size need not be the one asked for -- a driver
+        // pads, a desktop rounds -- so any change counts.
+        #[tokio::test]
+        async fn a_resize_the_guest_applies_is_not_reported() {
+            let (mut channel, mut peers) = resize_channel().await;
+            send_resize(&mut channel, 1992, 1256).await;
+            channel.state.primary_surface_size().publish(1992, 1272);
+
+            channel.check_resize_outcome().await;
+
+            assert_eq!(channel.resize_unapplied_count, 0);
+            assert_eq!(
+                notifications(&mut peers),
+                Vec::<String>::new(),
+                "a guest that resized should not be complained about"
+            );
+        }
+
+        // Each request is judged against the surface as it was when
+        // that request went out, so a resize into a size the guest
+        // already had before an earlier one is still noticed.
+        #[tokio::test]
+        async fn a_later_resize_is_judged_against_its_own_starting_point() {
+            let (mut channel, mut peers) = resize_channel().await;
+            send_resize(&mut channel, 1992, 1256).await;
+            channel.state.primary_surface_size().publish(1992, 1256);
+            channel.check_resize_outcome().await;
+            assert_eq!(channel.resize_unapplied_count, 0);
+
+            send_resize(&mut channel, 1800, 856).await;
+            let judged = channel.outstanding_resize.map(|r| (r.width, r.height));
+            assert_eq!(
+                judged,
+                Some((1800, 856)),
+                "the second request is the one judged"
+            );
+            channel.check_resize_outcome().await;
+
+            assert_eq!(channel.resize_unapplied_count, 1);
+            let messages = notifications(&mut peers);
+            assert_eq!(messages, [RESIZE_UNAPPLIED_MESSAGE]);
+        }
+
+        // The clock measures the guest's time, not ryll's. A
+        // token-starved agent leaves the request in ryll's own queue,
+        // where the guest has never been offered it, so the deadline
+        // waits instead of telling the operator to check
+        // spice-vdagent.
+        #[tokio::test]
+        async fn a_resize_still_queued_in_ryll_is_not_blamed_on_the_guest() {
+            let (mut channel, mut peers) = resize_channel().await;
+            // No tokens: the monitors config is queued and nothing goes
+            // out, which is what `send_agent_monitors_config` reports
+            // success for.
+            channel.agent_tokens = 0;
+            send_resize(&mut channel, 1992, 1256).await;
+            assert_eq!(channel.agent_queue.len(), 1);
+
+            channel.check_resize_outcome().await;
+
+            assert_eq!(channel.resize_unapplied_count, 0);
+            assert_eq!(
+                notifications(&mut peers),
+                Vec::<String>::new(),
+                "the guest has not been asked yet"
+            );
+            assert!(
+                channel.outstanding_resize.is_some(),
+                "the request should still be waiting to be judged"
+            );
+            assert!(
+                channel.resize_outcome_deadline.is_some(),
+                "the deadline should have been re-armed"
+            );
+
+            // Tokens come back, the request goes out, and the guest
+            // still does nothing: now it is the guest's silence.
+            channel.agent_tokens = 10;
+            channel
+                .flush_agent_queue()
+                .await
+                .expect("the queued config goes out");
+            channel.check_resize_outcome().await;
+
+            assert_eq!(channel.resize_unapplied_count, 1);
+            let messages = notifications(&mut peers);
+            assert_eq!(messages, [RESIZE_UNAPPLIED_MESSAGE]);
+        }
+
+        // An agent that has gone cannot apply a resize, and the
+        // message queued for it was discarded with it, so the request
+        // can never be judged: drop it rather than re-arming its
+        // deadline for the rest of the session.
+        #[tokio::test]
+        async fn a_resize_is_abandoned_when_the_agent_disconnects() {
+            let (mut channel, mut peers) = resize_channel().await;
+            channel.agent_tokens = 0;
+            send_resize(&mut channel, 1992, 1256).await;
+            assert!(channel.outstanding_resize.is_some());
+
+            channel
+                .handle_message(main_server::AGENT_DISCONNECTED, &[0, 0, 0, 0])
+                .await
+                .expect("the disconnect is handled");
+
+            assert!(
+                channel.outstanding_resize.is_none(),
+                "the request should have been dropped with its agent"
+            );
+            assert!(channel.resize_outcome_deadline.is_none());
+
+            // And a deadline that fires anyway judges nothing.
+            channel.check_resize_outcome().await;
+            assert_eq!(channel.resize_unapplied_count, 0);
+            assert_eq!(notifications(&mut peers), Vec::<String>::new());
+        }
+
+        // A control client that polls `resize` with the size it just
+        // read from `status` asks for a size the guest is already at.
+        // There is nothing for the guest to apply and no new surface
+        // to wait for, so judging it would accuse a guest that did
+        // nothing wrong.
+        #[tokio::test]
+        async fn a_resize_to_the_size_the_guest_already_has_is_not_judged() {
+            let (mut channel, mut peers) = resize_channel().await;
+            channel.state.primary_surface_size().publish(1024, 768);
+
+            send_resize(&mut channel, 1024, 768).await;
+
+            assert_eq!(
+                channel.resize_requests_sent_count, 1,
+                "the request still went to the guest"
+            );
+            assert!(
+                channel.outstanding_resize.is_none(),
+                "there is nothing to judge"
+            );
+            assert!(channel.resize_outcome_deadline.is_none(), "so no deadline");
+
+            // And if the deadline somehow fires anyway, nothing is
+            // reported.
+            channel.check_resize_outcome().await;
+            assert_eq!(channel.resize_unapplied_count, 0);
+            assert_eq!(
+                notifications(&mut peers),
+                Vec::<String>::new(),
+                "a guest already at the requested size is not at fault"
+            );
+        }
+
+        // The padding case the doc comment promises: the guest acts,
+        // creating a new primary surface, but its driver lands back on
+        // the size it was already at. Judging by size called that a
+        // guest which had ignored the request.
+        #[tokio::test]
+        async fn a_guest_that_remakes_the_surface_at_the_same_size_is_not_accused() {
+            let (mut channel, mut peers) = resize_channel().await;
+            channel.state.primary_surface_size().publish(1024, 768);
+            send_resize(&mut channel, 1280, 1024).await;
+
+            // A new surface, same dimensions as the old one.
+            channel.state.primary_surface_size().publish(1024, 768);
+            channel.check_resize_outcome().await;
+
+            assert_eq!(channel.resize_unapplied_count, 0);
+            assert_eq!(
+                notifications(&mut peers),
+                Vec::<String>::new(),
+                "a new surface is the guest acting, whatever its size"
+            );
+        }
+
+        // The warning says how long ago the request went out. The
+        // field it is computed from is a session-relative timestamp,
+        // so logging it directly claimed an age as large as the
+        // session's own uptime.
+        #[test]
+        fn the_age_of_a_request_is_measured_from_when_it_was_sent() {
+            assert_eq!(secs_since(200.0, 205.0), 5.0);
+            assert_eq!(secs_since(0.5, 0.5), 0.0);
+            assert_eq!(
+                secs_since(205.0, 200.0),
+                0.0,
+                "a clock that went backwards reads as no time at all"
             );
         }
 

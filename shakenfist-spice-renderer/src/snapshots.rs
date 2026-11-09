@@ -50,6 +50,11 @@ pub struct StreamSnapshot {
     /// error or unsupported pixel format) or the codec is not
     /// supported by the renderer (anything other than MJPEG today).
     pub frames_decode_failed: u64,
+    /// Frames the decoder produced that could not be painted because
+    /// the stream's dest rect encloses no pixels (`right <= left` or
+    /// `bottom <= top`). Counted here rather than in
+    /// `frames_decoded_ok`, which means "painted".
+    pub frames_dropped_empty_dest: u64,
     /// Session-relative seconds of the most recent `STREAM_DATA`
     /// message for this stream. None until the first one arrives.
     pub last_frame_ts_secs: Option<f64>,
@@ -594,6 +599,26 @@ pub struct MainSnapshot {
     /// Token-starvation episodes that lasted long enough to raise
     /// the "not accepting messages" notification. Cumulative.
     pub agent_stall_count: u32,
+    /// Display sizes sent to the guest agent since session start.
+    /// Cumulative.
+    pub resize_requests_sent_count: u64,
+    /// How many of those the guest never applied: no new primary
+    /// surface within the main channel's resize timeout. Each one
+    /// raised a notification naming the size. Cumulative.
+    pub resize_unapplied_count: u64,
+    /// The display size sent to the agent and not yet judged, with
+    /// the session-relative seconds at which it was queued for the
+    /// agent. `None` between requests.
+    pub outstanding_resize: Option<OutstandingResizeSnapshot>,
+}
+
+/// A display size asked of the guest agent and not yet judged; see
+/// `MainSnapshot::outstanding_resize`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct OutstandingResizeSnapshot {
+    pub width: u32,
+    pub height: u32,
+    pub sent_at_secs: f64,
 }
 
 /// SPICE playback audio codec, as inferred from the most
