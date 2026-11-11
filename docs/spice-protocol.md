@@ -553,6 +553,17 @@ module](https://github.com/shakenfist/ryll/blob/develop/shakenfist-spice-compres
 of `shakenfist-spice-compression`. A refused image is dropped and
 not painted, in the same way as a truncated LZ4 image above.
 
+Display surfaces are clamped rather than refused. Each side is
+clamped to `MAX_IMAGE_DIMENSION`, then the height is clamped to
+keep the surface within `MAX_IMAGE_PIXELS`. The surface mirror that
+every mode shares also caps how many surfaces exist. It refuses a
+surface id of 1024 or more: spice-server keeps its surfaces in an
+array of that size (`NUM_SURFACES`) and never sends a larger id. It
+also refuses a new surface that would take the total across all
+surfaces past twice `MAX_IMAGE_PIXELS`. Draws to a refused surface
+are dropped, and the first refusal of each kind is logged once as a
+protocol gap.
+
 Decoders that wrap a codec library (H.264, and the WIC and ImageIO
 JPEG backends) only learn the dimensions once the library has parsed
 the frame. For the JPEG backends ryll's RGBA output is still capped,

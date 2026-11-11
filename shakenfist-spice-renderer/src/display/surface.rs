@@ -12,15 +12,19 @@ use tracing::warn;
 use super::damage::{DamageRect, DamageRegion};
 
 /// Maximum surface side length. Server-supplied or auto-computed
-/// dimensions larger than this are clamped to prevent
-/// `width * height * 4` from overflowing `usize` (which on 64-bit
-/// would still allocate an absurd buffer even without overflow;
-/// 16 384 × 16 384 × 4 = 1 GiB — already past any real display).
+/// dimensions larger than this are clamped.
 ///
 /// This is the shared per-side decode limit, so a surface is never
 /// smaller than the largest image that can be drawn onto it. Surfaces
 /// clamp to it rather than refusing, which is why it keeps its own name.
+/// The per-side limit alone still admits 16384 x 16384, which is 1 GiB
+/// of RGBA, so [`DisplaySurface::clamped_size`] also applies the shared
+/// pixel cap, `limits::MAX_IMAGE_PIXELS`.
 pub const MAX_SURFACE_DIMENSION: u32 = shakenfist_spice_compression::limits::MAX_IMAGE_DIMENSION;
+
+/// The shared cap on any one image's pixel count, which also bounds
+/// each surface. See `shakenfist_spice_compression::limits`.
+pub const MAX_SURFACE_PIXELS: usize = shakenfist_spice_compression::limits::MAX_IMAGE_PIXELS;
 
 /// A display surface that holds RGBA pixel data and tracks
 /// whether, and where, it has been mutated since the last consumer
@@ -40,27 +44,46 @@ pub struct DisplaySurface {
 }
 
 impl DisplaySurface {
-    /// Create a new surface with the given dimensions. Server-supplied
-    /// dimensions are clamped to `MAX_SURFACE_DIMENSION` on each axis
-    /// so that `width * height * 4` cannot overflow `usize` via a
-    /// malicious `SurfaceCreate` (or via the app-side auto-create
-    /// path computing `left + width` without bounds).
+    /// The size at which a surface requested as `width` x `height` is
+    /// created: each side clamped to [`MAX_SURFACE_DIMENSION`], then the
+    /// height clamped so the pixel count stays within
+    /// [`MAX_SURFACE_PIXELS`]. A server, or the auto-create path
+    /// computing `left + width`, can ask for any `u32` on each side;
+    /// without both clamps a 16384 x 16384 surface would commit 1 GiB.
+    pub fn clamped_size(width: u32, height: u32) -> (u32, u32) {
+        let width = width.min(MAX_SURFACE_DIMENSION);
+        let height = height.min(MAX_SURFACE_DIMENSION);
+        if width == 0 {
+            return (width, height);
+        }
+        // width >= 1 and MAX_SURFACE_PIXELS / MAX_SURFACE_DIMENSION is
+        // 4096, so the height bound is never zero and always fits u32.
+        let max_height = (MAX_SURFACE_PIXELS / width as usize) as u32;
+        (width, height.min(max_height))
+    }
+
+    /// Create a new surface with the given dimensions, clamped as
+    /// [`clamped_size`](Self::clamped_size) describes so that a
+    /// malicious `SurfaceCreate` cannot make the buffer overflow
+    /// `usize` or exceed the shared pixel cap.
     pub fn new(id: u32, width: u32, height: u32) -> Self {
-        let (width, height) = if width > MAX_SURFACE_DIMENSION || height > MAX_SURFACE_DIMENSION {
+        let (clamped_width, clamped_height) = Self::clamped_size(width, height);
+        if (clamped_width, clamped_height) != (width, height) {
             warn!(
-                "surface {}: requested {}×{} exceeds {}×{} cap; clamping",
-                id, width, height, MAX_SURFACE_DIMENSION, MAX_SURFACE_DIMENSION
+                "surface {}: requested {}x{} exceeds the {} pixel per side or {} pixel cap; \
+                 clamping to {}x{}",
+                id,
+                width,
+                height,
+                MAX_SURFACE_DIMENSION,
+                MAX_SURFACE_PIXELS,
+                clamped_width,
+                clamped_height
             );
-            (
-                width.min(MAX_SURFACE_DIMENSION),
-                height.min(MAX_SURFACE_DIMENSION),
-            )
-        } else {
-            (width, height)
-        };
-        // Both axes are now ≤ 16 384, so width * height ≤ 2^28 and
-        // width * height * 4 ≤ 2^30 — well inside usize on 32-bit or
-        // 64-bit.
+        }
+        let (width, height) = (clamped_width, clamped_height);
+        // Within the pixel cap, width * height * 4 is at most 256 MiB,
+        // well inside usize on 32-bit or 64-bit.
         let num_pixels = (width as usize) * (height as usize);
         // RGBA: R=0, G=0, B=0, A=255 (opaque black) for each pixel
         let pixels: Vec<u8> = (0..num_pixels)
@@ -1131,11 +1154,25 @@ mod tests {
         // axes is the pathological case.
         let s = DisplaySurface::new(0, u32::MAX, u32::MAX);
         assert_eq!(s.width, MAX_SURFACE_DIMENSION);
-        assert_eq!(s.height, MAX_SURFACE_DIMENSION);
-        // Sanity: the pixel buffer has the clamped size, not u32::MAX^2.
+        // The per-side clamp alone would leave 16384 x 16384, 1 GiB of
+        // RGBA; the pixel cap then takes the height down to 4096.
+        assert_eq!(s.height, 4096);
+        assert_eq!(s.pixels.len(), MAX_SURFACE_PIXELS * 4);
+    }
+
+    #[test]
+    fn surface_size_respects_the_pixel_cap() {
+        // Each side is within MAX_SURFACE_DIMENSION, but the product is
+        // four times the pixel cap.
         assert_eq!(
-            s.pixels.len(),
-            (MAX_SURFACE_DIMENSION as usize) * (MAX_SURFACE_DIMENSION as usize) * 4
+            DisplaySurface::clamped_size(MAX_SURFACE_DIMENSION, MAX_SURFACE_DIMENSION),
+            (MAX_SURFACE_DIMENSION, 4096)
         );
+        // An 8K display is well inside both caps and is left alone.
+        assert_eq!(DisplaySurface::clamped_size(7680, 4320), (7680, 4320));
+        // A zero side is left alone rather than dividing by it.
+        assert_eq!(DisplaySurface::clamped_size(0, 100), (0, 100));
+        let s = DisplaySurface::new(0, MAX_SURFACE_DIMENSION, MAX_SURFACE_DIMENSION);
+        assert!(s.pixels.len() <= MAX_SURFACE_PIXELS * 4);
     }
 }
