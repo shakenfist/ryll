@@ -112,7 +112,7 @@ merged. `ryll/src/app/mod.rs` is 5,592 lines.
    phase-4 one. Decision 6.
 
 6. **`ARCHITECTURE.md`'s `ryll/src/` tree is stale already.** Its
-   `app/` listing (`ARCHITECTURE.md:148-158`) omits
+   `app/` listing (`ARCHITECTURE.md:172` onwards) omits
    `agent_state.rs` and `ui_state.rs`, which have been on `develop`
    since phase 2 landed. Step 3g fixes that as well as adding this
    phase's files.
@@ -322,7 +322,7 @@ The arm groups, with today's line ranges for reference:
 | `Error` | 1817-1834 | `handle_channel_error(channel, message)` |
 | `UsbChannelReady`..`UsbConnectFailed` | 1835-1860 | `handle_usb_event` or inline per arm |
 | `WebdavChannelReady`..`WebdavError` | 1861-1886 | `handle_webdav_event` or inline per arm |
-| `PasteCompleted`, `PasteFailed` | 1887-1902 | inline |
+| `PasteCompleted`, `PasteFailed` (two arms) | 1887-1920 | inline |
 | `Notification` | 1903-1908 | inline |
 | `Disconnected` | 1909-1972 | `handle_disconnected(channel, reason)` |
 
@@ -468,7 +468,7 @@ neither this arm nor an earlier one covers, which is itself the
 finding.
 
 Second, in `ARCHITECTURE.md`, update the `ryll/src/` tree
-(`ARCHITECTURE.md:148-158`) to list the `app/` children in
+(`ARCHITECTURE.md:172` onwards) to list the `app/` children in
 alphabetical order with a one-line comment each: `agent_state.rs`
 and `ui_state.rs`, which are already missing (survey finding 6),
 plus `bug_report.rs`, `connection.rs`, `events.rs`,
@@ -552,8 +552,20 @@ Commit: "Name the events the GUI ignores."
 * `process_events` in `ryll/src/app/events.rs` is under 80 lines,
   and no `handle_*` method in that file exceeds 150.
 
-* `grep -n 'break' ryll/src/app/events.rs` prints nothing, and
-  `grep -cn '_ => {}' ryll/src/app/events.rs` is 0.
+* `grep -n 'break' ryll/src/app/events.rs` prints nothing, and the
+  dispatch `match` has no wildcard arm. The lag-sampling pre-match
+  that brackets it keeps its own `_ => {}`: it samples four of the
+  thirty `ChannelEvent` variants and must ignore the rest, so
+  naming them there would add twenty-six no-op arms and a second
+  place to edit for every new variant. The check is therefore
+  scoped to the dispatch:
+
+  ```
+  awk '/^            match event \{/,/^            \}/' ryll/src/app/events.rs \
+      | grep -c '_ => {}'
+  ```
+
+  is 0, and `grep -c '_ => {}' ryll/src/app/events.rs` is 1.
 
 * The `ryll` binary's test count is unchanged from `develop`:
   `make test` reports the same number of passing tests for the
@@ -602,6 +614,49 @@ Commit: "Name the events the GUI ignores."
   build and unit tests are the evidence. Step 3c is the one step
   where that claim is a judgement rather than a script, and risk 1
   says how it is checked.
+
+## Execution notes
+
+- **Back brief, 2026-11-12 (AEDT).** Mikal chose to implement this
+  plan as written rather than re-survey it, having found it had
+  been planned on 2026-11-05 and never executed; its branch was
+  rebased from `f56b371` onto `e381b1e` first, which replayed both
+  planning commits unchanged. He gave permission to push and open
+  the pull request once the definition of done passes, and ruled
+  that the definition-of-done wildcard check be scoped to the
+  dispatch `match` rather than made to cover the lag-sampling
+  pre-match as well.
+
+- **Three of the plan's premises had shifted** between the survey
+  at `f56b371` and execution at `e381b1e`, all corrected above at
+  their source rather than noted here alone. `42dec90` added a
+  second `ChannelEvent::PasteFailed` arm, for
+  `PasteFailureKind::InProgress`, so step 3c's arm table named one
+  arm where the code has two and every line reference after 1895
+  shifted by eighteen. The `ryll/src/` tree in `ARCHITECTURE.md`
+  moved from line 148 to line 172, though survey finding 6 still
+  holds: `agent_state.rs` and `ui_state.rs` are still absent from
+  it. The definition of done asked for no `_ => {}` anywhere in
+  `events.rs`, which `process_events` cannot satisfy, as above.
+
+- **Baseline for the test-count criterion**: the `ryll` binary ran
+  437 tests on the rebased branch before any step, with the whole
+  workspace green.
+
+- **Step 3a** (Sonnet, medium effort) moved the connection
+  lifecycle with no line of any body changed; the move check
+  reported only the `impl RyllApp {` and `}` wrapper lines. It
+  first opened the file with `use super::*;`, which was sent back:
+  every module the previous phase created uses explicit `use`
+  lines, the workspace has no file-scope glob import anywhere, and
+  `clippy::wildcard_imports` would flag it if the workspace adopts
+  the pedantic group. `connection.rs` needs thirty-two names
+  explicitly, which is the real cost of the rule, and the
+  remaining four files this phase creates follow it. The step also
+  widened `EVENT_CHANNEL_SIZE`, `INPUT_CHANNEL_SIZE` and
+  `RegionSelectEnd` to `pub(super)`. Note for step 3d:
+  `connection.rs` imports `RegionSelectEnd` from `super`, so that
+  import must follow the enum into `trigger_snapshot.rs`.
 
 ## Back brief
 
