@@ -379,7 +379,17 @@ pub async fn decompress_glz(data: &[u8], dictionary: &GlzDictionary) -> Result<D
             if image_dist == 0 {
                 // Copy from current image (self-reference)
                 pixel_offset += 1;
-                let src_start = out_idx.wrapping_sub(pixel_offset * 4);
+                // A reference before the start of the image is
+                // malformed; refuse it rather than wrap: a wrapped
+                // source one pixel before the start overflows the
+                // `src + 4` bounds check below.
+                let Some(src_start) = out_idx.checked_sub(pixel_offset * 4) else {
+                    return Err(anyhow!(
+                        "GLZ back-reference {} pixels before pixel {} is before the image start",
+                        pixel_offset,
+                        out_idx / 4
+                    ));
+                };
 
                 if pixel_offset == 1 {
                     // Repeat the directly previous pixel
@@ -558,6 +568,54 @@ mod tests {
             .block_on(decompress_glz(&data, &dict))
             .expect_err("absurd dimensions must be refused");
         assert!(err.to_string().contains("65535x65535"), "{}", err);
+    }
+
+    /// A 2x1 top-down GLZ image: one literal pixel, then `refs`.
+    fn glz_image_2x1(refs: &[u8]) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(GLZ_MAGIC);
+        data.extend_from_slice(&[0, 1]); // Version major
+        data.extend_from_slice(&[0, 0]); // Version minor
+        data.push(0x10); // Type packed, top down
+        data.extend_from_slice(&2u32.to_be_bytes()); // Width
+        data.extend_from_slice(&1u32.to_be_bytes()); // Height
+        data.extend_from_slice(&8u32.to_be_bytes()); // Stride
+        data.extend_from_slice(&1u64.to_be_bytes()); // Image ID
+        data.extend_from_slice(&0u32.to_be_bytes()); // Win head dist
+        data.extend_from_slice(&[0x00, 10, 20, 30]); // One literal BGR pixel
+        data.extend_from_slice(refs);
+        data
+    }
+
+    #[test]
+    fn glz_back_reference_before_image_start_is_refused() {
+        // ctrl 0x21: a one-pixel self-reference (pixel flag and image
+        // distance both zero) whose distance is 2 pixels from pixel 1,
+        // one before the start. This used to panic on an overflowing
+        // bounds check.
+        let dict = GlzDictionary::new();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let err = rt
+            .block_on(decompress_glz(&glz_image_2x1(&[0x21, 0x00, 0x00]), &dict))
+            .expect_err("a reference before the image start must be refused");
+        assert!(
+            err.to_string().contains("before the image start"),
+            "{}",
+            err
+        );
+    }
+
+    #[test]
+    fn glz_back_reference_to_previous_pixel_still_decodes() {
+        // ctrl 0x20: the same reference at a distance of one pixel,
+        // which repeats the literal. The refusal above must not catch
+        // this legitimate reference.
+        let dict = GlzDictionary::new();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let img = rt
+            .block_on(decompress_glz(&glz_image_2x1(&[0x20, 0x00, 0x00]), &dict))
+            .expect("valid reference");
+        assert_eq!(img.pixels, vec![30, 20, 10, 255, 30, 20, 10, 255]);
     }
 
     #[test]
