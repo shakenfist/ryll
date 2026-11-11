@@ -564,6 +564,14 @@ surfaces past twice `MAX_IMAGE_PIXELS`. Draws to a refused surface
 are dropped, and the first refusal of each kind is logged once as a
 protocol gap.
 
+The cursor channel's cache of `CACHE_ME` cursors is bounded the same
+way. It holds at most 256 cursors, the client cache size spice-server
+assumes (`CLIENT_CURSOR_CACHE_SIZE`), and at most 32 MiB of RGBA in
+all. When either limit is reached, the least recently used cursor is
+evicted. A cursor larger than the whole budget is shown but not
+cached. If the server later asks for an evicted cursor `FROM_CACHE`,
+that is an ordinary cache miss: the cursor shape is left unchanged.
+
 Decoders that wrap a codec library (H.264, and the WIC and ImageIO
 JPEG backends) only learn the dimensions once the library has parsed
 the frame. For the JPEG backends ryll's RGBA output is still capped,

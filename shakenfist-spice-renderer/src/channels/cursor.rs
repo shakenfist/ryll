@@ -24,11 +24,112 @@ use shakenfist_spice_protocol::{
 
 use super::{ChannelEvent, CursorImage, DisconnectReason, EventSink, MAX_MESSAGE_BODY};
 
+/// Most cursors the cache holds.
+///
+/// spice-server tracks the client's cursor cache as
+/// `CLIENT_CURSOR_CACHE_SIZE` (256) entries and sends `INVAL_ONE` for
+/// the least recently used one when it needs room, so a real server
+/// never expects more than this to be cached.
+pub const MAX_CURSOR_CACHE_ENTRIES: usize = 256;
+
+/// Most RGBA bytes the cursor cache holds, across all entries.
+///
+/// The entry cap alone does not bound memory: a cursor may be as large
+/// as the shared pixel cap allows, and the mono and 4-bit formats make
+/// a large cursor cheap to send. 32 MiB holds 256 cursors of 128 KiB
+/// each, about 180 x 180; ordinary cursors are 32 x 32 to 64 x 64.
+pub const MAX_CURSOR_CACHE_BYTES: usize = 32 * 1024 * 1024;
+
+/// The cursors the server has asked ryll to cache (`CACHE_ME`), keyed
+/// by their unique id, bounded by [`MAX_CURSOR_CACHE_ENTRIES`] and
+/// [`MAX_CURSOR_CACHE_BYTES`] with least-recently-used eviction.
+///
+/// An evicted cursor the server later sends `FROM_CACHE` is a cache
+/// miss, which is already handled: the cursor shape is left unchanged
+/// and the miss is logged once. The cache is small enough that finding
+/// the least recently used entry by scanning is cheaper than keeping a
+/// list in order.
+#[derive(Default)]
+struct CursorCache {
+    entries: HashMap<u64, (CursorImage, u64)>,
+    bytes: usize,
+    /// Monotonic use counter; the entry with the lowest is the least
+    /// recently used.
+    clock: u64,
+}
+
+impl CursorCache {
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn get(&mut self, id: &u64) -> Option<&CursorImage> {
+        self.clock += 1;
+        let clock = self.clock;
+        self.entries.get_mut(id).map(|(img, used)| {
+            *used = clock;
+            &*img
+        })
+    }
+
+    #[cfg(test)]
+    fn contains_key(&self, id: &u64) -> bool {
+        self.entries.contains_key(id)
+    }
+
+    /// Cache `img` under `id`, evicting least recently used cursors
+    /// until both caps hold. A cursor larger than the whole byte cap is
+    /// not cached at all.
+    fn insert(&mut self, id: u64, img: CursorImage) {
+        self.remove(&id);
+        if img.pixels.len() > MAX_CURSOR_CACHE_BYTES {
+            debug!(
+                "cursor: not caching id={}: {} bytes exceeds the {} byte cache",
+                id,
+                img.pixels.len(),
+                MAX_CURSOR_CACHE_BYTES
+            );
+            return;
+        }
+        while !self.entries.is_empty()
+            && (self.entries.len() >= MAX_CURSOR_CACHE_ENTRIES
+                || self.bytes + img.pixels.len() > MAX_CURSOR_CACHE_BYTES)
+        {
+            let oldest = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (_, used))| *used)
+                .map(|(&k, _)| k)
+                .expect("entries is not empty");
+            self.remove(&oldest);
+            debug!("cursor: cache full, evicted id={}", oldest);
+        }
+        self.clock += 1;
+        self.bytes += img.pixels.len();
+        self.entries.insert(id, (img, self.clock));
+    }
+
+    fn remove(&mut self, id: &u64) {
+        if let Some((img, _)) = self.entries.remove(id) {
+            self.bytes -= img.pixels.len();
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.bytes = 0;
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&u64, &CursorImage)> {
+        self.entries.iter().map(|(id, (img, _))| (id, img))
+    }
+}
+
 pub struct CursorChannel {
     stream: SpiceStream,
     events: EventSink,
     buffer: ReceiveBuffer,
-    cursor_cache: HashMap<u64, CursorImage>,
+    cursor_cache: CursorCache,
     capture: Option<Arc<dyn CaptureSink>>,
     byte_counter: Arc<ByteCounter>,
     traffic: Arc<dyn TrafficSink>,
@@ -69,7 +170,7 @@ impl CursorChannel {
             stream,
             events,
             buffer: ReceiveBuffer::with_capacity(65536),
-            cursor_cache: HashMap::new(),
+            cursor_cache: CursorCache::default(),
             capture,
             byte_counter,
             traffic,
@@ -438,11 +539,9 @@ impl CursorChannel {
         );
 
         if from_cache {
-            if let Some(img) = self.cursor_cache.get(&header.unique_id) {
+            if let Some(img) = self.cursor_cache.get(&header.unique_id).cloned() {
                 debug!("cursor: using cached cursor id={}", header.unique_id);
-                self.events
-                    .emit(ChannelEvent::CursorShape(img.clone()))
-                    .await;
+                self.events.emit(ChannelEvent::CursorShape(img)).await;
             } else {
                 warn_once!(
                     "cursor:decode_failure:shape:cache_miss",
@@ -1340,6 +1439,72 @@ mod tests {
             .handle_message(cursor_server::SET, &set)
             .await
             .is_err());
+    }
+
+    fn cursor_of(bytes: usize) -> CursorImage {
+        CursorImage {
+            width: 1,
+            height: 1,
+            hot_spot_x: 0,
+            hot_spot_y: 0,
+            pixels: vec![0; bytes],
+        }
+    }
+
+    #[test]
+    fn cursor_cache_evicts_least_recently_used_past_the_entry_cap() {
+        let mut cache = CursorCache::default();
+        for id in 0..MAX_CURSOR_CACHE_ENTRIES as u64 {
+            cache.insert(id, cursor_of(4));
+        }
+        // Touch id 0 so id 1 becomes the least recently used.
+        assert!(cache.get(&0).is_some());
+        cache.insert(10_000, cursor_of(4));
+        assert_eq!(cache.len(), MAX_CURSOR_CACHE_ENTRIES);
+        assert!(cache.contains_key(&0), "a recently used cursor is kept");
+        assert!(
+            !cache.contains_key(&1),
+            "the least recently used is evicted"
+        );
+        assert!(cache.contains_key(&10_000));
+    }
+
+    #[test]
+    fn cursor_cache_evicts_to_stay_within_the_byte_cap() {
+        let mut cache = CursorCache::default();
+        let quarter = MAX_CURSOR_CACHE_BYTES / 4;
+        for id in 0..4 {
+            cache.insert(id, cursor_of(quarter));
+        }
+        assert_eq!(cache.bytes, MAX_CURSOR_CACHE_BYTES);
+        cache.insert(4, cursor_of(quarter));
+        assert_eq!(cache.len(), 4);
+        assert_eq!(cache.bytes, MAX_CURSOR_CACHE_BYTES);
+        assert!(!cache.contains_key(&0));
+        assert!(cache.contains_key(&4));
+    }
+
+    #[test]
+    fn cursor_cache_skips_a_cursor_larger_than_the_cap() {
+        let mut cache = CursorCache::default();
+        cache.insert(0, cursor_of(4));
+        cache.insert(1, cursor_of(MAX_CURSOR_CACHE_BYTES + 4));
+        assert!(!cache.contains_key(&1));
+        assert!(cache.contains_key(&0), "nothing is evicted for it");
+    }
+
+    #[test]
+    fn cursor_cache_byte_count_follows_replace_remove_and_clear() {
+        let mut cache = CursorCache::default();
+        cache.insert(0, cursor_of(100));
+        cache.insert(0, cursor_of(40));
+        assert_eq!(cache.bytes, 40);
+        cache.insert(1, cursor_of(8));
+        cache.remove(&0);
+        assert_eq!(cache.bytes, 8);
+        cache.clear();
+        assert_eq!(cache.bytes, 0);
+        assert_eq!(cache.len(), 0);
     }
 
     #[tokio::test]
