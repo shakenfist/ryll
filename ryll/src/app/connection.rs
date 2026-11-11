@@ -1,13 +1,15 @@
 use eframe::egui;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{mpsc, oneshot, Notify};
 use tracing::{error, info, warn};
 
+use crate::auto_snapshot::AutoSnapshotState;
 use crate::bugreport::{ChannelSnapshots, TrafficBuffers};
 use crate::clipboard_arboard::ArboardClipboard;
 use crate::input_egui::HeldKeys;
+use crate::notifications::NotificationSource;
 use crate::reconnect_policy::{ReconnectPolicy, MAX_RECONNECT_ATTEMPTS};
 use crate::settings;
 use shakenfist_spice_protocol::NotifySeverity;
@@ -325,6 +327,89 @@ impl RyllApp {
             );
             return false;
         }
+        true
+    }
+
+    /// Spawn the auto-snapshot interval task for the session just
+    /// initialized, retiring the outgoing one first.
+    ///
+    /// Returns whether it spawned: `false` when the retire refused,
+    /// which is the caller's cue to stop rather than carry on as if a
+    /// task were running.
+    pub(super) fn spawn_auto_snapshot_task(&mut self, interval_secs: u64) -> bool {
+        // Retire the outgoing task before spawning, so at
+        // most one auto-snapshot thread is *running* at any
+        // moment. Nothing is joined — this is the UI thread
+        // — so the retire can refuse when too many previous
+        // threads are still winding down; honour that rather
+        // than spawning anyway.
+        if !self.retire_auto_snapshot_task() {
+            return false;
+        }
+        let output_dir = self.manual_bug_report_dir().join("auto-snapshots");
+        let cap = self.auto_snapshot_cap;
+        let byte_cap = crate::auto_snapshot::DEFAULT_AUTO_SNAPSHOT_BYTE_CAP;
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.auto_snapshot_cancel = Some(cancel.clone());
+
+        // One-shot startup notification — fire only on
+        // the first session so reconnects don't spam.
+        // Both budgets are quoted: the count alone tells
+        // the operator nothing about how much disk the
+        // mode is authorised to use.
+        if !self.auto_snapshot_startup_notified {
+            self.auto_snapshot_startup_notified = true;
+            self.push_notification(
+                NotifySeverity::Info,
+                NotificationSource::Internal,
+                format!(
+                    "Auto-snapshot mode enabled \
+                     — every {}s, max {} snapshots / {} MiB, \
+                     saving to {}",
+                    interval_secs,
+                    cap,
+                    byte_cap / (1024 * 1024),
+                    output_dir.display(),
+                ),
+            );
+        }
+
+        let state = AutoSnapshotState {
+            traffic: self.traffic.clone(),
+            channel_snapshots: self.channel_snapshots.clone(),
+            app_snapshot: self.app_snapshot.clone(),
+            notifications: self.notifications.clone(),
+            target: self.target.clone(),
+            output_dir,
+            interval: Duration::from_secs(interval_secs),
+            cap,
+            byte_cap,
+            cancel,
+        };
+        let handle = std::thread::spawn(move || {
+            // A runtime that will not build means an
+            // opt-in diagnostic feature does not start;
+            // it is not grounds to abort ryll. The
+            // previous `.expect()` here panicked the
+            // auto-snapshot thread, losing the mode for
+            // the session without saying why.
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    warn!(
+                        "auto-snapshot: cannot build tokio runtime, mode \
+                         inactive for this session: {}",
+                        e
+                    );
+                    return;
+                }
+            };
+            rt.block_on(crate::auto_snapshot::run_auto_snapshot_loop(state));
+        });
+        self.auto_snapshot_thread = Some(handle);
         true
     }
 
