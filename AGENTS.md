@@ -116,7 +116,7 @@ that table is an incomplete change.
    `self.events.emit(...)` — never a bare `event_tx`. `EventSink`
    couples the queue to the repaint wake-up so a new event cannot
    forget it and leave the UI stale.
-3. Handle in `process_events()` in `ryll/src/app/`
+3. Handle in `process_events()` in `ryll/src/app/events.rs`
 
 ### Modifying protocol handling
 

@@ -172,14 +172,27 @@ the channels reaching back into global settings state.
 ryll/src/
 ├── main.rs              # CLI entry, mode selection, Ctrl+C handler
 ├── app/                 # egui GUI application
-│   ├── mod.rs           #   RyllApp: egui App, event loop, panels,
-│   │                    #   connection lifecycle, egui trait impls
+│   ├── agent_state.rs   #   AgentState, guest-agent notices and paste hints
+│   ├── bug_report.rs    #   Bug-report generation and the pending-report
+│   │                    #   state, disconnect snapshots, bug dialog
+│   ├── connection.rs    #   Reconnect and session respawn, auto-snapshot
+│   │                    #   thread lifecycle, critical-disconnect handling
+│   ├── events.rs        #   process_events: ChannelEvent dispatch and
+│   │                    #   the per-event handlers
+│   ├── mod.rs           #   RyllApp struct and fields, eframe::App impl
+│   │                    #   (logic, ui), panels and dialogs
 │   ├── notification_snapshots.rs
 │   │                    #   NotificationSnapshotStore
 │   ├── reconnect.rs     #   ReconnectState, modal variants
 │   ├── resize.rs        #   Auto-fit and outgoing-resize decisions
+│   ├── screenshots.rs   #   Screenshot dialog and per-surface PNG saving
 │   ├── session_init.rs  #   SessionInitialized classification, respawn limit
-│   └── stats.rs         #   Statistics, bandwidth/latency trackers
+│   ├── stats.rs         #   Statistics, bandwidth/latency trackers
+│   ├── trigger_snapshot.rs
+│   │                    #   TriggerSnapshot, window screenshot, region
+│   │                    #   select for bug reports
+│   └── ui_state.rs      #   UiStateTracker: which panels and dialogs are
+│                        #   open, for bug reports
 ├── auto_snapshot.rs     # --auto-snapshot-interval background task,
 │                        #   rolling auto-snapshots/ directory + cap
 ├── bugreport.rs         # Traffic ring buffer (TrafficBuffers,

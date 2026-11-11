@@ -88,7 +88,19 @@ impl RyllApp {
                 ChannelEvent::Disconnected(channel, reason) => {
                     self.handle_disconnected(channel, reason)
                 }
-                _ => {}
+                // Not acted on here. `session::connect` in the renderer
+                // crate learns the channel list from a oneshot the main
+                // channel fires just before it emits `ChannelsAvailable`,
+                // so that event is informational to the GUI;
+                // `DigestUpdated` (present only with the `digest-decode`
+                // feature) is turned into the control socket's
+                // `digest_updated` wire event by the renderer's control
+                // server. Named rather than matched by `_` so a new
+                // `ChannelEvent` variant fails to compile here until
+                // someone decides whether the GUI should act on it.
+                ChannelEvent::ChannelsAvailable(_) => {}
+                #[cfg(feature = "digest-decode")]
+                ChannelEvent::DigestUpdated { .. } => {}
             }
         }
 

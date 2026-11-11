@@ -118,14 +118,24 @@ merged. `ryll/src/app/mod.rs` is 5,592 lines.
    phase's files.
 
 7. **The `ChannelEvent` match ends in `_ => {}`**
-   (`mod.rs:1973`). Two variants fall into it:
-   `ChannelsAvailable`, consumed by
-   `shakenfist-spice-renderer/src/session.rs:334` during channel
-   setup, and `DigestUpdated`, consumed by
-   `shakenfist-spice-renderer/src/control/server.rs:955`. The GUI
-   is right to ignore both, but a wildcard means the *next* variant
-   is also ignored silently -- which is the shape of failure this
-   whole plan exists to make visible. Decision 5.
+   (`mod.rs:1973`). Two variants fall into it. `DigestUpdated` is
+   turned into the control socket's `digest_updated` wire event by
+   `shakenfist-spice-renderer/src/control/server.rs`, and exists
+   only under the renderer's `digest-decode` feature.
+   `ChannelsAvailable` is consumed by nobody: `session::connect`
+   learns the channel list from a oneshot that the main channel
+   fires immediately before emitting the event
+   (`channels/main_channel.rs` takes `channels_avail_signal` and
+   then emits; `session.rs` awaits `channels_avail_rx`), so the
+   event is informational. The GUI is right to ignore both, but a
+   wildcard means the *next* variant is also ignored silently --
+   which is the shape of failure this whole plan exists to make
+   visible. Decision 5.
+
+   Corrected during step 3g: this finding originally said
+   `session.rs` consumed the `ChannelsAvailable` event, and did not
+   notice that `DigestUpdated` is feature-gated. The second error
+   is why the step's single arm does not compile.
 
 8. **Three `continue` statements sit inside the
    `SessionInitialized` arm** (`mod.rs:1589`, `1597`, `1640`).
@@ -657,6 +667,47 @@ Commit: "Name the events the GUI ignores."
   `RegionSelectEnd` to `pub(super)`. Note for step 3d:
   `connection.rs` imports `RegionSelectEnd` from `super`, so that
   import must follow the enum into `trigger_snapshot.rs`.
+
+- **Steps 3b to 3f** (Sonnet, medium effort, 3f low) were pure
+  moves, each verified by comparing the whole diff's tokens rather
+  than only its lines: for every step the only differences outside
+  `use`, `mod` and visibility were rustfmt rewraps forced by
+  prepending `pub(super)` to a line already near a hundred columns
+  (`take_trigger_for_submit`'s signature and the
+  `REGION_SELECT_PENDING` const in 3d,
+  `maybe_write_disconnect_snapshot`'s signature in 3e) and, in 3f,
+  two blank lines `cargo fmt` would not leave behind. Step 3b's
+  `process_events` was checked body-for-body: 497 lines,
+  byte-identical. Decision 1's size estimates held, within thirty
+  lines on every file.
+
+- **Step 3c** (Opus, high effort) extracted two methods the step's
+  own list did not have, `sample_event_lag` and
+  `finish_event_drain`, because the arms total 425 lines and
+  leaving the subsystem arms inline lands the dispatcher at about
+  148 whatever else is done. Mikal approved that shape at the
+  plan's gate in preference to relaxing the eighty-line target or
+  grouping the USB, WebDAV and paste arms behind handlers that
+  would each need an `unreachable!()`. `process_events` came out at
+  77 lines. The trailing `return` on a refused auto-snapshot
+  retire carries an `#[expect]` rather than the `#[allow]` the step
+  first used, per the master plan's own rule for exemptions; it is
+  the workspace's first `#[expect]` against seventy-eight
+  `#[allow]`s, which is the last phase's inventory to sweep.
+
+- **Step 3g found the plan's finding 7 wrong in two ways**, both
+  recorded above at the finding. `DigestUpdated` is
+  `#[cfg(feature = "digest-decode")]`, so the arm the step
+  specified does not compile; it is two arms, the second carrying
+  the same `cfg`, which is what the renderer's own `event_name`
+  match does for the same variant. `ryll`'s `digest-decode`
+  feature is the only thing in the workspace that enables the
+  renderer's, so the two gates cannot diverge in a workspace
+  build. `make lint` compiles neither state of that arm, so the
+  management session compiled `ryll` with
+  `--features digest-decode,rdp` separately: clean, no warnings
+  under `-D warnings`. And nothing consumes `ChannelsAvailable` at
+  all, which the step's comment now says instead.
 
 ## Back brief
 
