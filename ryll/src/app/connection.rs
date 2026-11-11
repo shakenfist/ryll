@@ -18,8 +18,9 @@ use shakenfist_spice_renderer::{ByteCounter, ClipboardBackend, SessionState, MOU
 use super::agent_state::AgentState;
 use super::reconnect::{modal_variant_notification, ModalVariant, ReconnectState};
 use super::stats::{BandwidthTracker, Statistics};
+use super::trigger_snapshot::RegionSelectEnd;
 use super::ui_state::UiStateTracker;
-use super::{RegionSelectEnd, RyllApp, EVENT_CHANNEL_SIZE, INPUT_CHANNEL_SIZE};
+use super::{RyllApp, EVENT_CHANNEL_SIZE, INPUT_CHANNEL_SIZE};
 
 /// How many retiring auto-snapshot threads may be outstanding before
 /// a new session declines to spawn another.
