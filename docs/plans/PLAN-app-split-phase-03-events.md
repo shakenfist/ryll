@@ -709,6 +709,28 @@ Commit: "Name the events the GUI ignores."
   under `-D warnings`. And nothing consumes `ChannelsAvailable` at
   all, which the step's comment now says instead.
 
+- **Definition of done, run on completion.** Ten of the eleven
+  items passed as written. Item 5 failed on the first run:
+  `process_events` was 77 lines after step 3c and 89 after step
+  3g, whose two named arms and their twelve-line explanation land
+  inside the function. Mikal chose to move the prose rather than
+  relax the bar, so the explanation is now a note above
+  `impl RyllApp` at the top of `events.rs` and the function is 79.
+  Getting from 81 to 79 cost the one-line pointer beside the arms,
+  which is worth restoring if the bar is ever moved to 80.
+
+  Item 9 is reported against a stronger check than the plan's own
+  script, which cannot see continuation lines of a multi-line
+  `use` or a rustfmt rewrap forced by `pub(super)`, and so reports
+  four to seventeen residual lines on each move commit. Each
+  diff was instead compared as a whitespace-insensitive multiset
+  of tokens, which is clean for all five moves: every token
+  removed is re-added, bar imports, the three `continue` to
+  `return` conversions and three rustfmt rejoins. Step 3b's
+  `process_events` was additionally compared body-for-body, 497
+  lines byte-identical. A future phase should fix the script
+  rather than the expectation.
+
 ## Back brief
 
 Before executing any step of this plan, please back brief the

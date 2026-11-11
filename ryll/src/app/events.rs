@@ -16,6 +16,18 @@ use super::session_init::{
 use super::stats::{push_with_cap, recent_lag_stats, FPS_WINDOW_SIZE};
 use super::RyllApp;
 
+// Two `ChannelEvent` variants reach the GUI and are deliberately
+// ignored, and the dispatch below names both rather than ending in
+// `_`, so that a new variant fails to compile here until someone
+// decides whether the GUI should act on it.
+//
+// `ChannelsAvailable` is consumed by nobody: `session::connect` in
+// the renderer crate learns the channel list from a oneshot the main
+// channel fires immediately before it emits the event, so the event
+// is informational. `DigestUpdated`, which exists only under the
+// `digest-decode` feature, is turned into the control socket's
+// `digest_updated` wire event by the renderer's control server.
+
 impl RyllApp {
     pub(super) fn process_events(&mut self) {
         while let Ok(event) = self.event_rx.try_recv() {
@@ -88,16 +100,6 @@ impl RyllApp {
                 ChannelEvent::Disconnected(channel, reason) => {
                     self.handle_disconnected(channel, reason)
                 }
-                // Not acted on here. `session::connect` in the renderer
-                // crate learns the channel list from a oneshot the main
-                // channel fires just before it emits `ChannelsAvailable`,
-                // so that event is informational to the GUI;
-                // `DigestUpdated` (present only with the `digest-decode`
-                // feature) is turned into the control socket's
-                // `digest_updated` wire event by the renderer's control
-                // server. Named rather than matched by `_` so a new
-                // `ChannelEvent` variant fails to compile here until
-                // someone decides whether the GUI should act on it.
                 ChannelEvent::ChannelsAvailable(_) => {}
                 #[cfg(feature = "digest-decode")]
                 ChannelEvent::DigestUpdated { .. } => {}
