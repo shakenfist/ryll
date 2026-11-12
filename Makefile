@@ -308,15 +308,20 @@ test: fetch
 
 # Run linting checks (rustfmt + clippy). The first clippy turns on
 # ryll's default-off `rdp` feature, as `test` does, so the --rdp mode
-# is linted. The second clippy builds the encoders the way a
-# server-role consumer does, with no decoders. The final step
+# is linted. The second builds ryll with `digest-decode`, the only
+# configuration in which the `ChannelEvent::DigestUpdated` match arm
+# in ryll/src/app/events.rs is compiled at all: that arm is there so
+# that a new ChannelEvent variant fails to compile rather than being
+# silently ignored, which is only true if something builds it. The
+# third clippy builds the encoders the way a server-role consumer
+# does, with no decoders. The final step
 # (tools/check-slim-renderer.sh) builds shakenfist-spice-renderer
 # with no default features, feature by feature, and fails if a gated
 # dependency (codecs, usb, webdav, audio output) leaks into that build.
 lint: fetch
 	$(DOCKER_RUN_OFFLINE) \
 		$(RYLL_IMAGE) \
-		sh -c "cargo fmt --all --check && cargo clippy --frozen --workspace --all-targets --features shakenfist-spice-compression/encode,ryll/rdp -- -D warnings && cargo clippy --frozen -p shakenfist-spice-compression --no-default-features --features encode -- -D warnings && tools/check-slim-renderer.sh"
+		sh -c "cargo fmt --all --check && cargo clippy --frozen --workspace --all-targets --features shakenfist-spice-compression/encode,ryll/rdp -- -D warnings && cargo clippy --frozen -p ryll --all-targets --features digest-decode -- -D warnings && cargo clippy --frozen -p shakenfist-spice-compression --no-default-features --features encode -- -D warnings && tools/check-slim-renderer.sh"
 
 # Run linting with auto-fix
 lint-fix: fetch
