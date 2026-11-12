@@ -485,8 +485,9 @@ pub struct RyllApp {
     /// zip write finish — so a join would freeze the GUI for seconds
     /// under exactly the trigger this bookkeeping exists to bound.
     /// They are reaped non-blockingly with `is_finished` instead, and
-    /// [`connection::MAX_RETIRING_AUTO_SNAPSHOT_THREADS`] caps how many
-    /// may be outstanding, which is what actually bounds thread growth.
+    /// [`connection::MAX_RETIRING_AUTO_SNAPSHOT_THREADS`] bounds how
+    /// many may be outstanding, which is what actually bounds thread
+    /// growth. It admits one more than its own value; see #716.
     auto_snapshot_retiring: Vec<std::thread::JoinHandle<()>>,
     /// When the most recent `SessionInitialized` was *accepted*.
     /// Drives [`session_init::MIN_SESSION_RESPAWN_INTERVAL`]; see the

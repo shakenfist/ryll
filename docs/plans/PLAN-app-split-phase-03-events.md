@@ -677,7 +677,11 @@ Commit: "Name the events the GUI ignores."
   explicitly, which is the real cost of the rule, and the
   remaining four files this phase creates follow it. The step also
   widened `EVENT_CHANNEL_SIZE`, `INPUT_CHANNEL_SIZE` and
-  `RegionSelectEnd` to `pub(super)`. Note for step 3d:
+  `RegionSelectEnd` to `pub(super)`. The first two were reverted by
+  the automated-review follow-up recorded below, neither having
+  needed widening at all; `RegionSelectEnd` stays `pub(super)`
+  because `connection.rs` reads it across a module boundary, which
+  is why it was correctly left alone. Note for step 3d:
   `connection.rs` imports `RegionSelectEnd` from `super`, so that
   import must follow the enum into `trigger_snapshot.rs`.
 
