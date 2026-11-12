@@ -337,10 +337,6 @@
       "sha": "47fc1b1ac662abb43059dce97cc7d8d22f16a3ad",
       "date": "2026-11-04"
     },
-    "shakenfist-spice-compression/src/glz.rs": {
-      "sha": "44dacde3b39793bb894a6c18c16fd58a54dbc7b7",
-      "date": "2026-11-04"
-    },
     "shakenfist-spice-compression/src/jpeg.rs": {
       "sha": "323af8a3a8f73b7139b62f8183544b53e01aa8ed",
       "date": "2026-11-04"
@@ -351,10 +347,6 @@
     },
     "shakenfist-spice-compression/src/log_once.rs": {
       "sha": "62c7ef427f455ae4bed02ea7b93292d5e9269a75",
-      "date": "2026-11-04"
-    },
-    "shakenfist-spice-compression/src/lz.rs": {
-      "sha": "528b64d0089b6a90c5a9fee760c40d691fe69ae6",
       "date": "2026-11-04"
     },
     "shakenfist-spice-compression/src/lz4.rs": {
@@ -569,10 +561,6 @@
       "sha": "42a0ad4fa92d18ac82e769de430979e664f9a4d7",
       "date": "2026-11-07"
     },
-    "shakenfist-spice-renderer/src/channels/cursor.rs": {
-      "sha": "47f13b1914fc8968c21afc6df472e13a2cde852f",
-      "date": "2026-11-07"
-    },
     "shakenfist-spice-renderer/src/channels/playback.rs": {
       "sha": "a38d094a625d3e5b48310548d40152ce61d2475b",
       "date": "2026-11-07"
@@ -619,14 +607,6 @@
     },
     "shakenfist-spice-renderer/src/display/damage.rs": {
       "sha": "e42b201bf9c53fa10cef048519ab31d218a00f1f",
-      "date": "2026-11-07"
-    },
-    "shakenfist-spice-renderer/src/display/mod.rs": {
-      "sha": "6ad15ddd78d60a474403411f18f7874115cc589f",
-      "date": "2026-11-07"
-    },
-    "shakenfist-spice-renderer/src/display/surface.rs": {
-      "sha": "6673deb73aad04ed901ea530e9f93d9b97d45191",
       "date": "2026-11-07"
     },
     "shakenfist-spice-renderer/src/encoder/frame_source.rs": {
@@ -691,10 +671,6 @@
     },
     "shakenfist-spice-renderer/src/pointer.rs": {
       "sha": "57850ef107d48b82b58569cc6b3256ef5501d264",
-      "date": "2026-11-07"
-    },
-    "shakenfist-spice-renderer/src/surface_mirror.rs": {
-      "sha": "0210ba24e8daba7d9ad4566c52aa3e8470fe53b4",
       "date": "2026-11-07"
     },
     "shakenfist-spice-renderer/src/traffic.rs": {
