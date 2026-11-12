@@ -6,8 +6,6 @@ use shakenfist_spice_protocol::NotifySeverity;
 
 use super::RyllApp;
 
-// ── Screenshot path helpers ─────────────────────────────────────────────────
-
 /// Derive per-surface output paths from a user-chosen base path.
 ///
 /// * If `count <= 1`, returns `vec![base.to_path_buf()]` unchanged.
@@ -49,8 +47,6 @@ fn screenshot_paths(base: &std::path::Path, count: usize) -> Vec<PathBuf> {
         })
         .collect()
 }
-
-// ── End screenshot path helpers ─────────────────────────────────────────────
 
 impl RyllApp {
     /// Save the current display surface(s) as PNG file(s).
