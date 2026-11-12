@@ -308,15 +308,36 @@ test: fetch
 
 # Run linting checks (rustfmt + clippy). The first clippy turns on
 # ryll's default-off `rdp` feature, as `test` does, so the --rdp mode
-# is linted. The second clippy builds the encoders the way a
-# server-role consumer does, with no decoders. The final step
+# is linted. The second builds ryll with `digest-decode`, the only
+# configuration in which the `ChannelEvent::DigestUpdated` match arm
+# in ryll/src/app/events.rs is compiled at all: that arm is there so
+# that a new ChannelEvent variant fails to compile rather than being
+# silently ignored, which is only true if something builds it. `gui`
+# is named rather than left to the default set because `mod app` is
+# gated on it, so without it this lane compiles no arm at all. No
+# ryll test or bench target has a `digest-decode` cfg and the first
+# lane already covers every ryll target, so this one needs no
+# --all-targets.
+#
+# The rustdoc step denies broken intra-doc links only. Moving an item
+# to another module leaves every `[`Thing`]` link to it unresolved,
+# and nothing else here notices: two such links went unnoticed for a
+# month while app.rs was split up. --document-private-items is
+# load-bearing, since the links that broke were on private fields,
+# which rustdoc otherwise never collects. Only this lint is denied
+# and only for ryll: the full warning set trips on four pre-existing
+# unclosed-HTML-tag comments here, and widening to --workspace wants
+# four `[32]`-shaped array links fixed in
+# shakenfist-spice-usbredir first. The
+# third clippy builds the encoders the way a server-role consumer
+# does, with no decoders. The final step
 # (tools/check-slim-renderer.sh) builds shakenfist-spice-renderer
 # with no default features, feature by feature, and fails if a gated
 # dependency (codecs, usb, webdav, audio output) leaks into that build.
 lint: fetch
 	$(DOCKER_RUN_OFFLINE) \
 		$(RYLL_IMAGE) \
-		sh -c "cargo fmt --all --check && cargo clippy --frozen --workspace --all-targets --features shakenfist-spice-compression/encode,ryll/rdp -- -D warnings && cargo clippy --frozen -p shakenfist-spice-compression --no-default-features --features encode -- -D warnings && tools/check-slim-renderer.sh"
+		sh -c "cargo fmt --all --check && cargo clippy --frozen --workspace --all-targets --features shakenfist-spice-compression/encode,ryll/rdp -- -D warnings && cargo clippy --frozen -p ryll --features gui,digest-decode -- -D warnings && RUSTDOCFLAGS=\"-D rustdoc::broken_intra_doc_links\" cargo doc --frozen --no-deps --document-private-items -p ryll && cargo clippy --frozen -p shakenfist-spice-compression --no-default-features --features encode -- -D warnings && tools/check-slim-renderer.sh"
 
 # Run linting with auto-fix
 lint-fix: fetch

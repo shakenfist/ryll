@@ -243,7 +243,10 @@ feature list and what each pulls in is in
 [`docs/development.md`](docs/development.md).
 `shakenfist-spice-renderer` has its own feature set with the same
 rule, and `make lint` builds it with `--no-default-features` to catch
-an ungated use.
+an ungated use. `make lint` also builds ryll with
+`gui,digest-decode`, the only configuration that compiles the
+`digest-decode` match arms, so a new `ChannelEvent` variant must be
+cfg-correct with that feature on as well as off.
 
 ## Process documents
 
