@@ -30,6 +30,14 @@ sequenceDiagram
     end
 ```
 
+Ryll sends `ATTACH_CHANNELS` from its `INIT` handler, as spice-gtk does,
+without waiting for anything else from the server. spice-server runs a
+network test of three `PING`s straight after `INIT`, and ryll used to wait
+for the first of them before asking, so a server that sent no `PING` was
+never asked and the connection hung. Once the main channel has linked, the
+server has 15 seconds in all to send `INIT` and `CHANNELS_LIST`. Past that,
+the connection fails with an error naming the message that never came.
+
 ### Link capabilities
 
 The link message carries two capability arrays, common and

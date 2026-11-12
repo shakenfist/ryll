@@ -385,6 +385,8 @@ pub struct MainChannel {
     /// header. `None` until the guest's capabilities arrive: the layout is
     /// unknown before then, so no clipboard traffic is sent or parsed.
     guest_clipboard_selection: Option<bool>,
+    /// Whether `ATTACH_CHANNELS` has been sent. It goes once, from the
+    /// first `INIT`.
     channels_requested: bool,
     monitors: u8,
     monitors_config_rx: mpsc::Receiver<DisplaySize>,
@@ -980,6 +982,17 @@ impl MainChannel {
                     init.current_mouse_mode,
                 )
                 .await?;
+
+                // Ask for the channel list now, as spice-gtk does at the
+                // end of `main_handle_init`. ryll used to wait for the
+                // first PING after INIT, which works only because
+                // spice-server runs its network test then; a server that
+                // sends no PING got no request and ryll waited forever.
+                // Once per channel: a repeated INIT does not ask again.
+                if !self.channels_requested {
+                    self.channels_requested = true;
+                    self.request_channels_list().await?;
+                }
             }
 
             main_server::MOUSE_MODE => {
@@ -1106,12 +1119,6 @@ impl MainChannel {
 
                 self.send_with_log(main_client::PONG, &response).await?;
                 self.pong_send_count = self.pong_send_count.saturating_add(1);
-
-                // Request channel list on first large ping
-                if ping.id > 0 && self.session_id.is_some() && !self.channels_requested {
-                    self.channels_requested = true;
-                    self.request_channels_list().await?;
-                }
 
                 // Last, so a truncated PING is torn down without leaving a
                 // sample behind and a stalled renderer cannot delay the PONG.
@@ -2583,6 +2590,80 @@ mod tests {
                 .handle_message(main_server::INIT, &[0; MainInit::SIZE - 1])
                 .await
                 .is_err());
+        }
+
+        /// A main INIT in server mouse mode with no agent, so that
+        /// handling it sends nothing but what the test is looking for.
+        fn init_bytes() -> Vec<u8> {
+            let mut payload = Vec::new();
+            MainInit {
+                session_id: 7,
+                display_channels_hint: 1,
+                supported_mouse_modes: MOUSE_MODE_SERVER,
+                current_mouse_mode: MOUSE_MODE_SERVER,
+                agent_connected: 0,
+                agent_tokens: 0,
+                multi_media_time: 0,
+                ram_hint: 0,
+            }
+            .write(&mut payload);
+            payload
+        }
+
+        const ATTACH_CHANNELS_BYTES: [u8; 6] = [
+            104, 0, // SPICE_MSGC_MAIN_ATTACH_CHANNELS
+            0, 0, 0, 0, // size
+        ];
+
+        // A server that sends no PING after INIT, as andris did, must
+        // still be asked for its channel list (#502).
+        #[tokio::test]
+        async fn init_asks_for_the_channel_list_without_waiting_for_a_ping() {
+            let (mut channel, mut peers) = test_main_channel().await;
+            channel
+                .handle_message(main_server::INIT, &init_bytes())
+                .await
+                .expect("INIT");
+            assert_eq!(peers.read_sent(6).await, ATTACH_CHANNELS_BYTES);
+        }
+
+        // Neither a repeated INIT nor spice-server's network-test PINGs
+        // ask a second time. The mouse-mode request sent last is a
+        // marker: had either sent ATTACH_CHANNELS again, its bytes would
+        // be read here instead.
+        #[tokio::test]
+        async fn the_channel_list_is_asked_for_once() {
+            let (mut channel, mut peers) = test_main_channel().await;
+            channel
+                .handle_message(main_server::INIT, &init_bytes())
+                .await
+                .expect("INIT");
+            assert_eq!(peers.read_sent(6).await, ATTACH_CHANNELS_BYTES);
+            channel
+                .handle_message(main_server::INIT, &init_bytes())
+                .await
+                .expect("second INIT");
+            let mut ping = Vec::new();
+            Ping {
+                id: 1,
+                timestamp: 2,
+                padding_len: 0,
+            }
+            .write(&mut ping);
+            channel
+                .handle_message(main_server::PING, &ping)
+                .await
+                .expect("PING");
+            let pong = peers.read_sent(6 + Ping::SIZE).await;
+            assert_eq!(&pong[..2], &[3, 0], "SPICE_MSGC_PONG");
+            channel
+                .maybe_request_client_mouse_mode(
+                    MOUSE_MODE_SERVER | MOUSE_MODE_CLIENT,
+                    MOUSE_MODE_SERVER,
+                )
+                .await
+                .expect("send");
+            assert_eq!(&peers.read_sent(2).await, &[105, 0], "MOUSE_MODE_REQUEST");
         }
 
         #[tokio::test]

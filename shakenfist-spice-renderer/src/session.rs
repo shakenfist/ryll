@@ -74,6 +74,14 @@ pub const INPUT_CHANNEL_SIZE: usize = 256;
 /// carries it — the secondary channels have no equivalent history.
 const MAIN_EVENT_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long `run_connection` waits, once the main channel has linked, for
+/// the server's `INIT` and then its `CHANNELS_LIST`. Without a bound, a
+/// server that never answers leaves the connection hanging with no error:
+/// main's own keepalive ends the wait only if the server sends nothing at
+/// all, so one that keeps sending other messages could hold it forever.
+/// The same as the link's own handshake timeout.
+const SESSION_READY_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// How long `run_headless` waits for the connection task to wind
 /// down once the session loop has stopped for some reason other
 /// than the task finishing (Ctrl+C, main-channel disconnect, the
@@ -332,12 +340,8 @@ pub async fn run_connection(
         tokio::spawn(async move { main_channel.run().await }),
     ));
 
-    let session_id = session_init_rx
-        .await
-        .map_err(|_| anyhow::anyhow!("main channel dropped before SessionInitialized"))?;
-    let channels = channels_avail_rx
-        .await
-        .map_err(|_| anyhow::anyhow!("main channel dropped before ChannelsAvailable"))?;
+    let (session_id, channels) =
+        await_session_ready(session_init_rx, channels_avail_rx, SESSION_READY_TIMEOUT).await?;
 
     info!(
         "Session {} ready with {} channels",
@@ -1197,6 +1201,37 @@ fn paste_failure_is_fatal(request_id: Option<&RequestId>) -> bool {
     request_id.is_none()
 }
 
+/// Wait for the main channel to report the server's `INIT` and then its
+/// `CHANNELS_LIST`, giving up after `timeout` in all. A server that
+/// answers neither is reported as an error naming what it never sent,
+/// rather than hung on.
+async fn await_session_ready(
+    session_init_rx: oneshot::Receiver<u32>,
+    channels_avail_rx: oneshot::Receiver<Vec<(ChannelType, u8)>>,
+    timeout: Duration,
+) -> Result<(u32, Vec<(ChannelType, u8)>)> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let session_id = tokio::time::timeout_at(deadline, session_init_rx)
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "the server sent no main INIT within {}s of the link",
+                timeout.as_secs()
+            )
+        })?
+        .map_err(|_| anyhow::anyhow!("main channel dropped before SessionInitialized"))?;
+    let channels = tokio::time::timeout_at(deadline, channels_avail_rx)
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "the server sent no CHANNELS_LIST within {}s of the link",
+                timeout.as_secs()
+            )
+        })?
+        .map_err(|_| anyhow::anyhow!("main channel dropped before ChannelsAvailable"))?;
+    Ok((session_id, channels))
+}
+
 /// What `run_connection` does with one entry of the server's channel
 /// list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1304,6 +1339,61 @@ fn connection_outcome(join: Option<ConnectionJoin>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A server that answers INIT but never sends CHANNELS_LIST used to
+    // leave `run_connection` waiting for ever (#502). The senders are
+    // held, so only the deadline can end the wait.
+    #[tokio::test(start_paused = true)]
+    async fn a_server_that_never_lists_its_channels_times_out() {
+        let (init_tx, init_rx) = oneshot::channel();
+        let (_channels_tx, channels_rx) = oneshot::channel();
+        init_tx.send(7).unwrap();
+        let err = await_session_ready(init_rx, channels_rx, Duration::from_secs(15))
+            .await
+            .expect_err("no CHANNELS_LIST must time out");
+        assert!(err.to_string().contains("CHANNELS_LIST"), "{err}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_server_that_never_sends_init_times_out() {
+        let (_init_tx, init_rx) = oneshot::channel::<u32>();
+        let (_channels_tx, channels_rx) = oneshot::channel();
+        let err = await_session_ready(init_rx, channels_rx, Duration::from_secs(15))
+            .await
+            .expect_err("no INIT must time out");
+        assert!(err.to_string().contains("INIT"), "{err}");
+    }
+
+    // The timeout covers both waits together, not each in turn: an
+    // INIT that arrives late leaves only what is left of the budget for
+    // the channel list.
+    #[tokio::test(start_paused = true)]
+    async fn the_two_waits_share_one_deadline() {
+        let (init_tx, init_rx) = oneshot::channel();
+        let (channels_tx, channels_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            init_tx.send(7).unwrap();
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            let _ = channels_tx.send(vec![(ChannelType::Display, 0)]);
+        });
+        let err = await_session_ready(init_rx, channels_rx, Duration::from_secs(15))
+            .await
+            .expect_err("twenty seconds in all is past the deadline");
+        assert!(err.to_string().contains("CHANNELS_LIST"), "{err}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_prompt_server_is_ready() {
+        let (init_tx, init_rx) = oneshot::channel();
+        let (channels_tx, channels_rx) = oneshot::channel();
+        init_tx.send(7).unwrap();
+        channels_tx.send(vec![(ChannelType::Display, 0)]).unwrap();
+        let ready = await_session_ready(init_rx, channels_rx, Duration::from_secs(15))
+            .await
+            .expect("both arrived");
+        assert_eq!(ready, (7, vec![(ChannelType::Display, 0)]));
+    }
 
     // An external driver that pipelines two `paste` requests gets one
     // refusal per request and carries on; before this split, that
