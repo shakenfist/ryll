@@ -414,13 +414,6 @@ impl RyllApp {
         true
     }
 
-    /// Drive the `ReconnectState` machine in response to a critical
-    /// disconnect (Main/Display/Inputs going down, or any
-    /// `ChannelEvent::Error`). Callers are responsible for writing
-    /// the disconnect snapshot before invoking this — keeping the
-    /// snapshot at the call site avoids double-writing when the
-    /// `Disconnected` handler has already snapshotted for the
-    /// channel-storm path.
     /// Forget the session that has just ended: clear surfaces and
     /// cursor so the next paint shows a clean canvas, and tell the
     /// auto-snapshot task to stop capturing a dead session.
@@ -448,9 +441,14 @@ impl RyllApp {
     /// `handle_critical_disconnect`.
     pub(super) fn handle_server_ended(&mut self) {
         let now = Instant::now();
-        let notice = server_notice(self.last_main_notice.as_ref(), now);
+        // Taken, so that it cannot explain a later session's end.
+        let notice = server_notice(self.last_main_notice.take().as_ref(), now);
         self.clear_ended_session();
-        let Some(new_state) = self.reconnect_state.on_server_ended(notice) else {
+        let policy = self.reconnect_policy();
+        let Some(new_state) =
+            self.reconnect_state
+                .on_server_ended(notice, &policy, SystemTime::now())
+        else {
             return;
         };
         info!("app: the server ended the session; not reconnecting");
@@ -463,6 +461,13 @@ impl RyllApp {
         self.reconnect_state = new_state;
     }
 
+    /// Drive the `ReconnectState` machine in response to a critical
+    /// disconnect (Main/Display/Inputs going down, or any
+    /// `ChannelEvent::Error`). Callers are responsible for writing
+    /// the disconnect snapshot before invoking this — keeping the
+    /// snapshot at the call site avoids double-writing when the
+    /// `Disconnected` handler has already snapshotted for the
+    /// channel-storm path.
     pub(super) fn handle_critical_disconnect(&mut self, message: String) {
         let awaiting = self.awaiting_reconnect_outcome;
         let now = Instant::now();

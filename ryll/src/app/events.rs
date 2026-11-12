@@ -172,6 +172,8 @@ impl RyllApp {
         info!("app: session {} initialized", session_id);
         self.current_session_id = Some(session_id);
         self.connected = true;
+        // A notice from the session before cannot explain this one's end.
+        self.last_main_notice = None;
         // A fresh successful link clears any pending
         // reconnect state. Whether this resulted from
         // an auto-retry or a user clicking Reconnect,

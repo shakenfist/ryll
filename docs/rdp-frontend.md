@@ -248,15 +248,17 @@ brightness. Text on the clipboard is kept and reaches the guest once it is
 back.
 
 ryll exits, disconnecting the client, when the first SPICE attempt never
-reaches a session, when the three retries are used up, when the `.vv` file's
-ticket is single-use or has expired so there can be no retry, and on
-Ctrl+C. The exit status:
+reaches a session, when the three retries are used up, when the server ends
+the session on purpose with the main channel's `DISCONNECTING`, when the
+`.vv` file's ticket is single-use or has expired so there can be no retry,
+and on Ctrl+C. The exit status:
 
 | Ended by | Status |
 |----------|--------|
 | Ctrl+C (SIGINT) | 0 |
 | The first SPICE attempt never reached a session | 1, with that attempt's error |
 | The retries used up | 1 |
+| The server ended the session on purpose (`DISCONNECTING`) | 0 |
 | The ticket is single-use or expired when the session is lost | 1 if the lost session ended with an error, otherwise 0 |
 
 [session-lifecycle.md](session-lifecycle.md#rdp-mode) has the details,

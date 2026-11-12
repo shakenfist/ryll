@@ -64,7 +64,9 @@ use agent_state::{mac_paste_chord, paste_hint, AgentState};
 use bug_report::{PendingBugReport, PendingDisconnectReport};
 use connection::build_connection_runtime;
 use notification_snapshots::NotificationSnapshotStore;
-use reconnect::{forbid_retry_modal, format_expiry_local, ModalVariant, ReconnectState};
+use reconnect::{
+    forbid_retry_modal, format_expiry_local, server_ended_body, ModalVariant, ReconnectState,
+};
 use resize::{
     compute_auto_resize, compute_outgoing_resize, resolution_notification_due, send_guest_size,
     RESOLUTION_NOTIFY_DEBOUNCE, STATS_BAR_HEIGHT,
@@ -2899,16 +2901,10 @@ impl eframe::App for RyllApp {
                     format!("Could not connect to {}.\n\n{}", self.target, error),
                     true,
                 ),
-                ModalVariant::ServerEnded { notice } => (
-                    "Session ended by the server",
-                    format!(
-                        "{}\n\nThe server ended this session on purpose, so ryll has \
-                         not reconnected. Reconnecting takes the session back from \
-                         whoever has it now.",
-                        notice.as_deref().unwrap_or("The server gave no reason.")
-                    ),
-                    true,
-                ),
+                ModalVariant::ServerEnded { notice, ticket } => {
+                    let (body, allow_reconnect) = server_ended_body(notice.as_deref(), *ticket);
+                    ("Session ended by the server", body, allow_reconnect)
+                }
             };
             egui::Window::new(title)
                 .collapsible(false)

@@ -423,15 +423,16 @@ where
             (Ok(()), false) => warn!("rdp: SPICE attempt {}: no session", number),
             (Err(e), false) => warn!("rdp: SPICE attempt {}: failed: {:#}", number, e),
         }
-        if number == 1 && !end.reached_session {
-            return end.result.context("the SPICE session ended");
-        }
         // Reconnecting would take the session back from whoever the
         // server gave it to, who may then retry in turn. Ending the run
-        // is not a failure: ryll was told to go.
+        // is not a failure: ryll was told to go, even before a session
+        // began.
         if end.server_ended {
             warn!("rdp: the SPICE server ended the session on purpose; not reconnecting");
             return Ok(());
+        }
+        if number == 1 && !end.reached_session {
+            return end.result.context("the SPICE session ended");
         }
 
         failed = if end.reached_session {
@@ -1029,6 +1030,24 @@ mod tests {
         .await
         .expect("a deliberate end is not a failure");
         assert_eq!(script.started(), [(1, secs(0)), (2, secs(1))]);
+    }
+
+    // Being told to go before a session began is still not a failure,
+    // though the connection then ends with an error of its own.
+    #[tokio::test(start_paused = true)]
+    async fn a_first_attempt_the_server_ended_is_not_a_failure() {
+        let script = Script::new(vec![AttemptEnd {
+            server_ended: true,
+            ..no_session("the server closed the connection")
+        }]);
+        supervised(
+            ReconnectPolicy::default(),
+            CancellationToken::new(),
+            script.clone(),
+        )
+        .await
+        .expect("a deliberate end is not a failure");
+        assert_eq!(script.started(), [(1, secs(0))]);
     }
 
     #[tokio::test(start_paused = true)]

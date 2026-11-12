@@ -979,6 +979,21 @@ impl MainChannel {
                     let _ = sig.send(init.session_id);
                 }
 
+                // Ask for the channel list now, as spice-gtk does in
+                // `main_handle_init`. ryll used to wait for the first
+                // PING after INIT, which works only because spice-server
+                // runs its network test then; a server that sends no
+                // PING got no request and ryll waited forever. It goes
+                // before the event emit below, which can wait on a slow
+                // frontend, so that a local stall does not eat the
+                // session's deadline for the list and then read as the
+                // server's fault. Once per channel: a repeated INIT does
+                // not ask again.
+                if !self.channels_requested {
+                    self.channels_requested = true;
+                    self.request_channels_list().await?;
+                }
+
                 if self.agent_connected {
                     self.connect_agent().await?;
                 }
@@ -1014,17 +1029,6 @@ impl MainChannel {
                     init.current_mouse_mode,
                 )
                 .await?;
-
-                // Ask for the channel list now, as spice-gtk does at the
-                // end of `main_handle_init`. ryll used to wait for the
-                // first PING after INIT, which works only because
-                // spice-server runs its network test then; a server that
-                // sends no PING got no request and ryll waited forever.
-                // Once per channel: a repeated INIT does not ask again.
-                if !self.channels_requested {
-                    self.channels_requested = true;
-                    self.request_channels_list().await?;
-                }
             }
 
             main_server::MOUSE_MODE => {
@@ -2681,6 +2685,35 @@ mod tests {
                 .await
                 .expect("INIT");
             assert_eq!(peers.read_sent(6).await, ATTACH_CHANNELS_BYTES);
+        }
+
+        // A frontend that has stopped draining events holds up the INIT
+        // handler's emit. The request for the channel list must already
+        // be on the wire by then, or the stall eats the session's
+        // deadline for the list and is reported as the server's fault.
+        #[tokio::test]
+        async fn a_stalled_frontend_does_not_hold_up_the_channel_list_request() {
+            let (mut channel, mut peers) = test_main_channel().await;
+            while channel
+                .events
+                .tx
+                .try_send(ChannelEvent::DisplayMark {
+                    produced_at_secs: 0.0,
+                })
+                .is_ok()
+            {}
+            let init = init_bytes();
+            let handler = channel.handle_message(main_server::INIT, &init);
+            tokio::pin!(handler);
+            let sent = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::select! {
+                    sent = peers.read_sent(6) => sent,
+                    _ = &mut handler => panic!("INIT was handled although no event could be queued"),
+                }
+            })
+            .await
+            .expect("ATTACH_CHANNELS was sent while the event queue was full");
+            assert_eq!(sent, ATTACH_CHANNELS_BYTES);
         }
 
         // Neither a repeated INIT nor spice-server's network-test PINGs

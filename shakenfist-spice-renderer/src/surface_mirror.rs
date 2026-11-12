@@ -364,8 +364,12 @@ impl SurfaceMirror {
     /// apply. A surface already held at the ledger's size keeps its
     /// pixels. Every surface is then marked fully damaged, since the
     /// draws that were missed are not restored. Events the mirror goes
-    /// on to receive may repeat some the ledger already reflects; a
-    /// repeated create or destroy leaves the same surfaces in the end.
+    /// on to receive may repeat some the ledger already reflects: the
+    /// broadcast channel still holds a suffix of the stream the mirror
+    /// has just been brought past. Replaying it can briefly re-add or
+    /// re-drop a surface, but the suffix is in order and the ledger
+    /// reflects at least its end, so the mirror ends with the ledger's
+    /// surfaces.
     pub fn resync(&mut self, ledger: &SurfaceLedger) {
         self.surfaces
             .retain(|key, _| ledger.surfaces.contains_key(key));
@@ -468,6 +472,13 @@ fn refusal(held: usize, key: (u8, u32), width: u32, height: u32) -> Option<Refus
 /// `ImageReady`'s auto-create by the same rules as
 /// [`SurfaceMirror::apply_event`], so it holds the surfaces a mirror
 /// that missed nothing would hold.
+///
+/// It also forgets every surface at `SessionInitialized`, which
+/// `apply_event` does not do. A frontend that keeps one bus across
+/// reconnects (the RDP bridge) empties its mirror itself when a new
+/// session begins, and the surfaces of the session that ended do not
+/// exist on the server any more: a resync must not bring them back,
+/// or let them crowd a new session's surfaces out of the pixel budget.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SurfaceLedger {
     /// Requested `(width, height)` by `(display_channel_id,
@@ -485,6 +496,10 @@ impl SurfaceLedger {
     /// Record what `event` does to the set of surfaces, if anything.
     pub fn observe(&mut self, event: &ChannelEvent) {
         match event {
+            // A new session starts with no surfaces. Its display
+            // channels are opened only after the main channel has
+            // handled INIT, so none of its surfaces precede this.
+            ChannelEvent::SessionInitialized(_) => self.surfaces.clear(),
             ChannelEvent::SurfaceCreated {
                 display_channel_id,
                 surface_id,
@@ -1157,6 +1172,30 @@ mod tests {
             vec![((0, 0), (8, 8)), ((0, 1), (6, 2)), ((0, 2), (6, 4))]
         );
         assert_eq!(sizes(&resynced), sizes(&mirror));
+    }
+
+    // A reconnect on a bus that outlives the session must not leave
+    // the ended session's surfaces in the ledger, or a resync would put
+    // them back beside the new session's, or recreate a surface the
+    // new session holds at another size at the old one.
+    #[test]
+    fn a_new_session_empties_the_ledger() {
+        let mut ledger = SurfaceLedger::new();
+        for event in [
+            ChannelEvent::SessionInitialized(1),
+            created_event(0, 8, 8),
+            created_event(1, 4, 4),
+            ChannelEvent::SessionInitialized(2),
+            created_event(0, 6, 6),
+        ] {
+            ledger.observe(&event);
+        }
+        // What the RDP bridge's mirror holds: emptied when the second
+        // session began, then fed that session's surface.
+        let mut mirror = SurfaceMirror::new();
+        mirror.apply_event(&created_event(0, 6, 6));
+        mirror.resync(&ledger);
+        assert_eq!(sizes(&mirror), vec![((0, 0), (6, 6))]);
     }
 
     // A resync drops what the ledger does not hold, creates what it

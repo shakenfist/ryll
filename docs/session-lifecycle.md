@@ -224,10 +224,14 @@ straight back from that client, which may then retry in turn, so
 neither could keep the desktop.
 
 So a `DISCONNECTING` sends the GUI straight to
-`Modal(ServerEnded { notice })` (`RyllApp::handle_server_ended`), with
-no retry. `notice` is the text of a main-channel server `NOTIFY` that
-arrived within five seconds before it, if there was one. The modal
-keeps its Reconnect button: pressing it is a deliberate takeover.
+`Modal(ServerEnded { notice, ticket })` (`RyllApp::handle_server_ended`),
+with no retry. `notice` is the text of a main-channel server `NOTIFY`
+that arrived within five seconds before it, if there was one, cut to
+500 characters; a new session forgets it, so it cannot explain a later
+session's end. The modal offers a Reconnect button, since pressing it is
+a deliberate takeover, unless `ticket` records that the ticket policy
+forbids any further link (`ReconnectPolicy::forbid_retry`). Then it
+says the ticket was single-use or has expired instead.
 
 The end is sticky for the session. The display and inputs channels the
 server closes after `DISCONNECTING` are ignored, even under a ticket
@@ -288,8 +292,9 @@ The `Modal` variant carries one of five discriminants:
   Reconnect failed before it reached a session (see above).
   Buttons: Reconnect, Close, whatever the ticket policy says,
   since nothing was consumed that ryll knows of.
-- `ServerEnded { notice }` — the server sent `DISCONNECTING`
-  (see above). Buttons: Reconnect, Close.
+- `ServerEnded { notice, ticket }` — the server sent
+  `DISCONNECTING` (see above). Buttons: Reconnect, Close; Close
+  only when the ticket policy forbids a further link.
 
 `ReconnectPolicy::forbid_retry(now_wall)` consults the two
 ticket-related `Config` fields and says why retry would be
@@ -376,7 +381,8 @@ SPICE in 4s (retry 2 of 3)") and, at the end, why ryll gave up.
   `DISCONNECTING`, for instance because another client took it over (see
   [When the server ends the session on
   purpose](#when-the-server-ends-the-session-on-purpose)). No retry is
-  made, and ryll exits 0: it was told to go, which is not a failure.
+  made, and ryll exits 0: it was told to go, which is not a failure. That
+  holds on the first attempt too, even if no session had begun.
 - The ticket is single-use or expired when the session is lost, or expires
   during a wait. No retry is made. The exit status follows the lost
   session's result: non-zero if it ended with an error, zero if it ended
