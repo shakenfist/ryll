@@ -6,6 +6,7 @@ use std::time::Instant;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
+use crate::display::MAX_SURFACE_DIMENSION;
 use crate::mm_clock::MmClock;
 use crate::opcode_counters::OpcodeCounters;
 use crate::session_state::{PrimarySurface, SessionState};
@@ -151,9 +152,15 @@ fn agent_monitors_config(monitors: u8, width: u32, height: u32) -> MonitorsConfi
             height,
             width,
             depth: 32,
-            // The wire field is an int32. ryll has always computed the
-            // position as a u32, and a cast keeps its bits.
-            x: if active > 1 { (width * i) as i32 } else { 0 },
+            // The wire field is an int32. `note_display_size` keeps
+            // each side within MAX_SURFACE_DIMENSION, so with at most
+            // 255 monitors the product fits easily; it is computed
+            // wide and saturated anyway, so no width can overflow it.
+            x: if active > 1 {
+                i32::try_from(u64::from(width) * u64::from(i)).unwrap_or(i32::MAX)
+            } else {
+                0
+            },
             y: 0,
         })
         .collect();
@@ -1466,6 +1473,19 @@ impl MainChannel {
     fn note_display_size(&mut self, size: DisplaySize) {
         match size {
             DisplaySize::Requested(width, height) => {
+                // Every frontend's size request passes through here.
+                // The GUI and the control socket already refuse a side
+                // over the largest surface ryll displays; web mode's
+                // browser viewport and the RDP client's size do not,
+                // and the agent would be asked for monitors that
+                // cannot be displayed.
+                if width > MAX_SURFACE_DIMENSION || height > MAX_SURFACE_DIMENSION {
+                    warn!(
+                        "main: ignoring display size request {}x{}: each side must be at most {}",
+                        width, height, MAX_SURFACE_DIMENSION
+                    );
+                    return;
+                }
                 if self.last_sent_monitors_config == Some((width, height)) {
                     // Back to the size the agent already has: a
                     // different size still pending is superseded, not
@@ -2388,17 +2408,25 @@ mod tests {
             0x38, 0x04, 0, 0,  0x80, 0x07, 0, 0,  32, 0, 0, 0,  0x80, 0x07, 0, 0,  0, 0, 0, 0,
         ];
         assert_eq!(monitors_config_bytes(2, 1920, 1080), two);
+    }
 
-        // ryll computes positions as u32. One past i32::MAX keeps its bits
-        // in the int32 field rather than saturating.
-        #[rustfmt::skip]
-        let wide = vec![
-            2, 0, 0, 0,
-            1, 0, 0, 0,
-            1, 0, 0, 0,  0x00, 0x5e, 0xd0, 0xb2,  32, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,
-            1, 0, 0, 0,  0x00, 0x5e, 0xd0, 0xb2,  32, 0, 0, 0,  0x00, 0x5e, 0xd0, 0xb2,  0, 0, 0, 0,
-        ];
-        assert_eq!(monitors_config_bytes(2, 3_000_000_000, 1), wide);
+    #[test]
+    fn agent_monitors_config_positions_cannot_overflow() {
+        // note_display_size refuses widths like this, but the position
+        // arithmetic must not depend on that: u32::MAX * 254 overflows
+        // u32, which used to panic a debug build and wrap in release.
+        let config = agent_monitors_config(255, u32::MAX, 1);
+        assert_eq!(config.monitors.len(), 255);
+        assert_eq!(config.monitors[1].x, i32::MAX);
+        assert_eq!(config.monitors[254].x, i32::MAX);
+
+        // At the largest size note_display_size admits, every position
+        // is exact.
+        let config = agent_monitors_config(255, crate::display::MAX_SURFACE_DIMENSION, 1);
+        assert_eq!(
+            config.monitors[254].x,
+            (crate::display::MAX_SURFACE_DIMENSION * 254) as i32
+        );
     }
 
     #[test]
@@ -3344,6 +3372,19 @@ mod tests {
                 agent_monitors_config(1, 1280, 776)
             );
             assert_eq!(channel.last_sent_monitors_config, Some((1280, 776)));
+        }
+
+        #[tokio::test]
+        async fn an_oversized_display_size_request_is_ignored() {
+            let (mut channel, _peers) = test_main_channel().await;
+            let max = MAX_SURFACE_DIMENSION;
+            channel.note_display_size(DisplaySize::Requested(max + 1, 768));
+            channel.note_display_size(DisplaySize::Requested(1024, max + 1));
+            assert_eq!(channel.pending_monitors_config, None);
+            assert_eq!(channel.resize_debounce, None);
+            // The largest admitted size is still taken.
+            channel.note_display_size(DisplaySize::Requested(max, max));
+            assert_eq!(channel.pending_monitors_config, Some((max, max)));
         }
 
         #[tokio::test]

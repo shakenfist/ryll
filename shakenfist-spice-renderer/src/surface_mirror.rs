@@ -17,10 +17,29 @@
 
 use std::collections::HashMap;
 
+use shakenfist_spice_protocol::warn_once;
 use tracing::{debug, info};
 
 use crate::channels::ChannelEvent;
-use crate::display::DisplaySurface;
+use crate::display::{DisplaySurface, MAX_SURFACE_PIXELS};
+
+/// Surface ids a mirror accepts are below this.
+///
+/// spice-server keeps its surfaces in a fixed array of `NUM_SURFACES`
+/// (1024, `server/display-limits.h`) and asserts the id is below it
+/// before sending `SURFACE_CREATE`, so a larger id never comes from a
+/// real server. Refusing it bounds how many surfaces one display
+/// channel can make a mirror hold.
+pub const MAX_SURFACE_ID: u32 = 1024;
+
+/// The most pixels a mirror holds across all its surfaces.
+///
+/// Twice the per-surface cap, [`MAX_SURFACE_PIXELS`]: room for the
+/// largest primary surface plus as much again in other heads and
+/// off-screen surfaces, which a QXL guest backs with its video memory
+/// (64 MiB by default). Without it, fresh surface ids at the
+/// per-surface cap would each commit another 256 MiB.
+pub const MAX_TOTAL_SURFACE_PIXELS: usize = 2 * MAX_SURFACE_PIXELS;
 
 /// What [`SurfaceMirror::apply_event`] did with one event.
 ///
@@ -47,6 +66,13 @@ pub enum DrawOutcome {
     },
     /// `SurfaceDestroyed` removed the surface at `key`.
     Destroyed { key: (u8, u32) },
+    /// `SurfaceCreated`, or an `ImageReady` that would have
+    /// auto-created a surface, was refused: its id is not below
+    /// [`MAX_SURFACE_ID`], or it would take the mirror past
+    /// [`MAX_TOTAL_SURFACE_PIXELS`]. No surface is held at `key`
+    /// afterwards; a refused create also drops the surface it would
+    /// have replaced, which the server no longer has.
+    Refused { key: (u8, u32) },
     /// A draw op landed on the existing surface at `key`.
     Drawn { key: (u8, u32) },
     /// A draw op, or a `SurfaceDestroyed`, named a surface the
@@ -98,6 +124,12 @@ impl SurfaceMirror {
                     display_channel_id, surface_id, width, height
                 );
                 let key = (*display_channel_id, *surface_id);
+                // The surface this create replaces is gone server-side
+                // whether or not the new one is admitted.
+                self.surfaces.remove(&key);
+                if !self.admits(key, *width, *height) {
+                    return DrawOutcome::Refused { key };
+                }
                 self.surfaces
                     .insert(key, DisplaySurface::new(*surface_id, *width, *height));
                 DrawOutcome::Created {
@@ -141,6 +173,15 @@ impl SurfaceMirror {
                 // SURFACE_CREATE (QEMU does this for the primary surface).
                 // Sizes saturate so a hostile left + width cannot overflow.
                 let key = (*display_channel_id, *surface_id);
+                if !self.surfaces.contains_key(&key)
+                    && !self.admits(
+                        key,
+                        left.saturating_add(*width),
+                        top.saturating_add(*height),
+                    )
+                {
+                    return DrawOutcome::Refused { key };
+                }
                 let mut outcome = DrawOutcome::Drawn { key };
                 let entry = self.surfaces.entry(key).or_insert_with(|| {
                     let surf_w = left.saturating_add(*width);
@@ -273,6 +314,46 @@ impl SurfaceMirror {
         }
     }
 
+    /// Whether a new surface at `key`, asked for as `width` x
+    /// `height`, may be created: its id must be below
+    /// [`MAX_SURFACE_ID`], and its clamped size must fit within
+    /// [`MAX_TOTAL_SURFACE_PIXELS`] beside the surfaces already held.
+    /// `key` must not be held already. Logs, once, why not.
+    fn admits(&self, key: (u8, u32), width: u32, height: u32) -> bool {
+        if key.1 >= MAX_SURFACE_ID {
+            warn_once!(
+                "display:decode_failure:surface:id_out_of_range",
+                "surface_mirror: refusing surface {}:{}: ids must be below {}",
+                key.0,
+                key.1,
+                MAX_SURFACE_ID
+            );
+            return false;
+        }
+        let (w, h) = DisplaySurface::clamped_size(width, height);
+        let held: usize = self
+            .surfaces
+            .values()
+            .map(|s| s.width as usize * s.height as usize)
+            .sum();
+        let wanted = w as usize * h as usize;
+        if held + wanted > MAX_TOTAL_SURFACE_PIXELS {
+            warn_once!(
+                "display:decode_failure:surface:budget_exceeded",
+                "surface_mirror: refusing surface {}:{} ({}x{}): {} pixels already held, \
+                 and the limit across all surfaces is {}",
+                key.0,
+                key.1,
+                w,
+                h,
+                held,
+                MAX_TOTAL_SURFACE_PIXELS
+            );
+            return false;
+        }
+        true
+    }
+
     /// Key of the primary surface. SPICE convention is
     /// `(0, 0)`; if that's absent (rare, but possible during
     /// teardown) any one surface key is returned so callers
@@ -372,6 +453,117 @@ mod tests {
         assert_eq!(m.surfaces.len(), 1);
         let s = m.primary_surface().expect("primary present");
         assert_eq!(s.size(), (64, 32));
+    }
+
+    fn create(m: &mut SurfaceMirror, surface_id: u32, width: u32, height: u32) -> DrawOutcome {
+        m.apply_event(&ChannelEvent::SurfaceCreated {
+            display_channel_id: 0,
+            surface_id,
+            width,
+            height,
+        })
+    }
+
+    #[test]
+    fn surface_id_at_or_above_the_server_limit_is_refused() {
+        let mut m = SurfaceMirror::new();
+        assert!(matches!(
+            create(&mut m, MAX_SURFACE_ID - 1, 8, 8),
+            DrawOutcome::Created { .. }
+        ));
+        assert_eq!(
+            create(&mut m, MAX_SURFACE_ID, 8, 8),
+            DrawOutcome::Refused {
+                key: (0, MAX_SURFACE_ID)
+            }
+        );
+        assert_eq!(m.surfaces.len(), 1);
+    }
+
+    #[test]
+    fn draw_to_an_out_of_range_id_does_not_auto_create() {
+        let mut m = SurfaceMirror::new();
+        let outcome = m.apply_event(&ChannelEvent::ImageReady {
+            display_channel_id: 0,
+            surface_id: u32::MAX,
+            left: 0,
+            top: 0,
+            width: 2,
+            height: 2,
+            pixels: vec![0u8; 16],
+            image_id: 0,
+            produced_at_secs: 0.0,
+        });
+        assert_eq!(outcome, DrawOutcome::Refused { key: (0, u32::MAX) });
+        assert!(m.surfaces.is_empty());
+    }
+
+    #[test]
+    fn surfaces_past_the_total_pixel_budget_are_refused() {
+        // Each create asks for 16384 x 16384, which clamps to the
+        // per-surface pixel cap. Two of those fill the budget.
+        let mut m = SurfaceMirror::new();
+        let side = crate::display::MAX_SURFACE_DIMENSION;
+        assert!(matches!(
+            create(&mut m, 1, side, side),
+            DrawOutcome::Created { .. }
+        ));
+        assert!(matches!(
+            create(&mut m, 2, side, side),
+            DrawOutcome::Created { .. }
+        ));
+        assert_eq!(
+            create(&mut m, 3, side, side),
+            DrawOutcome::Refused { key: (0, 3) }
+        );
+        // So is a draw that would auto-create one more.
+        let outcome = m.apply_event(&ChannelEvent::ImageReady {
+            display_channel_id: 0,
+            surface_id: 4,
+            left: 0,
+            top: 0,
+            width: 1,
+            height: 1,
+            pixels: vec![0u8; 4],
+            image_id: 0,
+            produced_at_secs: 0.0,
+        });
+        assert_eq!(outcome, DrawOutcome::Refused { key: (0, 4) });
+        let held: usize = m
+            .surfaces
+            .values()
+            .map(|s| s.width as usize * s.height as usize)
+            .sum();
+        assert_eq!(held, MAX_TOTAL_SURFACE_PIXELS);
+        // Destroying one makes room again.
+        m.apply_event(&ChannelEvent::SurfaceDestroyed {
+            display_channel_id: 0,
+            surface_id: 1,
+        });
+        assert!(matches!(
+            create(&mut m, 3, side, side),
+            DrawOutcome::Created { .. }
+        ));
+    }
+
+    #[test]
+    fn recreating_a_surface_does_not_count_the_one_it_replaces() {
+        // A primary re-created at the per-surface cap, over and over,
+        // replaces itself; it must not be refused for holding the
+        // budget against itself.
+        let mut m = SurfaceMirror::new();
+        let side = crate::display::MAX_SURFACE_DIMENSION;
+        assert!(matches!(
+            create(&mut m, 1, side, side),
+            DrawOutcome::Created { .. }
+        ));
+        for _ in 0..3 {
+            assert!(matches!(
+                create(&mut m, 0, side, side),
+                DrawOutcome::Created { .. }
+            ));
+        }
+        assert_eq!(m.surfaces.len(), 2);
     }
 
     #[test]

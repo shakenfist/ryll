@@ -252,7 +252,9 @@ impl RyllApp {
                     }
                 }
             }
-            DrawOutcome::Destroyed { key } => self.textures.remove(key),
+            DrawOutcome::Destroyed { key } | DrawOutcome::Refused { key } => {
+                self.textures.remove(key)
+            }
             DrawOutcome::Drawn { .. }
             | DrawOutcome::UnknownSurface { .. }
             | DrawOutcome::NotDisplay => {}

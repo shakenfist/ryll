@@ -129,8 +129,17 @@ pub fn decompress_lz(data: &[u8]) -> Result<DecompressedImage> {
 
             pixel_offset += 1;
 
-            // Copy pixels from earlier in output
-            let src_start = out_idx.wrapping_sub(pixel_offset * 4);
+            // Copy pixels from earlier in output. A reference before
+            // the start of the image is malformed; refuse it rather
+            // than wrap: a wrapped source one pixel before the start
+            // overflows the `src + 4` bounds check below.
+            let Some(src_start) = out_idx.checked_sub(pixel_offset * 4) else {
+                return Err(anyhow!(
+                    "LZ back-reference {} pixels before pixel {} is before the image start",
+                    pixel_offset,
+                    out_idx / 4
+                ));
+            };
 
             if pixel_offset == 1 {
                 // Repeat the directly previous pixel
@@ -199,6 +208,46 @@ mod tests {
 
         let err = decompress_lz(&data).expect_err("absurd dimensions must be refused");
         assert!(err.to_string().contains("65535x65535"), "{}", err);
+    }
+
+    /// A 2x1 top-down LZ image: one literal pixel, then `refs`.
+    fn lz_image_2x1(refs: &[u8]) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(LZ_MAGIC);
+        data.extend_from_slice(&[0, 1]); // Version major
+        data.extend_from_slice(&[0, 0]); // Version minor
+        data.extend_from_slice(&[0, 0, 0]); // Padding
+        data.push(0); // Type
+        data.extend_from_slice(&2u32.to_be_bytes()); // Width
+        data.extend_from_slice(&1u32.to_be_bytes()); // Height
+        data.extend_from_slice(&8u32.to_be_bytes()); // Stride
+        data.extend_from_slice(&1u32.to_be_bytes()); // Top down
+        data.extend_from_slice(&[0x00, 10, 20, 30]); // One literal BGR pixel
+        data.extend_from_slice(refs);
+        data
+    }
+
+    #[test]
+    fn lz_back_reference_before_image_start_is_refused() {
+        // ctrl 0x20: a one-pixel back-reference; offset byte 1 makes
+        // the distance 2 pixels from pixel 1, one before the start.
+        // This used to panic on an overflowing bounds check.
+        let err = decompress_lz(&lz_image_2x1(&[0x20, 0x01]))
+            .expect_err("a reference before the image start must be refused");
+        assert!(
+            err.to_string().contains("before the image start"),
+            "{}",
+            err
+        );
+    }
+
+    #[test]
+    fn lz_back_reference_to_previous_pixel_still_decodes() {
+        // The same image with offset byte 0: a distance of one pixel,
+        // which repeats the literal. The refusal above must not catch
+        // this legitimate reference.
+        let img = decompress_lz(&lz_image_2x1(&[0x20, 0x00])).expect("valid reference");
+        assert_eq!(img.pixels, vec![30, 20, 10, 255, 30, 20, 10, 255]);
     }
 
     #[test]
