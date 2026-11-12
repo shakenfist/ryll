@@ -798,7 +798,7 @@ impl CaptureSession {
     /// self-describing when shared for bug reports, then starts the
     /// pcap and video writer threads. Needs no tokio runtime.
     ///
-    /// `target` is [`ConnectionConfig::display_target`]
+    /// `target` is [`shakenfist_spice_protocol::ConnectionConfig::display_target`]
     /// (`shakenfist_spice_protocol::ConnectionConfig`), not a raw
     /// `host:port`: under an HTTP CONNECT tunnel (a Proxmox `.vv`'s
     /// `proxy=`), `host` is a signed pseudo-hostname, and a capture

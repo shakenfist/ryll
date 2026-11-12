@@ -284,7 +284,7 @@ impl RyllApp {
     /// these threads — every caller runs on the egui UI thread and an
     /// in-flight zip write can take seconds; `retire_auto_snapshot_task`
     /// bounds them by counting instead.
-    pub(super) fn signal_auto_snapshot_retire(&self) {
+    fn signal_auto_snapshot_retire(&self) {
         if let Some(cancel) = &self.auto_snapshot_cancel {
             cancel.store(true, Ordering::Relaxed);
         }
@@ -299,7 +299,7 @@ impl RyllApp {
     /// [`MAX_RETIRING_AUTO_SNAPSHOT_THREADS`] — which is the point:
     /// without it the cap would eventually refuse a respawn on the
     /// strength of threads that exited long ago.
-    pub(super) fn reap_auto_snapshot_threads(&mut self) {
+    fn reap_auto_snapshot_threads(&mut self) {
         self.auto_snapshot_retiring
             .retain(|handle| !handle.is_finished());
     }
