@@ -145,7 +145,8 @@ its "Local Resources" tab.
   to the guest's size.
 - **Clipboard**: text, both ways, between the client and the guest (the guest
   needs vdagent). Line endings are converted between the client's CRLF and
-  the guest's LF. A client's clipboard reaches the guest when it connects.
+  the LF ryll uses internally, and again to CRLF for a guest whose agent
+  asks for it, such as a Windows guest. A client's clipboard reaches the guest when it connects.
   Text the guest copied before the client connected is not offered to it;
   text copied afterwards is. Text the client copies that is longer than
   100 MiB, the most ryll can send a guest's vdagent in one message, is not

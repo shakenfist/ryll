@@ -230,6 +230,20 @@ guest that booted without its agent would, when the agent started, be
 resized to the window's size from before the fit, away from the size
 it chose.
 
+#### Clipboard line endings
+
+The guest agent says which line ending its clipboard text uses by
+announcing `VD_AGENT_CAP_GUEST_LINEEND_LF` or
+`VD_AGENT_CAP_GUEST_LINEEND_CRLF` (a Windows guest announces CRLF), and
+leaves any conversion to the client. Clipboard text on ryll's host side
+always uses LF, in every mode. For a guest that announced CRLF, the main
+channel turns each LF into CRLF on the way to the guest, leaving a CRLF
+that is already there alone, and turns each CRLF back into LF on the way
+out. A lone CR is passed through in both directions. spice-gtk does the
+same with `spice_unix2dos` and `spice_dos2unix`. Text for any other guest
+passes through unchanged. The guest's announcement is forgotten when its
+agent disconnects, so a new agent starts from LF until it announces again.
+
 #### Guest agent message reassembly
 
 The other direction is split the same way. A guest agent message is a

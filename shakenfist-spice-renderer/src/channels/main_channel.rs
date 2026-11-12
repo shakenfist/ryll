@@ -17,9 +17,10 @@ use crate::{
 };
 use shakenfist_spice_protocol::constants::vd_agent::{
     VD_AGENT_ANNOUNCE_CAPABILITIES, VD_AGENT_CAP_CLIPBOARD_BY_DEMAND,
-    VD_AGENT_CAP_CLIPBOARD_SELECTION, VD_AGENT_CAP_MONITORS_CONFIG, VD_AGENT_CAP_MOUSE_STATE,
-    VD_AGENT_CAP_REPLY, VD_AGENT_CLIPBOARD, VD_AGENT_CLIPBOARD_GRAB, VD_AGENT_CLIPBOARD_NONE,
-    VD_AGENT_CLIPBOARD_RELEASE, VD_AGENT_CLIPBOARD_REQUEST, VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD,
+    VD_AGENT_CAP_CLIPBOARD_SELECTION, VD_AGENT_CAP_GUEST_LINEEND_CRLF,
+    VD_AGENT_CAP_MONITORS_CONFIG, VD_AGENT_CAP_MOUSE_STATE, VD_AGENT_CAP_REPLY, VD_AGENT_CLIPBOARD,
+    VD_AGENT_CLIPBOARD_GRAB, VD_AGENT_CLIPBOARD_NONE, VD_AGENT_CLIPBOARD_RELEASE,
+    VD_AGENT_CLIPBOARD_REQUEST, VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD,
     VD_AGENT_CLIPBOARD_UTF8_TEXT, VD_AGENT_CONFIG_MONITORS_FLAG_USE_POS, VD_AGENT_MONITORS_CONFIG,
     VD_AGENT_REPLY,
 };
@@ -73,6 +74,31 @@ fn normalize_clipboard(text: &str) -> String {
         .replace('\r', "\n")
         .trim_end()
         .to_string()
+}
+
+/// Clipboard text from the host, made ready for a guest that announced
+/// `VD_AGENT_CAP_GUEST_LINEEND_CRLF`: every `\n` becomes `\r\n`, except
+/// one already preceded by `\r`, so CRLF text is not doubled. spice-gtk's
+/// `spice_unix2dos` does the same.
+fn lf_to_crlf(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + text.len() / 16);
+    let mut previous = None;
+    for c in text.chars() {
+        if c == '\n' && previous != Some('\r') {
+            out.push('\r');
+        }
+        out.push(c);
+        previous = Some(c);
+    }
+    out
+}
+
+/// Clipboard text from a guest that announced
+/// `VD_AGENT_CAP_GUEST_LINEEND_CRLF`, made ready for the host: every
+/// `\r\n` becomes `\n`. A lone `\r` is kept, as spice-gtk's
+/// `spice_dos2unix` keeps it.
+fn crlf_to_lf(text: &str) -> String {
+    text.replace("\r\n", "\n")
 }
 
 /// Hash the normalised clipboard text. Storing the hash
@@ -385,6 +411,11 @@ pub struct MainChannel {
     /// header. `None` until the guest's capabilities arrive: the layout is
     /// unknown before then, so no clipboard traffic is sent or parsed.
     guest_clipboard_selection: Option<bool>,
+    /// Whether the guest agent announced `VD_AGENT_CAP_GUEST_LINEEND_CRLF`.
+    /// Clipboard text crossing to such a guest is converted from the
+    /// host's LF line endings to CRLF, and back on the way out, as
+    /// spice-gtk does. The renderer's host side is LF in every mode.
+    guest_crlf: bool,
     /// Whether `ATTACH_CHANNELS` has been sent. It goes once, from the
     /// first `INIT`.
     channels_requested: bool,
@@ -546,6 +577,7 @@ impl MainChannel {
             resize_unapplied_count: 0,
             guest_caps_received: false,
             guest_clipboard_selection: None,
+            guest_crlf: false,
             channels_requested: false,
             last_clipboard_hash: None,
             last_polled_clipboard_generation: None,
@@ -1258,6 +1290,7 @@ impl MainChannel {
                 self.agent_caps_announced = false;
                 self.guest_caps_received = false;
                 self.guest_clipboard_selection = None;
+                self.guest_crlf = false;
                 // Drop reply bookkeeping tied to the previous agent
                 // instance, so a stale entry in agent_request_send_ts
                 // cannot match the next agent's REPLY and record a
@@ -1899,9 +1932,13 @@ impl MainChannel {
                     .as_ref()
                     .is_some_and(|c| c.has_capability(VD_AGENT_CAP_CLIPBOARD_SELECTION));
                 self.guest_clipboard_selection = Some(has_selection);
+                self.guest_crlf = caps
+                    .as_ref()
+                    .is_some_and(|c| c.has_capability(VD_AGENT_CAP_GUEST_LINEEND_CRLF));
                 debug!(
-                    "main: received agent capabilities from guest (clipboard selection: {})",
-                    has_selection
+                    "main: received agent capabilities from guest (clipboard selection: {}, \
+                     CRLF line endings: {})",
+                    has_selection, self.guest_crlf
                 );
                 if caps.is_some_and(|c| c.request == 1) {
                     self.agent_caps_announced = false;
@@ -2007,7 +2044,10 @@ impl MainChannel {
                 if clipboard.data.is_empty() {
                     return Ok(());
                 }
-                let text = String::from_utf8_lossy(&clipboard.data).to_string();
+                let mut text = String::from_utf8_lossy(&clipboard.data).to_string();
+                if self.guest_crlf {
+                    text = crlf_to_lf(&text);
+                }
                 // Log byte count only — clipboard content may contain
                 // passwords or sensitive data.
                 info!("main: clipboard from guest ({} bytes)", text.len());
@@ -2194,10 +2234,15 @@ impl MainChannel {
     }
 
     async fn send_clipboard_data(&mut self, text: &str) -> Result<bool> {
+        let data = if self.guest_crlf {
+            lf_to_crlf(text).into_bytes()
+        } else {
+            text.as_bytes().to_vec()
+        };
         let Some(payload) = self.clipboard_payload(&Clipboard {
             selection: VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD,
             clipboard_type: VD_AGENT_CLIPBOARD_UTF8_TEXT,
-            data: text.as_bytes().to_vec(),
+            data,
         }) else {
             return Ok(false);
         };
@@ -2253,8 +2298,8 @@ mod tests {
     use std::time::Instant;
 
     use super::{
-        agent_message, agent_monitors_config, agent_starved, client_agent_capabilities,
-        hash_clipboard, ping_interval_ms, should_request_client_mouse_mode,
+        agent_message, agent_monitors_config, agent_starved, client_agent_capabilities, crlf_to_lf,
+        hash_clipboard, lf_to_crlf, ping_interval_ms, should_request_client_mouse_mode,
         should_warn_agent_stalled, GuestClipboard, STUCK_AGENT_NOTIFY_INTERVAL,
         STUCK_AGENT_THRESHOLD, VD_AGENT_CLIPBOARD, VD_AGENT_CLIPBOARD_GRAB,
         VD_AGENT_CLIPBOARD_RELEASE, VD_AGENT_CLIPBOARD_REQUEST,
@@ -2266,6 +2311,17 @@ mod tests {
     use shakenfist_spice_protocol::messages::WireType;
     use shakenfist_spice_protocol::reader::LinkError;
     use shakenfist_spice_protocol::{MOUSE_MODE_CLIENT, MOUSE_MODE_SERVER};
+
+    #[test]
+    fn clipboard_line_endings_convert_as_spice_gtk_does() {
+        assert_eq!(lf_to_crlf("a\nb\n"), "a\r\nb\r\n");
+        assert_eq!(lf_to_crlf("a\r\nb"), "a\r\nb", "CRLF is not doubled");
+        assert_eq!(lf_to_crlf("\n\n"), "\r\n\r\n");
+        assert_eq!(lf_to_crlf("a\rb"), "a\rb");
+        assert_eq!(lf_to_crlf("é\nü"), "é\r\nü");
+        assert_eq!(crlf_to_lf("a\r\nb\r\n"), "a\nb\n");
+        assert_eq!(crlf_to_lf("a\rb\nc"), "a\rb\nc", "a lone CR or LF is kept");
+    }
 
     #[test]
     fn should_request_client_when_server_supports_it_but_is_in_server_mode() {
@@ -3209,6 +3265,86 @@ mod tests {
                     .unwrap();
             }
             assert_eq!(*recorder.written.lock().unwrap(), vec![text]);
+        }
+
+        /// A channel with a recording host clipboard whose guest agent
+        /// announced the clipboard selection cap and, if `crlf`,
+        /// VD_AGENT_CAP_GUEST_LINEEND_CRLF.
+        async fn line_ending_channel(
+            crlf: bool,
+        ) -> (MainChannel, TestChannelPeers, Arc<RecordingClipboard>) {
+            let recorder = Arc::new(RecordingClipboard::default());
+            let (mut channel, peers) =
+                test_main_channel_with_clipboard(Some(recorder.clone())).await;
+            channel.agent_connected = true;
+            channel.agent_caps_announced = true;
+            channel.agent_tokens = 10;
+            let mut caps = AnnounceCapabilities {
+                request: 0,
+                caps: Vec::new(),
+            };
+            caps.set_capability(VD_AGENT_CAP_CLIPBOARD_SELECTION);
+            if crlf {
+                caps.set_capability(VD_AGENT_CAP_GUEST_LINEEND_CRLF);
+            }
+            let mut payload = Vec::new();
+            caps.write(&mut payload);
+            channel
+                .handle_agent_message(VD_AGENT_ANNOUNCE_CAPABILITIES, &payload)
+                .await
+                .unwrap();
+            (channel, peers, recorder)
+        }
+
+        /// What the guest receives for clipboard `text`, and what the host
+        /// clipboard is given for guest clipboard `guest_text`.
+        async fn line_endings_both_ways(
+            crlf: bool,
+            text: &str,
+            guest_text: &str,
+        ) -> (Vec<u8>, Vec<String>) {
+            let (mut channel, mut peers, recorder) = line_ending_channel(crlf).await;
+            assert!(channel.send_clipboard_data(text).await.unwrap());
+            let header = peers.read_sent(6 + 20 + 8).await;
+            let size = u32::from_le_bytes(header[2..6].try_into().unwrap()) as usize;
+            let sent = peers.read_sent(size - 20 - 8).await;
+            for chunk in guest_clipboard_chunks(guest_text) {
+                channel
+                    .handle_message(main_server::AGENT_DATA, &chunk)
+                    .await
+                    .unwrap();
+            }
+            let written = recorder.written.lock().unwrap().clone();
+            (sent, written)
+        }
+
+        // A guest that announces CRLF line endings gets CRLF text from
+        // the host and gives LF text back, as spice-gtk converts (#624).
+        #[tokio::test]
+        async fn a_crlf_guest_has_its_clipboard_line_endings_converted() {
+            let (sent, written) = line_endings_both_ways(true, "a\nb\r\nc", "x\r\ny").await;
+            assert_eq!(sent, b"a\r\nb\r\nc");
+            assert_eq!(written, vec!["x\ny".to_string()]);
+        }
+
+        #[tokio::test]
+        async fn an_lf_guest_has_its_clipboard_passed_through() {
+            let (sent, written) = line_endings_both_ways(false, "a\nb", "x\r\ny").await;
+            assert_eq!(sent, b"a\nb");
+            assert_eq!(written, vec!["x\r\ny".to_string()]);
+        }
+
+        // A new agent instance has not announced anything yet, so the
+        // last one's line endings must not carry over to it.
+        #[tokio::test]
+        async fn an_agent_disconnect_forgets_the_line_endings() {
+            let (mut channel, _peers, _recorder) = line_ending_channel(true).await;
+            assert!(channel.guest_crlf);
+            channel
+                .handle_message(main_server::AGENT_DISCONNECTED, &[0, 0, 0, 0])
+                .await
+                .unwrap();
+            assert!(!channel.guest_crlf);
         }
 
         #[tokio::test]
