@@ -692,10 +692,6 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/capture.rs",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/app/ui_state.rs",
       "author": "mikal"
     },
@@ -1061,10 +1057,6 @@
     },
     {
       "path": "Cargo.toml",
-      "author": "mikal"
-    },
-    {
-      "path": "Makefile",
       "author": "mikal"
     },
     {
