@@ -16,7 +16,7 @@ use shakenfist_spice_protocol::NotifySeverity;
 use shakenfist_spice_renderer::{ByteCounter, ClipboardBackend, SessionState, MOUSE_MODE_UNKNOWN};
 
 use super::agent_state::AgentState;
-use super::reconnect::{modal_variant_notification, ModalVariant, ReconnectState};
+use super::reconnect::{modal_variant_notification, server_notice, ModalVariant, ReconnectState};
 use super::stats::{BandwidthTracker, Statistics};
 use super::trigger_snapshot::RegionSelectEnd;
 use super::ui_state::UiStateTracker;
@@ -421,6 +421,48 @@ impl RyllApp {
     /// snapshot at the call site avoids double-writing when the
     /// `Disconnected` handler has already snapshotted for the
     /// channel-storm path.
+    /// Forget the session that has just ended: clear surfaces and
+    /// cursor so the next paint shows a clean canvas, and tell the
+    /// auto-snapshot task to stop capturing a dead session.
+    fn clear_ended_session(&mut self) {
+        self.connected = false;
+        self.signal_auto_snapshot_retire();
+        // As in `reconnect`: end any region selection while the surface
+        // it was started over still exists, rather than leave it running
+        // over an empty canvas until a reconnect or Escape ends it.
+        self.end_region_select(RegionSelectEnd::Disconnected);
+        self.surfaces.surfaces.clear();
+        self.textures.clear();
+        self.cursor_image = None;
+        self.cursor_texture = None;
+    }
+
+    /// The server sent the main channel's `DISCONNECTING`, so it ended
+    /// the session on purpose. Show the `ServerEnded` modal rather than
+    /// auto-reconnecting, which against a server where the newest
+    /// client wins would take the session straight back from the
+    /// client that has just been given it. The display and inputs
+    /// channels the server closes next are then ignored, because the
+    /// state machine keeps the modal (`ReconnectState::on_disconnect`).
+    /// Callers write the disconnect snapshot first, as for
+    /// `handle_critical_disconnect`.
+    pub(super) fn handle_server_ended(&mut self) {
+        let now = Instant::now();
+        let notice = server_notice(self.last_main_notice.as_ref(), now);
+        self.clear_ended_session();
+        let Some(new_state) = self.reconnect_state.on_server_ended(notice) else {
+            return;
+        };
+        info!("app: the server ended the session; not reconnecting");
+        self.awaiting_reconnect_outcome = false;
+        self.last_modal_at = Some(now);
+        if let ReconnectState::Modal(variant) = &new_state {
+            let (severity, message) = modal_variant_notification(variant);
+            self.push_connection_event(severity, message);
+        }
+        self.reconnect_state = new_state;
+    }
+
     pub(super) fn handle_critical_disconnect(&mut self, message: String) {
         let awaiting = self.awaiting_reconnect_outcome;
         let now = Instant::now();
@@ -436,19 +478,8 @@ impl RyllApp {
         );
 
         // Even if the state machine ignores the event, the
-        // connection itself has gone — clear surfaces / cursor so
-        // the next paint shows a clean canvas, and tell the
-        // auto-snapshot task to stop capturing a dead session.
-        self.connected = false;
-        self.signal_auto_snapshot_retire();
-        // As in `reconnect`: end any region selection while the surface
-        // it was started over still exists, rather than leave it running
-        // over an empty canvas until a reconnect or Escape ends it.
-        self.end_region_select(RegionSelectEnd::Disconnected);
-        self.surfaces.surfaces.clear();
-        self.textures.clear();
-        self.cursor_image = None;
-        self.cursor_texture = None;
+        // connection itself has gone.
+        self.clear_ended_session();
 
         let Some(new_state) = new_state else {
             // Duplicate storm event — state unchanged, no-op.

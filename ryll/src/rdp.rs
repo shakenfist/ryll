@@ -25,12 +25,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use shakenfist_spice_protocol::link::H264Offer;
-use shakenfist_spice_protocol::ConnectionConfig;
+use shakenfist_spice_protocol::{ChannelType, ConnectionConfig};
 use shakenfist_spice_rdp::{
     generate_password, serve, spawn_cursor_relay, AudioRelay, Credentials, RdpConfig, RdpSecurity,
     SessionHandles, SingleSession, TlsIdentity, DEFAULT_HANDSHAKE_TIMEOUT,
 };
-use shakenfist_spice_renderer::channels::VolumeControl;
+use shakenfist_spice_renderer::channels::{DisconnectReason, VolumeControl};
 use shakenfist_spice_renderer::{
     ByteCounter, CancellationToken, CaptureSink, ChannelEvent, ClipboardBackend, DisplaySize,
     InputEvent, LogConfig, PlaybackOutput, SessionState, SurfaceMirror, TrafficSink,
@@ -217,22 +217,39 @@ async fn forward_watch<T: Clone>(mut from: watch::Receiver<T>, to: &watch::Sende
     }
 }
 
+/// What [`pump_events`] saw of one attempt's session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Pumped {
+    /// Whether a session began.
+    began: bool,
+    /// Whether the server ended the session on purpose, by sending the
+    /// main channel's `DISCONNECTING`.
+    server_ended: bool,
+}
+
 /// Pass one attempt's events on to the event bus, in order, telling
 /// `link` when the attempt's session begins and when its first surface
 /// arrives. `routes`, if given, are relayed to once the session
 /// begins.
 ///
-/// Returns whether a session began, once the attempt has dropped every
-/// sender of `events`.
+/// Returns what it saw, once the attempt has dropped every sender of
+/// `events`.
 async fn pump_events(
     mut events: mpsc::Receiver<ChannelEvent>,
     bus: mpsc::Sender<ChannelEvent>,
     link: &SessionLink,
     mut routes: Option<Routes>,
-) -> bool {
+) -> Pumped {
     let mut began = false;
+    let mut server_ended = false;
     let mut surface = false;
     while let Some(event) = events.recv().await {
+        if matches!(
+            event,
+            ChannelEvent::Disconnected(ChannelType::Main, DisconnectReason::ServerAnnounced)
+        ) {
+            server_ended = true;
+        }
         if !began && matches!(event, ChannelEvent::SessionInitialized(_)) {
             link.session_began(routes.take()).await;
             began = true;
@@ -251,7 +268,10 @@ async fn pump_events(
             surface = true;
         }
     }
-    began
+    Pumped {
+        began,
+        server_ended,
+    }
 }
 
 /// How one SPICE attempt ended.
@@ -259,6 +279,11 @@ struct AttemptEnd {
     /// Whether the attempt reached a session: the server accepted the
     /// link and announced one.
     reached_session: bool,
+    /// Whether the server ended the session on purpose, with the main
+    /// channel's `DISCONNECTING`. spice-server never sends it, so it is
+    /// not an outage: a server where the newest client wins sends it to
+    /// the client it has replaced.
+    server_ended: bool,
     /// What `run_connection` returned.
     result: Result<()>,
 }
@@ -348,7 +373,7 @@ impl SpiceAttempts {
             self.glz_dictionary_cap_bytes,
             self.preferred_compression,
         );
-        let (result, reached_session, (), ()) = tokio::join!(
+        let (result, pumped, (), ()) = tokio::join!(
             connection,
             pump_events(event_rx, self.bus.clone(), &self.link, routes),
             forward_watch(state.mouse_mode, &self.link.mouse_mode),
@@ -356,7 +381,8 @@ impl SpiceAttempts {
         );
         self.link.session_ended();
         AttemptEnd {
-            reached_session,
+            reached_session: pumped.began,
+            server_ended: pumped.server_ended,
             result,
         }
     }
@@ -399,6 +425,13 @@ where
         }
         if number == 1 && !end.reached_session {
             return end.result.context("the SPICE session ended");
+        }
+        // Reconnecting would take the session back from whoever the
+        // server gave it to, who may then retry in turn. Ending the run
+        // is not a failure: ryll was told to go.
+        if end.server_ended {
+            warn!("rdp: the SPICE server ended the session on purpose; not reconnecting");
+            return Ok(());
         }
 
         failed = if end.reached_session {
@@ -879,6 +912,7 @@ mod tests {
     fn session(result: Result<()>) -> AttemptEnd {
         AttemptEnd {
             reached_session: true,
+            server_ended: false,
             result,
         }
     }
@@ -886,6 +920,7 @@ mod tests {
     fn no_session(error: &str) -> AttemptEnd {
         AttemptEnd {
             reached_session: false,
+            server_ended: false,
             result: Err(anyhow!("{error}")),
         }
     }
@@ -974,6 +1009,28 @@ mod tests {
         run.await.unwrap().unwrap();
     }
 
+    // A server that sends DISCONNECTING ended the session on purpose
+    // (#598): the run ends without a retry, and without an error.
+    #[tokio::test(start_paused = true)]
+    async fn a_session_the_server_ended_is_not_retried() {
+        let script = Script::new(vec![
+            session(Ok(())),
+            AttemptEnd {
+                reached_session: true,
+                server_ended: true,
+                result: Ok(()),
+            },
+        ]);
+        supervised(
+            ReconnectPolicy::default(),
+            CancellationToken::new(),
+            script.clone(),
+        )
+        .await
+        .expect("a deliberate end is not a failure");
+        assert_eq!(script.started(), [(1, secs(0)), (2, secs(1))]);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn three_failed_retries_give_up_with_the_last_error() {
         let script = Script::new(vec![
@@ -1002,6 +1059,7 @@ mod tests {
     async fn running_out_of_retries_is_an_error_even_without_one() {
         let quiet = || AttemptEnd {
             reached_session: false,
+            server_ended: false,
             result: Ok(()),
         };
         let script = Script::new(vec![session(Ok(())), quiet(), quiet(), quiet()]);
@@ -1156,7 +1214,7 @@ mod tests {
         let (routes, _input_rx) = routes();
 
         let events = attempt_events(vec![ChannelEvent::SessionInitialized(7)]).await;
-        assert!(pump_events(events, bus_tx, &link, Some(routes)).await);
+        assert!(pump_events(events, bus_tx, &link, Some(routes)).await.began);
 
         assert!(matches!(
             bus_rx.recv().await,
@@ -1181,7 +1239,7 @@ mod tests {
             surface_created(1),
         ])
         .await;
-        assert!(pump_events(events, bus_tx, &link, Some(routes)).await);
+        assert!(pump_events(events, bus_tx, &link, Some(routes)).await.began);
 
         assert!(spice_up.has_changed().unwrap());
         assert!(*spice_up.borrow_and_update());
@@ -1193,13 +1251,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_server_disconnecting_is_reported_and_passed_on() {
+        let link = link_in_an_outage();
+        let (bus_tx, mut bus_rx) = mpsc::channel(8);
+        let (routes, _input_rx) = routes();
+
+        let events = attempt_events(vec![
+            ChannelEvent::SessionInitialized(7),
+            ChannelEvent::Disconnected(ChannelType::Display, DisconnectReason::ServerClosed),
+            ChannelEvent::Disconnected(ChannelType::Main, DisconnectReason::ServerAnnounced),
+        ])
+        .await;
+        let pumped = pump_events(events, bus_tx, &link, Some(routes)).await;
+        assert_eq!(
+            pumped,
+            Pumped {
+                began: true,
+                server_ended: true
+            }
+        );
+        let mut passed_on = 0;
+        while bus_rx.try_recv().is_ok() {
+            passed_on += 1;
+        }
+        assert_eq!(passed_on, 3);
+    }
+
+    #[tokio::test]
+    async fn a_lost_session_is_not_one_the_server_ended() {
+        let link = link_in_an_outage();
+        let (bus_tx, _bus_rx) = mpsc::channel(8);
+        let (routes, _input_rx) = routes();
+
+        let events = attempt_events(vec![
+            ChannelEvent::SessionInitialized(7),
+            ChannelEvent::Disconnected(ChannelType::Main, DisconnectReason::ServerClosed),
+        ])
+        .await;
+        assert!(
+            !pump_events(events, bus_tx, &link, Some(routes))
+                .await
+                .server_ended
+        );
+    }
+
+    #[tokio::test]
     async fn an_attempt_without_a_session_changes_nothing() {
         let link = link_in_an_outage();
         let (bus_tx, _bus_rx) = mpsc::channel(8);
         let (routes, _input_rx) = routes();
 
         let events = attempt_events(Vec::new()).await;
-        assert!(!pump_events(events, bus_tx, &link, Some(routes)).await);
+        assert!(!pump_events(events, bus_tx, &link, Some(routes)).await.began);
         // The lost session's surfaces stay, for a client that connects
         // during the outage to be shown darkened.
         assert_eq!(link.mirror.lock().await.surfaces.len(), 2);

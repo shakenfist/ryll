@@ -151,6 +151,10 @@ pub struct RyllApp {
     /// reconnect from the modal (user intervention starts a
     /// fresh budget).
     last_modal_at: Option<Instant>,
+    /// When the most recent main-channel server `NOTIFY` arrived, and
+    /// its text: the reason a `DISCONNECTING` right after it gives in
+    /// the `ServerEnded` modal.
+    last_main_notice: Option<(Instant, String)>,
     /// Count of `Pending` entries (per-attempt) over the
     /// session's lifetime, surfaced in `session.json` for
     /// post-hoc analysis of how rocky the session was.
@@ -704,6 +708,7 @@ impl RyllApp {
             reconnect_state: ReconnectState::Idle,
             awaiting_reconnect_outcome: false,
             last_modal_at: None,
+            last_main_notice: None,
             auto_reconnect_count: 0,
             ticket_expiry_warned: false,
             pointer: PointerTranslator::new(),
@@ -2892,6 +2897,16 @@ impl eframe::App for RyllApp {
                 ModalVariant::ConnectFailed { error } => (
                     "Could not connect",
                     format!("Could not connect to {}.\n\n{}", self.target, error),
+                    true,
+                ),
+                ModalVariant::ServerEnded { notice } => (
+                    "Session ended by the server",
+                    format!(
+                        "{}\n\nThe server ended this session on purpose, so ryll has \
+                         not reconnected. Reconnecting takes the session back from \
+                         whoever has it now.",
+                        notice.as_deref().unwrap_or("The server gave no reason.")
+                    ),
                     true,
                 ),
             };
