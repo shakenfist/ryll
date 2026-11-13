@@ -45,7 +45,7 @@ use ironrdp_cliprdr::pdu::{
     OwnedFormatDataResponse,
 };
 use ironrdp_server::{CliprdrServerFactory, ServerEvent, ServerEventSender};
-use shakenfist_spice_protocol::messages::agent_stream::MAX_AGENT_MESSAGE_SIZE;
+use shakenfist_spice_protocol::messages::agent_stream::MAX_CLIPBOARD_DATA_SIZE;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
@@ -54,9 +54,11 @@ use crate::SessionSlot;
 
 /// The longest text taken from the client, in bytes once its line
 /// endings are LF: 100 MiB, the most the guest's agent can be sent in
-/// one clipboard message (whose budget adds 4 KiB for its headers), and
-/// the most the control socket's `clipboard_set` accepts.
-const MAX_CLIENT_TEXT_BYTES: usize = MAX_AGENT_MESSAGE_SIZE - 4096;
+/// one clipboard message, and the most the control socket's
+/// `clipboard_set` accepts. A guest that wants CRLF line endings gets
+/// the text converted, and the main channel checks the converted size
+/// against the same limit.
+const MAX_CLIENT_TEXT_BYTES: usize = MAX_CLIPBOARD_DATA_SIZE;
 
 /// Builds a [`SessionClipboard`] for each RDP connection.
 ///

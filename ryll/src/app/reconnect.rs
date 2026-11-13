@@ -50,8 +50,9 @@ pub(super) enum ModalVariant {
 }
 
 /// The most of a server's `NOTIFY` text the `ServerEnded` modal shows.
-/// The text is the server's to choose, and the modal is a fixed-size
-/// window whose buttons a long enough text would push out of reach.
+/// The text is the server's to choose; the modal scrolls a long body
+/// rather than push its buttons out of reach, but a reason is a sentence
+/// or two, and anything much longer is not one.
 pub(super) const MAX_SERVER_NOTICE_CHARS: usize = 500;
 
 /// How recently a main-channel server `NOTIFY` must have arrived to be
@@ -60,16 +61,26 @@ pub(super) const MAX_SERVER_NOTICE_CHARS: usize = 500;
 pub(super) const SERVER_NOTICE_WINDOW: Duration = Duration::from_secs(5);
 
 /// The text of `last`, the most recent main-channel server `NOTIFY`, if
-/// it arrived within [`SERVER_NOTICE_WINDOW`] of `now`, cut to
-/// [`MAX_SERVER_NOTICE_CHARS`] characters.
+/// it arrived within [`SERVER_NOTICE_WINDOW`] of `now`, as one line of
+/// at most [`MAX_SERVER_NOTICE_CHARS`] characters: whitespace control
+/// characters (line breaks, tabs) become spaces and the rest are
+/// dropped, so a reason cannot spread over hundreds of lines.
 pub(super) fn server_notice(last: Option<&(Instant, String)>, now: Instant) -> Option<String> {
     last.filter(|(at, _)| now.saturating_duration_since(*at) <= SERVER_NOTICE_WINDOW)
-        .map(
-            |(_, text)| match text.char_indices().nth(MAX_SERVER_NOTICE_CHARS) {
-                Some((cut, _)) => format!("{}…", &text[..cut]),
-                None => text.clone(),
-            },
-        )
+        .map(|(_, text)| {
+            let line: String = text
+                .chars()
+                .filter_map(|c| match c {
+                    c if c.is_control() && c.is_whitespace() => Some(' '),
+                    c if c.is_control() => None,
+                    c => Some(c),
+                })
+                .collect();
+            match line.char_indices().nth(MAX_SERVER_NOTICE_CHARS) {
+                Some((cut, _)) => format!("{}…", &line[..cut]),
+                None => line,
+            }
+        })
 }
 
 /// The body of the `ServerEnded` modal, and whether it offers the
@@ -78,7 +89,12 @@ pub(super) fn server_ended_body(
     notice: Option<&str>,
     ticket: Option<TicketBlock>,
 ) -> (String, bool) {
-    let reason = notice.unwrap_or("The server gave no reason.");
+    // The notice is only the server's last word before it ended the
+    // session, not necessarily its reason, so it is quoted as such.
+    let reason = match notice {
+        Some(notice) => format!("The server said: \u{201c}{notice}\u{201d}"),
+        None => "The server gave no reason.".to_string(),
+    };
     match ticket {
         None => (
             format!(
@@ -178,14 +194,7 @@ impl ReconnectState {
         policy: ReconnectPolicy,
         latest_error: String,
     ) -> Option<Self> {
-        // The server ended the session on purpose. That holds for the
-        // rest of it: the display and inputs channels it closes after
-        // the main channel's DISCONNECTING must not start a retry, nor
-        // replace the modal that explains why there is none.
-        if matches!(
-            self,
-            ReconnectState::Modal(ModalVariant::ServerEnded { .. })
-        ) {
+        if self.server_ended() {
             return None;
         }
 
@@ -237,9 +246,37 @@ impl ReconnectState {
             }
         }
     }
-}
 
-impl ReconnectState {
+    /// Pure transition for a connection attempt that failed before it set
+    /// a session up, and was neither an auto-retry nor a session that a
+    /// secondary channel then failed (those are disconnects, and go
+    /// through [`ReconnectState::on_disconnect`]). The user is told what
+    /// failed, with the Reconnect button, unless the server has ended the
+    /// session: an attempt still linking secondary channels when the
+    /// server sent `DISCONNECTING` fails too, and offering to reconnect
+    /// in place of saying the server ended it would invite the user to
+    /// take the session straight back. `None` means the event changes
+    /// nothing.
+    pub(super) fn on_connect_failed(&self, error: String) -> Option<Self> {
+        if self.server_ended() {
+            return None;
+        }
+        Some(ReconnectState::Modal(ModalVariant::ConnectFailed { error }))
+    }
+
+    /// Whether the server ended the session on purpose. That holds for
+    /// the rest of it: nothing that follows the main channel's
+    /// `DISCONNECTING` -- the display and inputs channels it closes, a
+    /// connection attempt it cut short -- may start a retry or replace
+    /// the modal that explains why there is none. Only the user's
+    /// Reconnect, or a new session, leaves this state.
+    fn server_ended(&self) -> bool {
+        matches!(
+            self,
+            ReconnectState::Modal(ModalVariant::ServerEnded { .. })
+        )
+    }
+
     /// Pure transition for the server's `DISCONNECTING` on the main
     /// channel. A session that was up, or that is waiting out the
     /// backoff after a display or inputs channel closed first, lands in
@@ -252,7 +289,7 @@ impl ReconnectState {
     pub(super) fn on_server_ended(
         &self,
         notice: Option<String>,
-        policy: &ReconnectPolicy,
+        policy: ReconnectPolicy,
         now_wall: SystemTime,
     ) -> Option<Self> {
         match self {
@@ -663,7 +700,7 @@ mod tests {
     fn a_server_disconnecting_lands_in_the_modal_instead_of_a_retry() {
         let notice = Some("another client (10.0.0.2) took over this session".to_string());
         assert_eq!(
-            ReconnectState::Idle.on_server_ended(notice.clone(), &no_policy(), epoch()),
+            ReconnectState::Idle.on_server_ended(notice.clone(), no_policy(), epoch()),
             Some(server_ended(notice.as_deref()))
         );
     }
@@ -677,7 +714,7 @@ mod tests {
             ..ReconnectPolicy::default()
         };
         let state = ReconnectState::Idle
-            .on_server_ended(Some("taken over".into()), &single_use, epoch())
+            .on_server_ended(Some("taken over".into()), single_use, epoch())
             .unwrap();
         let ReconnectState::Modal(ModalVariant::ServerEnded { notice, ticket }) = state else {
             panic!("expected Modal(ServerEnded), got {state:?}");
@@ -685,7 +722,10 @@ mod tests {
         assert_eq!(ticket, Some(TicketBlock::SingleUse));
         let (body, allow_reconnect) = server_ended_body(notice.as_deref(), ticket);
         assert!(!allow_reconnect);
-        assert!(body.starts_with("taken over"), "{body}");
+        assert!(
+            body.starts_with("The server said: \u{201c}taken over\u{201d}"),
+            "{body}"
+        );
         assert!(body.contains("single-use ticket"), "{body}");
 
         let expired_at = UNIX_EPOCH + Duration::from_secs(3600);
@@ -710,7 +750,7 @@ mod tests {
             .unwrap();
         assert!(matches!(pending, ReconnectState::Pending { .. }));
         assert_eq!(
-            pending.on_server_ended(None, &no_policy(), epoch()),
+            pending.on_server_ended(None, no_policy(), epoch()),
             Some(server_ended(None))
         );
     }
@@ -718,13 +758,13 @@ mod tests {
     #[test]
     fn a_server_disconnecting_keeps_an_existing_modal() {
         assert_eq!(
-            server_ended(None).on_server_ended(Some("x".into()), &no_policy(), epoch()),
+            server_ended(None).on_server_ended(Some("x".into()), no_policy(), epoch()),
             None
         );
         assert_eq!(
             ReconnectState::Modal(ModalVariant::OneShotConsumed).on_server_ended(
                 None,
-                &no_policy(),
+                no_policy(),
                 epoch()
             ),
             None
@@ -749,6 +789,33 @@ mod tests {
         }
     }
 
+    // A connection attempt the server cut short by ending the session
+    // must not swap the modal saying so for one offering to take the
+    // session back (#718 review). Any other state shows the failure.
+    #[test]
+    fn a_failed_connection_attempt_leaves_a_server_ended_session_alone() {
+        assert_eq!(
+            server_ended(Some("taken over")).on_connect_failed(err("refused")),
+            None
+        );
+        let failed = Some(ReconnectState::Modal(ModalVariant::ConnectFailed {
+            error: err("refused"),
+        }));
+        for state in [
+            ReconnectState::Idle,
+            ReconnectState::Modal(ModalVariant::OneShotConsumed),
+            ReconnectState::Modal(ModalVariant::Generic {
+                latest_error: err("eof"),
+            }),
+        ] {
+            assert_eq!(
+                state.on_connect_failed(err("refused")),
+                failed,
+                "from {state:?}"
+            );
+        }
+    }
+
     #[test]
     fn only_a_recent_notice_explains_the_disconnecting() {
         let now = Instant::now() + Duration::from_secs(60);
@@ -762,8 +829,8 @@ mod tests {
         assert_eq!(server_notice(None, now), None);
     }
 
-    // The notice is the server's text and the modal cannot scroll, so
-    // it is cut short, on a character boundary.
+    // A reason is a sentence or two, so a longer notice is cut short,
+    // on a character boundary.
     #[test]
     fn a_long_notice_is_cut_short() {
         let now = Instant::now();
@@ -773,6 +840,21 @@ mod tests {
         assert!(cut.ends_with("é…"), "{cut}");
         let fits = (now, "é".repeat(MAX_SERVER_NOTICE_CHARS));
         assert_eq!(server_notice(Some(&fits), now), Some(fits.1.clone()));
+    }
+
+    // The notice is the server's text: line breaks would let a short
+    // one stand taller than the window, and other control characters
+    // have no business in a dialog.
+    #[test]
+    fn a_notice_is_shown_on_one_line() {
+        let now = Instant::now();
+        let notice = (now, "taken\r\nover\tby\u{7}\u{1b} 10.0.0.2\n".to_string());
+        assert_eq!(
+            server_notice(Some(&notice), now),
+            Some("taken  over by 10.0.0.2 ".into())
+        );
+        let tall = (now, "\n".repeat(MAX_SERVER_NOTICE_CHARS));
+        assert!(!server_notice(Some(&tall), now).unwrap().contains('\n'));
     }
 
     #[test]

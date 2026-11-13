@@ -248,8 +248,12 @@ pub enum PasteFailureKind {
 pub enum DisconnectReason {
     /// A read returned no bytes: the server closed the socket.
     ServerClosed,
-    /// The server sent the main channel's `DISCONNECTING`. The close
-    /// that follows is reported as [`DisconnectReason::ServerClosed`].
+    /// The server sent the main channel's `DISCONNECTING`. The main
+    /// channel reports it twice: when the message arrives, by a send
+    /// that gives up on a stalled frontend, and again in place of
+    /// whatever then ends its connection (a close, a reset, the
+    /// keepalive), by one that does not. A frontend that acts on it
+    /// should do so once.
     ServerAnnounced,
     /// The main channel received nothing for its keepalive timeout, so
     /// ryll gave up on the session.

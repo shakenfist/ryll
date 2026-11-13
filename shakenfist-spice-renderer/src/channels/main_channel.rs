@@ -27,7 +27,7 @@ use shakenfist_spice_protocol::constants::vd_agent::{
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::agent_stream::{
-    AgentMessage, AgentReassembler, AgentStreamItem,
+    AgentMessage, AgentReassembler, AgentStreamItem, MAX_CLIPBOARD_DATA_SIZE,
 };
 use shakenfist_spice_protocol::messages::vd_agent::{
     AnnounceCapabilities, Clipboard, ClipboardGrab, ClipboardRelease, ClipboardRequest,
@@ -91,6 +91,21 @@ fn lf_to_crlf(text: &str) -> String {
         previous = Some(c);
     }
     out
+}
+
+/// The length in bytes of `lf_to_crlf(text)`, without building it: the
+/// guest's limit applies to the converted text, and a text too long for
+/// it should not be doubled in memory only to be refused. `\r` and `\n`
+/// are single bytes in UTF-8 and never part of a longer character, so
+/// counting bytes counts what `lf_to_crlf` sees.
+fn lf_to_crlf_len(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let added = bytes
+        .iter()
+        .enumerate()
+        .filter(|&(i, &b)| b == b'\n' && (i == 0 || bytes[i - 1] != b'\r'))
+        .count();
+    bytes.len() + added
 }
 
 /// Clipboard text from a guest that announced
@@ -416,6 +431,13 @@ pub struct MainChannel {
     /// host's LF line endings to CRLF, and back on the way out, as
     /// spice-gtk does. The renderer's host side is LF in every mode.
     guest_crlf: bool,
+    /// Whether the server has sent `DISCONNECTING`. The event announcing
+    /// it is sent with `emit`, which gives up on a stalled frontend, so
+    /// the read loop also reports its own end as
+    /// [`DisconnectReason::ServerAnnounced`] once this is set: that
+    /// report is sent with `emit_terminal`, which cannot be dropped, and
+    /// the frontends decide not to reconnect on it.
+    server_announced_end: bool,
     /// Whether `ATTACH_CHANNELS` has been sent. It goes once, from the
     /// first `INIT`.
     channels_requested: bool,
@@ -578,6 +600,7 @@ impl MainChannel {
             guest_caps_received: false,
             guest_clipboard_selection: None,
             guest_crlf: false,
+            server_announced_end: false,
             channels_requested: false,
             last_clipboard_hash: None,
             last_polled_clipboard_generation: None,
@@ -772,7 +795,17 @@ impl MainChannel {
                     }
                 } => {
                     last_arm = "read";
-                    let n = n?;
+                    let n = match n {
+                        Ok(n) => n,
+                        // A server that has said it is ending the session
+                        // may reset the socket rather than close it; that
+                        // is the end it announced, not a failure.
+                        Err(e) if self.server_announced_end => {
+                            info!("main: read failed after the server's DISCONNECTING: {}", e);
+                            0
+                        }
+                        Err(e) => return Err(e.into()),
+                    };
                     if n == 0 {
                         info!("main: channel disconnected");
                         self.emit_session_ended(DisconnectReason::ServerClosed).await;
@@ -1229,14 +1262,17 @@ impl MainChannel {
                     ),
                     Err(_) => info!("main: server sent disconnect notification"),
                 }
+                self.server_announced_end = true;
                 // Deliberately `emit`, not `emit_session_ended`: this is
                 // only an announcement, and the read loop carries on, so
                 // blocking here on a stalled UI would stop main answering
-                // PINGs, which is K1. The EOF that follows is what ends
-                // the loop, and it reports the end without the timeout.
-                // spice-server never sends this message anyway (it only
-                // handles the client's `DISCONNECTING`), and spice-gtk
-                // just logs it.
+                // PINGs, which is K1. It can therefore be dropped; the end
+                // of the loop that follows is reported as
+                // `ServerAnnounced` too, without the timeout (see
+                // `server_announced_end`), so the decision not to
+                // reconnect does not rest on this one. spice-server never
+                // sends this message anyway (it only handles the client's
+                // `DISCONNECTING`), and spice-gtk just logs it.
                 self.events
                     .emit(ChannelEvent::Disconnected(
                         ChannelType::Main,
@@ -1468,7 +1504,17 @@ impl MainChannel {
     /// event however it is sent. A finite deadline would therefore add no
     /// safety in those cases, and would lose the event in the one that
     /// matters: a long stall that recovers.
+    /// Report the end of the session, without the timeout `emit` has.
+    /// After the server's `DISCONNECTING`, whatever ended the loop is
+    /// reported as [`DisconnectReason::ServerAnnounced`]: the announcement
+    /// itself may have been dropped, and the frontends must not take an
+    /// end the server chose for a lost connection to retry.
     async fn emit_session_ended(&self, reason: DisconnectReason) {
+        let reason = if self.server_announced_end {
+            DisconnectReason::ServerAnnounced
+        } else {
+            reason
+        };
         self.events
             .emit_terminal(ChannelEvent::Disconnected(ChannelType::Main, reason))
             .await;
@@ -2237,7 +2283,31 @@ impl MainChannel {
             .await
     }
 
+    /// Send `text` to the guest in answer to its clipboard request. Text
+    /// longer than [`MAX_CLIPBOARD_DATA_SIZE`] once its line endings are
+    /// the guest's is answered with NONE instead, so the application
+    /// asking for the paste is told rather than left waiting on a message
+    /// the guest's agent would refuse. The host side caps what it accepts
+    /// before conversion, and the GUI's host clipboard not at all, so
+    /// this is the one place the size the guest sees can be checked.
     async fn send_clipboard_data(&mut self, text: &str) -> Result<bool> {
+        let size = if self.guest_crlf {
+            lf_to_crlf_len(text)
+        } else {
+            text.len()
+        };
+        if size > MAX_CLIPBOARD_DATA_SIZE {
+            // Log byte counts only — clipboard content may contain
+            // passwords or sensitive data.
+            warn!(
+                "main: clipboard not sent to the guest: {} bytes as the guest takes it, \
+                 more than the {} one message can carry",
+                size, MAX_CLIPBOARD_DATA_SIZE
+            );
+            return self
+                .send_clipboard_none(VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD)
+                .await;
+        }
         let data = if self.guest_crlf {
             lf_to_crlf(text).into_bytes()
         } else {
@@ -2303,10 +2373,10 @@ mod tests {
 
     use super::{
         agent_message, agent_monitors_config, agent_starved, client_agent_capabilities, crlf_to_lf,
-        hash_clipboard, lf_to_crlf, ping_interval_ms, should_request_client_mouse_mode,
-        should_warn_agent_stalled, GuestClipboard, STUCK_AGENT_NOTIFY_INTERVAL,
-        STUCK_AGENT_THRESHOLD, VD_AGENT_CLIPBOARD, VD_AGENT_CLIPBOARD_GRAB,
-        VD_AGENT_CLIPBOARD_RELEASE, VD_AGENT_CLIPBOARD_REQUEST,
+        hash_clipboard, lf_to_crlf, lf_to_crlf_len, ping_interval_ms,
+        should_request_client_mouse_mode, should_warn_agent_stalled, GuestClipboard,
+        STUCK_AGENT_NOTIFY_INTERVAL, STUCK_AGENT_THRESHOLD, VD_AGENT_CLIPBOARD,
+        VD_AGENT_CLIPBOARD_GRAB, VD_AGENT_CLIPBOARD_RELEASE, VD_AGENT_CLIPBOARD_REQUEST,
         VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD, VD_AGENT_CLIPBOARD_UTF8_TEXT,
         VD_AGENT_MONITORS_CONFIG,
     };
@@ -2325,6 +2395,23 @@ mod tests {
         assert_eq!(lf_to_crlf("é\nü"), "é\r\nü");
         assert_eq!(crlf_to_lf("a\r\nb\r\n"), "a\nb\n");
         assert_eq!(crlf_to_lf("a\rb\nc"), "a\rb\nc", "a lone CR or LF is kept");
+    }
+
+    #[test]
+    fn the_converted_length_is_known_before_converting() {
+        for text in [
+            "",
+            "a",
+            "\n",
+            "\r\n",
+            "\n\n",
+            "a\nb\r\nc\rd\n",
+            "é\nü\r\n",
+            "\r",
+            "\n\r",
+        ] {
+            assert_eq!(lf_to_crlf_len(text), lf_to_crlf(text).len(), "{text:?}");
+        }
     }
 
     #[test]
@@ -3351,6 +3438,34 @@ mod tests {
             (sent, written)
         }
 
+        // The guest's limit is on the text it is sent, so a text that fits
+        // as LF but not once converted is answered NONE (#718 review).
+        #[tokio::test]
+        async fn clipboard_text_too_long_once_converted_is_answered_none() {
+            let text = "\n".repeat(MAX_CLIPBOARD_DATA_SIZE / 2 + 1);
+            assert!(text.len() <= MAX_CLIPBOARD_DATA_SIZE);
+            let none = agent_data(
+                4, // VD_AGENT_CLIPBOARD
+                &[
+                    0, 0, 0, 0, // selection CLIPBOARD, reserved
+                    0, 0, 0, 0, // VD_AGENT_CLIPBOARD_NONE
+                ],
+            );
+
+            let (mut channel, mut peers, _recorder) = line_ending_channel(true).await;
+            assert!(channel.send_clipboard_data(&text).await.unwrap());
+            assert_eq!(peers.read_sent(none.len()).await, none);
+
+            // The same text to an LF guest fits, and goes.
+            let (mut channel, mut peers, _recorder) = line_ending_channel(false).await;
+            assert!(channel.send_clipboard_data(&text).await.unwrap());
+            // The message goes out in chunks; its agent header, in the
+            // first, gives the whole size.
+            let header = peers.read_sent(6 + 20).await;
+            let size = u32::from_le_bytes(header[6 + 16..6 + 20].try_into().unwrap()) as usize;
+            assert_eq!(size, 8 + text.len());
+        }
+
         // A guest that announces CRLF line endings gets CRLF text from
         // the host and gives LF text back, as spice-gtk converts (#624).
         #[tokio::test]
@@ -3458,6 +3573,80 @@ mod tests {
                 }
             };
             tokio::time::timeout(wait, read).await.ok()
+        }
+
+        /// The reasons the main channel gives for its own end when the
+        /// server sends `prelude` and then ends the connection, closing it
+        /// or, if `reset`, resetting it once the channel has seen
+        /// `prelude`.
+        async fn main_end_reasons(prelude: &[u8], reset: bool) -> Vec<DisconnectReason> {
+            let (mut channel, peers) = test_main_channel().await;
+            let TestChannelPeers {
+                mut peer,
+                mut events,
+            } = peers;
+            let task = tokio::spawn(async move { channel.run().await });
+            peer.write_all(prelude).await.unwrap();
+            let mut reasons = Vec::new();
+            if reset {
+                // Wait for the announcement, so the reset cannot overtake
+                // the message in flight.
+                while let Some(event) = events.recv().await {
+                    if let ChannelEvent::Disconnected(ChannelType::Main, reason) = event {
+                        reasons.push(reason);
+                        break;
+                    }
+                }
+                socket2::SockRef::from(&peer)
+                    .set_linger(Some(std::time::Duration::ZERO))
+                    .unwrap();
+            }
+            drop(peer);
+            let result = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+                .await
+                .expect("the channel ends")
+                .unwrap();
+            assert!(result.is_ok(), "{result:?}");
+            while let Some(event) = events.recv().await {
+                if let ChannelEvent::Disconnected(ChannelType::Main, reason) = event {
+                    reasons.push(reason);
+                }
+            }
+            reasons
+        }
+
+        fn disconnecting_bytes() -> Vec<u8> {
+            let mut msg = Vec::new();
+            msg.extend_from_slice(&main_server::DISCONNECTING.to_le_bytes());
+            msg.extend_from_slice(&12u32.to_le_bytes());
+            msg.extend_from_slice(&[0; 12]); // time stamp, reason
+            msg
+        }
+
+        // The DISCONNECTING event goes by `emit`, which a stalled frontend
+        // can make drop it, so the channel's own end -- which cannot be
+        // dropped -- must say the same thing (#718 review). A plain close
+        // still reads as one.
+        #[tokio::test]
+        async fn the_end_after_disconnecting_is_reported_as_announced() {
+            assert_eq!(
+                main_end_reasons(&disconnecting_bytes(), false).await,
+                vec![
+                    DisconnectReason::ServerAnnounced,
+                    DisconnectReason::ServerAnnounced
+                ]
+            );
+            assert_eq!(
+                main_end_reasons(&disconnecting_bytes(), true).await,
+                vec![
+                    DisconnectReason::ServerAnnounced,
+                    DisconnectReason::ServerAnnounced
+                ]
+            );
+            assert_eq!(
+                main_end_reasons(&[], false).await,
+                vec![DisconnectReason::ServerClosed]
+            );
         }
 
         #[tokio::test]

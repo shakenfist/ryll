@@ -2911,7 +2911,12 @@ impl eframe::App for RyllApp {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    ui.label(body);
+                    // The body can carry text from the server or an error
+                    // string of any length; scroll it rather than let it
+                    // push the buttons below the bottom of the window.
+                    egui::ScrollArea::vertical()
+                        .max_height(ctx.content_rect().height() * 0.5)
+                        .show(ui, |ui| ui.label(body));
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if allow_reconnect && ui.button("Reconnect").clicked() {

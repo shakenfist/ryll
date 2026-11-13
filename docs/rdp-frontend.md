@@ -146,11 +146,14 @@ its "Local Resources" tab.
 - **Clipboard**: text, both ways, between the client and the guest (the guest
   needs vdagent). Line endings are converted between the client's CRLF and
   the LF ryll uses internally, and again to CRLF for a guest whose agent
-  asks for it, such as a Windows guest. A client's clipboard reaches the guest when it connects.
-  Text the guest copied before the client connected is not offered to it;
-  text copied afterwards is. Text the client copies that is longer than
-  100 MiB, the most ryll can send a guest's vdagent in one message, is not
-  shared, and a warning is logged. Rich formats and files are not shared.
+  asks for it, such as a Windows guest. A client's clipboard reaches the
+  guest when it connects. Text the guest copied before the client connected
+  is not offered to it; text copied afterwards is. Text the client copies
+  that is longer than 100 MiB, the most ryll can send a guest's vdagent in
+  one message, is not shared, and a warning is logged. For a guest that
+  wants CRLF the limit applies to the converted text, so text with many
+  short lines can be refused below 100 MiB; the guest's paste then gets
+  nothing. Rich formats and files are not shared.
 - **Audio**: the guest's audio plays on the client. ryll offers Opus and then
   16-bit 48 kHz stereo PCM, and uses the first one the client accepts. Opus
   is SPICE's own packets passed through, a few tens of kbit/s. PCM is about

@@ -447,7 +447,7 @@ impl RyllApp {
         let policy = self.reconnect_policy();
         let Some(new_state) =
             self.reconnect_state
-                .on_server_ended(notice, &policy, SystemTime::now())
+                .on_server_ended(notice, policy, SystemTime::now())
         else {
             return;
         };
@@ -577,6 +577,14 @@ impl RyllApp {
             format!("Connection attempt failed: {}", message),
         );
 
+        // The server ended the session while this attempt was still
+        // linking channels, which is why it failed. The modal saying so
+        // stays: see `ReconnectState::on_connect_failed`.
+        let Some(new_state) = self.reconnect_state.on_connect_failed(message.clone()) else {
+            info!("app: connection attempt failed after the server ended the session");
+            return;
+        };
+
         if self.connected || self.awaiting_reconnect_outcome {
             // Either a session was set up before the failure (a
             // secondary channel would not open), so this is a
@@ -600,8 +608,7 @@ impl RyllApp {
         // silently in the background and, for a `delete-this-file=1`
         // ticket, claim the ticket was consumed by a session that never
         // existed. Say what happened instead.
-        self.reconnect_state =
-            ReconnectState::Modal(ModalVariant::ConnectFailed { error: message });
+        self.reconnect_state = new_state;
         self.last_modal_at = Some(Instant::now());
     }
 }

@@ -226,9 +226,11 @@ neither could keep the desktop.
 So a `DISCONNECTING` sends the GUI straight to
 `Modal(ServerEnded { notice, ticket })` (`RyllApp::handle_server_ended`),
 with no retry. `notice` is the text of a main-channel server `NOTIFY`
-that arrived within five seconds before it, if there was one, cut to
-500 characters; a new session forgets it, so it cannot explain a later
-session's end. The modal offers a Reconnect button, since pressing it is
+that arrived within five seconds before it, if there was one, on one
+line and cut to 500 characters; the modal quotes it as what the server
+said rather than as its reason, and scrolls a long body rather than let
+it push the buttons out of reach. A new session forgets the notice, so
+it cannot explain a later session's end. The modal offers a Reconnect button, since pressing it is
 a deliberate takeover, unless `ticket` records that the ticket policy
 forbids any further link (`ReconnectPolicy::forbid_retry`). Then it
 says the ticket was single-use or has expired instead.
@@ -241,7 +243,19 @@ because ryll reads each channel on its own task. In that case the GUI
 has already entered `Pending`, and a `DISCONNECTING` that arrives
 during the one-second first backoff still cancels the retry
 (`ReconnectState::on_server_ended`). An existing modal is left alone:
-it already stops the retries.
+it already stops the retries. A connection attempt still linking its
+secondary channels when the server ends the session fails too, and that
+failure leaves the modal in place as well
+(`ReconnectState::on_connect_failed`), rather than replace it with a
+"Could not connect" modal offering to take the session back.
+
+The main channel reports the `DISCONNECTING` as soon as it arrives, but
+by a send that gives up on a stalled frontend, as every main-channel
+event but the session's end does (the read loop must keep answering
+PINGs). So once it has seen one, the main channel also reports its own
+end, by the send that does not give up, as `ServerAnnounced` rather than
+as a close, a reset or a keepalive timeout. The no-retry decision never
+rests on the event that can be dropped.
 
 ### Connection attempts that fail before a session exists
 
@@ -293,8 +307,8 @@ The `Modal` variant carries one of five discriminants:
   Buttons: Reconnect, Close, whatever the ticket policy says,
   since nothing was consumed that ryll knows of.
 - `ServerEnded { notice, ticket }` — the server sent
-  `DISCONNECTING` (see above). Buttons: Reconnect, Close; Close
-  only when the ticket policy forbids a further link.
+  `DISCONNECTING` (see above). Buttons: Close always; Reconnect
+  only when the ticket policy allows a further link.
 
 `ReconnectPolicy::forbid_retry(now_wall)` consults the two
 ticket-related `Config` fields and says why retry would be
