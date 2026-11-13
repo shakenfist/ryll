@@ -100,7 +100,8 @@ const MAX_ROUND_TRIPS_PENDING: usize = 8;
 /// receives and acknowledges each `MOTION_ACK_BUNCH`-th, as andris does,
 /// so the n-th ack answers the (n x `MOTION_ACK_BUNCH`)-th pointer
 /// message ryll sent. That includes the position update sent with each
-/// button press and release, which the send throttle does not count.
+/// button press and release, which the send throttle counts but does
+/// not gate.
 ///
 /// Bunches are numbered, so the n-th ack is paired with bunch n by
 /// number rather than by queue position: forgetting a bunch the server
@@ -197,6 +198,10 @@ pub struct InputsChannel {
     buffer: ReceiveBuffer,
     last_key_time: Option<Instant>,
     button_state: u32,
+    /// Pointer messages (`MOUSE_POSITION` and `MOUSE_MOTION`) sent and
+    /// not yet acknowledged, as the server counts them: every one sent,
+    /// gated or not. Moves are dropped while it is at
+    /// `MOTION_ACK_BUNCH * 2` or more.
     motion_count: u32,
     /// Distinguishes a busy ack window from a wedged one. See
     /// [`MotionWedgeDetector`].
@@ -731,7 +736,6 @@ impl InputsChannel {
                     let msg = make_message(inputs_client::MOUSE_POSITION, &payload);
                     self.send_with_log(inputs_client::MOUSE_POSITION, &msg)
                         .await?;
-                    self.motion_count += 1;
                 } else {
                     self.note_motion_throttled();
                 }
@@ -759,7 +763,6 @@ impl InputsChannel {
                     let msg = make_message(inputs_client::MOUSE_MOTION, &payload);
                     self.send_with_log(inputs_client::MOUSE_MOTION, &msg)
                         .await?;
-                    self.motion_count += 1;
                 } else {
                     self.note_motion_throttled();
                 }
@@ -1068,6 +1071,14 @@ impl InputsChannel {
             && (msg_type == inputs_client::MOUSE_POSITION
                 || msg_type == inputs_client::MOUSE_MOTION)
         {
+            // Every pointer message the server receives counts towards
+            // its acks, including the position sent with each button
+            // press and release, which the throttle lets through
+            // ungated. Counting only the gated sends left the window
+            // over-drained by two per click, pinned near zero, and the
+            // throttle inert (#431). spice-gtk counts them too
+            // (`mouse_position()` in channel-inputs.c).
+            self.motion_count = self.motion_count.saturating_add(1);
             self.motion_round_trip.note_sent(Instant::now());
         }
         self.update_snapshot();
@@ -2867,6 +2878,126 @@ mod tests {
                 .handle_server_message(inputs_server::PING, &[0; Ping::SIZE - 1])
                 .await
                 .is_err());
+        }
+    }
+
+    // The ack window's accounting: what counts towards it, and whether
+    // the throttle it drives ever engages.
+
+    mod motion_accounting {
+        use std::sync::{Arc, Mutex};
+
+        use shakenfist_spice_protocol::inputs_server;
+        use tokio::sync::mpsc;
+
+        use super::super::{InputEvent, InputsChannel, MOTION_ACK_BUNCH};
+        use crate::channels::test_support::{loopback, NullTraffic, TestChannelPeers};
+        use crate::snapshots::InputsSnapshot;
+        use crate::{ByteCounter, LogConfig};
+
+        async fn test_inputs_channel() -> (InputsChannel, TestChannelPeers) {
+            let (stream, events, peers) = loopback().await;
+            let (_input_tx, input_rx) = mpsc::channel(1);
+            let channel = InputsChannel::new(
+                stream,
+                events,
+                input_rx,
+                None,
+                Arc::new(ByteCounter::new()),
+                Arc::new(NullTraffic::new()),
+                Arc::new(Mutex::new(InputsSnapshot::default())),
+                false,
+                LogConfig::default(),
+            );
+            (channel, peers)
+        }
+
+        async fn click(channel: &mut InputsChannel) {
+            for event in [
+                InputEvent::MouseDown {
+                    button: 1,
+                    x: 10,
+                    y: 20,
+                },
+                InputEvent::MouseUp {
+                    button: 1,
+                    x: 10,
+                    y: 20,
+                },
+            ] {
+                channel.handle_input_event(event).await.expect("sent");
+            }
+        }
+
+        async fn ack(channel: &mut InputsChannel) {
+            channel
+                .handle_server_message(inputs_server::MOUSE_MOTION_ACK, &[])
+                .await
+                .expect("an ack is handled");
+        }
+
+        /// The server counts the position sent with each press and
+        /// release towards its acks, so ryll must too (#431).
+        #[tokio::test]
+        async fn a_click_counts_its_two_position_updates() {
+            let (mut channel, _peers) = test_inputs_channel().await;
+            click(&mut channel).await;
+            assert_eq!(channel.motion_count, 2);
+        }
+
+        /// Clicks the server has not acknowledged fill the window, and
+        /// the next move is throttled. Before #431 the window sat near
+        /// zero and the throttle never engaged.
+        #[tokio::test]
+        async fn unacknowledged_clicks_engage_the_throttle() {
+            let (mut channel, _peers) = test_inputs_channel().await;
+            for _ in 0..MOTION_ACK_BUNCH {
+                click(&mut channel).await;
+            }
+            assert_eq!(channel.motion_count, MOTION_ACK_BUNCH * 2);
+
+            channel
+                .handle_input_event(InputEvent::MouseMove { x: 1, y: 1 })
+                .await
+                .expect("a throttled move is not an error");
+            assert_eq!(
+                channel.motion_wedge.drops(),
+                1,
+                "the move was not throttled"
+            );
+            assert_eq!(channel.motion_count, MOTION_ACK_BUNCH * 2);
+        }
+
+        /// A click is never gated, even with the window full: a click
+        /// that does not reach the guest is worse than a burst of
+        /// position updates.
+        #[tokio::test]
+        async fn a_full_window_does_not_gate_a_click() {
+            let (mut channel, _peers) = test_inputs_channel().await;
+            for _ in 0..=MOTION_ACK_BUNCH {
+                click(&mut channel).await;
+            }
+            assert_eq!(channel.motion_count, MOTION_ACK_BUNCH * 2 + 2);
+            assert_eq!(channel.button_state, 0, "the last release was lost");
+        }
+
+        /// Each ack drains one bunch of what was sent, clicks
+        /// included, and reopens the window to moves.
+        #[tokio::test]
+        async fn an_ack_drains_a_bunch_and_reopens_the_window() {
+            let (mut channel, _peers) = test_inputs_channel().await;
+            for _ in 0..MOTION_ACK_BUNCH {
+                click(&mut channel).await;
+            }
+            ack(&mut channel).await;
+            assert_eq!(channel.motion_count, MOTION_ACK_BUNCH);
+
+            channel
+                .handle_input_event(InputEvent::MouseMove { x: 1, y: 1 })
+                .await
+                .expect("sent");
+            assert_eq!(channel.motion_wedge.drops(), 0, "the move was throttled");
+            assert_eq!(channel.motion_count, MOTION_ACK_BUNCH + 1);
         }
     }
 }
