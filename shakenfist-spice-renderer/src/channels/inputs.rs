@@ -175,8 +175,15 @@ impl MotionRoundTrip {
     }
 }
 
-/// Maximum number of recent input events to keep in the snapshot.
+/// Most key, button and modifier events kept in the snapshot's
+/// `recent_events`.
 const MAX_RECENT_EVENTS: usize = 50;
+
+/// Most pointer moves kept in the snapshot's `recent_motion`. Motion
+/// has its own ring because it arrives fast enough to evict everything
+/// else from a shared one within two seconds, losing the very clicks
+/// an input bug report is filed about (#432).
+const MAX_RECENT_MOTION: usize = 50;
 
 /// Maximum characters for a single paste-as-keystrokes sequence.
 const PASTE_MAX_CHARS: usize = 4096;
@@ -240,7 +247,10 @@ pub struct InputsChannel {
     traffic: Arc<dyn TrafficSink>,
     log_config: LogConfig,
     snapshot: Arc<Mutex<InputsSnapshot>>,
+    /// Keys, buttons and modifiers sent; see [`MAX_RECENT_EVENTS`].
     recent_events: VecDeque<InputEventRecord>,
+    /// Pointer moves sent; see [`MAX_RECENT_MOTION`].
+    recent_motion: VecDeque<InputEventRecord>,
     bytes_in: u64,
     bytes_out: u64,
     /// Local cache of disconnect-cause diagnostic fields,
@@ -294,6 +304,7 @@ impl InputsChannel {
             log_config,
             snapshot,
             recent_events: VecDeque::new(),
+            recent_motion: VecDeque::new(),
             bytes_in: 0,
             bytes_out: 0,
             last_recv_ts_secs: None,
@@ -744,7 +755,7 @@ impl InputsChannel {
             InputEvent::MouseMove { x, y } => {
                 // Throttle: don't exceed MOTION_ACK_BUNCH * 2 pending
                 if self.motion_count < MOTION_ACK_BUNCH * 2 {
-                    self.record_event(InputEventRecord {
+                    self.record_motion(InputEventRecord {
                         event_type: "MouseMove".to_string(),
                         scancode: 0,
                         x,
@@ -772,7 +783,7 @@ impl InputsChannel {
             InputEvent::MouseMotion { dx, dy } => {
                 // Server mouse mode: send relative deltas.
                 if self.motion_count < MOTION_ACK_BUNCH * 2 {
-                    self.record_event(InputEventRecord {
+                    self.record_motion(InputEventRecord {
                         event_type: "MouseMotion".to_string(),
                         scancode: 0,
                         x: dx as u32,
@@ -1088,11 +1099,20 @@ impl InputsChannel {
         }
     }
 
-    /// Record an input event in the local deque.
+    /// Record a key, button or modifier event in its ring.
     fn record_event(&mut self, event: InputEventRecord) {
         self.recent_events.push_back(event);
         if self.recent_events.len() > MAX_RECENT_EVENTS {
             self.recent_events.pop_front();
+        }
+    }
+
+    /// Record a pointer move in its own ring, where it ages out on its
+    /// own timescale rather than evicting the clicks and keys.
+    fn record_motion(&mut self, event: InputEventRecord) {
+        self.recent_motion.push_back(event);
+        if self.recent_motion.len() > MAX_RECENT_MOTION {
+            self.recent_motion.pop_front();
         }
     }
 
@@ -1103,6 +1123,7 @@ impl InputsChannel {
         snap.motion_count = self.motion_count;
         snap.secs_since_last_key = self.last_key_time.map(|t| t.elapsed().as_secs_f64());
         snap.recent_events = self.recent_events.clone();
+        snap.recent_motion = self.recent_motion.clone();
         snap.bytes_in = self.bytes_in;
         snap.bytes_out = self.bytes_out;
         snap.last_recv_ts_secs = self.last_recv_ts_secs;
@@ -2955,7 +2976,10 @@ mod tests {
         use shakenfist_spice_protocol::{inputs_client, inputs_server};
         use tokio::sync::mpsc;
 
-        use super::super::{InputEvent, InputsChannel, WedgeCause, MOTION_ACK_BUNCH};
+        use super::super::{
+            InputEvent, InputsChannel, WedgeCause, MAX_RECENT_EVENTS, MAX_RECENT_MOTION,
+            MOTION_ACK_BUNCH,
+        };
         use crate::channels::test_support::{loopback, NullTraffic, TestChannelPeers};
         use crate::snapshots::InputsSnapshot;
         use crate::{ByteCounter, LogConfig};
@@ -3122,6 +3146,56 @@ mod tests {
             channel.byte_counter.add(100);
             ack(&mut channel).await;
             assert_eq!(channel.wedge_cause(), WedgeCause::ServerQuiet);
+        }
+
+        /// A click followed by a long run of pointer motion keeps the
+        /// click in the snapshot: motion ages out of its own ring and
+        /// never evicts buttons or keys (#432).
+        #[tokio::test]
+        async fn motion_does_not_evict_clicks_from_the_snapshot() {
+            let (mut channel, _peers) = test_inputs_channel().await;
+            channel
+                .handle_input_event(InputEvent::KeyDown(0x1E))
+                .await
+                .expect("sent");
+            click(&mut channel).await;
+            // Far more moves than either ring holds, each acknowledged
+            // as the server would, so none is throttled.
+            for i in 0..(MAX_RECENT_EVENTS + MAX_RECENT_MOTION) as u32 {
+                channel
+                    .handle_input_event(InputEvent::MouseMove { x: i, y: i })
+                    .await
+                    .expect("sent");
+                if i % MOTION_ACK_BUNCH == MOTION_ACK_BUNCH - 1 {
+                    ack(&mut channel).await;
+                }
+            }
+            let snap = channel.snapshot.lock().unwrap().clone();
+            let kinds: Vec<&str> = snap
+                .recent_events
+                .iter()
+                .map(|e| e.event_type.as_str())
+                .collect();
+            assert_eq!(kinds, ["KeyDown", "MouseDown", "MouseUp"]);
+            assert_eq!(snap.recent_motion.len(), MAX_RECENT_MOTION);
+            assert!(snap
+                .recent_motion
+                .iter()
+                .all(|e| e.event_type == "MouseMove"));
+            let last = MAX_RECENT_EVENTS + MAX_RECENT_MOTION - 1;
+            assert_eq!(snap.recent_motion.back().unwrap().x, last as u32);
+        }
+
+        /// The key ring is still bounded by its own cap.
+        #[tokio::test]
+        async fn the_key_and_button_ring_is_bounded() {
+            let (mut channel, _peers) = test_inputs_channel().await;
+            for _ in 0..MAX_RECENT_EVENTS {
+                click(&mut channel).await;
+                ack(&mut channel).await;
+            }
+            assert_eq!(channel.recent_events.len(), MAX_RECENT_EVENTS);
+            assert!(channel.recent_motion.is_empty());
         }
     }
 }
