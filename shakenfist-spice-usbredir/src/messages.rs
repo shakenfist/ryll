@@ -233,8 +233,8 @@ impl EpInfo {
         info.ep_interval.copy_from_slice(&data[32..64]);
         info.ep_interface.copy_from_slice(&data[64..96]);
         let mut c = Cursor::new(&data[96..160]);
-        for i in 0..32 {
-            info.ep_max_packet_size[i] = c.read_u16::<LittleEndian>()?;
+        for slot in &mut info.ep_max_packet_size {
+            *slot = c.read_u16::<LittleEndian>()?;
         }
         Ok(info)
     }
