@@ -83,6 +83,27 @@ impl MotionWedgeDetector {
     }
 }
 
+/// Why the ack window looks wedged, as far as the inputs channel can
+/// tell from what else the session receives.
+///
+/// The two causes look the same from the inputs channel alone: acks
+/// stop and the window stays full. They differ in whether the rest of
+/// the server has gone quiet too, which the session-wide
+/// [`ByteCounter`] total shows (#574).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WedgeCause {
+    /// Nothing has arrived from the server on any channel since its
+    /// last ack, so the server appears to have stalled as a whole: a
+    /// guest or display it is blocked on, say. The mouse mode is not
+    /// the likely cause, because it would not silence the other
+    /// channels.
+    ServerQuiet,
+    /// Other traffic still arrives, so the server is alive but not
+    /// consuming the pointer messages ryll sends: typically the form
+    /// the negotiated mouse mode does not use.
+    PointerIgnored,
+}
+
 /// Most motion bunches [`MotionRoundTrip`] waits on at once. The send
 /// throttle keeps two outstanding, and the position updates sent with
 /// each button press and release can add a few more. Past this the
@@ -206,6 +227,10 @@ pub struct InputsChannel {
     /// Distinguishes a busy ack window from a wedged one. See
     /// [`MotionWedgeDetector`].
     motion_wedge: MotionWedgeDetector,
+    /// When the server last acked pointer messages (or the channel was
+    /// made, before the first ack), and the session's received-byte
+    /// total at that moment. See [`WedgeCause`].
+    last_ack: (Instant, u64),
     /// See [`MotionRoundTrip`].
     motion_round_trip: MotionRoundTrip,
     /// The last round trip it measured, in milliseconds.
@@ -250,6 +275,7 @@ impl InputsChannel {
         enable_paste: bool,
         log_config: LogConfig,
     ) -> Self {
+        let last_ack = (Instant::now(), byte_counter.total());
         InputsChannel {
             stream,
             events,
@@ -259,6 +285,7 @@ impl InputsChannel {
             button_state: 0,
             motion_count: 0,
             motion_wedge: MotionWedgeDetector::default(),
+            last_ack,
             motion_round_trip: MotionRoundTrip::default(),
             last_round_trip_ms: None,
             capture,
@@ -545,6 +572,7 @@ impl InputsChannel {
             inputs_server::MOUSE_MOTION_ACK => {
                 self.motion_count = self.motion_count.saturating_sub(MOTION_ACK_BUNCH);
                 self.motion_wedge.note_ack();
+                self.last_ack = (Instant::now(), self.byte_counter.total());
                 debug!("inputs: mouse motion ack (pending={})", self.motion_count);
                 if let Some(rtt_ms) = self.motion_round_trip.note_ack(Instant::now()) {
                     self.last_round_trip_ms = Some(rtt_ms);
@@ -737,7 +765,7 @@ impl InputsChannel {
                     self.send_with_log(inputs_client::MOUSE_POSITION, &msg)
                         .await?;
                 } else {
-                    self.note_motion_throttled();
+                    self.note_motion_throttled(inputs_client::MOUSE_POSITION);
                 }
             }
 
@@ -764,7 +792,7 @@ impl InputsChannel {
                     self.send_with_log(inputs_client::MOUSE_MOTION, &msg)
                         .await?;
                 } else {
-                    self.note_motion_throttled();
+                    self.note_motion_throttled(inputs_client::MOUSE_MOTION);
                 }
             }
 
@@ -986,9 +1014,10 @@ impl InputsChannel {
         Ok(())
     }
 
-    /// Note a pointer move dropped by the ack-window throttle, and
-    /// complain once per session if the throttle looks wedged
-    /// rather than merely busy.
+    /// Note a pointer move of `msg_type` (`MOUSE_POSITION` or
+    /// `MOUSE_MOTION`) dropped by the ack-window throttle, and complain
+    /// once per wedge if the throttle looks wedged rather than merely
+    /// busy.
     ///
     /// The throttle matches spice-gtk (`channel-inputs.c`): at most
     /// `MOTION_ACK_BUNCH * 2` motions may be outstanding, and the
@@ -998,28 +1027,64 @@ impl InputsChannel {
     ///
     /// What is not normal is the window never draining. The count
     /// only falls on an ack, so if the server acks nothing the
-    /// window stays full for the rest of the session and every
-    /// later pointer move is discarded — the guest pointer just
-    /// stops moving. A client sending the wrong message type for
-    /// the negotiated mouse mode produces exactly that, because
-    /// the server does not ack what it did not consume.
+    /// window stays full and every later pointer move is discarded —
+    /// the guest pointer just stops moving. Two causes produce that,
+    /// and the warning says which one the rest of the session points
+    /// at (see [`WedgeCause`]).
     ///
     /// [`MOTION_WEDGE_THRESHOLD`] consecutive drops with no
-    /// intervening ack is the line between the two. Below it, say
-    /// nothing; above it, say so once. The original failure had no
+    /// intervening ack is the line between busy and wedged. Below it,
+    /// say nothing; above it, say so once. The original failure had no
     /// log line at all, which made an input problem look like a
     /// rendering or transport one.
-    fn note_motion_throttled(&mut self) {
+    fn note_motion_throttled(&mut self, msg_type: u16) {
         if self.motion_wedge.note_drop() {
-            warn!(
-                "inputs: {} consecutive pointer moves dropped with {} \
-                 motions outstanding and no MOUSE_MOTION_ACK in between; \
-                 further motion will be dropped silently. If the guest \
-                 pointer is not moving, check the negotiated mouse mode — \
-                 the server does not acknowledge messages it ignores.",
-                self.motion_wedge.drops(),
-                self.motion_count
-            );
+            warn!("{}", self.wedge_warning(msg_type));
+        }
+    }
+
+    /// Why the window looks wedged: whether anything has arrived from
+    /// the server, on any channel, since its last ack.
+    fn wedge_cause(&self) -> WedgeCause {
+        if self.byte_counter.total() == self.last_ack.1 {
+            WedgeCause::ServerQuiet
+        } else {
+            WedgeCause::PointerIgnored
+        }
+    }
+
+    /// The warning for a wedged window, naming the cause the rest of
+    /// the session points at. `msg_type` is the pointer message ryll
+    /// is sending, which says which mouse mode it believes is in use.
+    fn wedge_warning(&self, msg_type: u16) -> String {
+        let head = format!(
+            "inputs: {} consecutive pointer moves dropped with {} motions \
+             outstanding and no MOUSE_MOTION_ACK in between; further motion \
+             will be dropped silently.",
+            self.motion_wedge.drops(),
+            self.motion_count
+        );
+        match self.wedge_cause() {
+            WedgeCause::ServerQuiet => format!(
+                "{head} Nothing has arrived from the server on any channel in the \
+                 {:.1}s since its last ack either, so the server itself appears to \
+                 have stalled; the mouse mode is not the likely cause.",
+                self.last_ack.0.elapsed().as_secs_f64()
+            ),
+            WedgeCause::PointerIgnored => {
+                let (message, mode) = if msg_type == inputs_client::MOUSE_MOTION {
+                    ("MOUSE_MOTION", "server")
+                } else {
+                    ("MOUSE_POSITION", "client")
+                };
+                format!(
+                    "{head} The server is still sending on other channels ({} bytes \
+                     since its last ack), so it is ignoring the {message} messages \
+                     ryll sends in {mode} mouse mode. Check the negotiated mouse \
+                     mode — the server does not acknowledge messages it ignores.",
+                    self.byte_counter.total().saturating_sub(self.last_ack.1)
+                )
+            }
         }
     }
 
@@ -2887,10 +2952,10 @@ mod tests {
     mod motion_accounting {
         use std::sync::{Arc, Mutex};
 
-        use shakenfist_spice_protocol::inputs_server;
+        use shakenfist_spice_protocol::{inputs_client, inputs_server};
         use tokio::sync::mpsc;
 
-        use super::super::{InputEvent, InputsChannel, MOTION_ACK_BUNCH};
+        use super::super::{InputEvent, InputsChannel, WedgeCause, MOTION_ACK_BUNCH};
         use crate::channels::test_support::{loopback, NullTraffic, TestChannelPeers};
         use crate::snapshots::InputsSnapshot;
         use crate::{ByteCounter, LogConfig};
@@ -2998,6 +3063,65 @@ mod tests {
                 .expect("sent");
             assert_eq!(channel.motion_wedge.drops(), 0, "the move was throttled");
             assert_eq!(channel.motion_count, MOTION_ACK_BUNCH + 1);
+        }
+
+        /// A window wedged while nothing at all arrives from the server
+        /// is the server stalling, and the warning must not send the
+        /// reader off to check the mouse mode (#574).
+        #[tokio::test]
+        async fn a_wedge_with_the_server_silent_blames_the_server() {
+            let (mut channel, _peers) = test_inputs_channel().await;
+            for _ in 0..MOTION_ACK_BUNCH {
+                click(&mut channel).await;
+            }
+            assert_eq!(channel.wedge_cause(), WedgeCause::ServerQuiet);
+            let warning = channel.wedge_warning(inputs_client::MOUSE_POSITION);
+            assert!(
+                warning.contains("appears to have stalled"),
+                "the warning should blame the server: {warning}"
+            );
+            assert!(
+                !warning.contains("Check the negotiated mouse mode"),
+                "the warning should not blame the mouse mode: {warning}"
+            );
+        }
+
+        /// With other channels still delivering, the server is alive
+        /// and ignoring the pointer form ryll sends: the mouse-mode
+        /// hint, naming the message and the mode it implies.
+        #[tokio::test]
+        async fn a_wedge_with_the_server_talking_blames_the_pointer_form() {
+            let (mut channel, _peers) = test_inputs_channel().await;
+            for _ in 0..MOTION_ACK_BUNCH {
+                click(&mut channel).await;
+            }
+            channel.byte_counter.add(100);
+            assert_eq!(channel.wedge_cause(), WedgeCause::PointerIgnored);
+
+            let warning = channel.wedge_warning(inputs_client::MOUSE_POSITION);
+            assert!(
+                warning.contains("MOUSE_POSITION messages ryll sends in client mouse mode"),
+                "{warning}"
+            );
+            assert!(
+                warning.contains("100 bytes since its last ack"),
+                "{warning}"
+            );
+            let warning = channel.wedge_warning(inputs_client::MOUSE_MOTION);
+            assert!(
+                warning.contains("MOUSE_MOTION messages ryll sends in server mouse mode"),
+                "{warning}"
+            );
+        }
+
+        /// Only traffic since the server's last ack counts: a server
+        /// that was busy and then stopped is still a stalled server.
+        #[tokio::test]
+        async fn traffic_before_the_last_ack_does_not_count() {
+            let (mut channel, _peers) = test_inputs_channel().await;
+            channel.byte_counter.add(100);
+            ack(&mut channel).await;
+            assert_eq!(channel.wedge_cause(), WedgeCause::ServerQuiet);
         }
     }
 }
