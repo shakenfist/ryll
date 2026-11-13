@@ -760,15 +760,19 @@ async fn serve_connection(
     // Dropping the server closes the stream, if `run` had not, and
     // every channel the connection opened.
     drop(server);
-    connection.end(&served);
+    // Input dropped because the session's queue was full or no session
+    // was being served; only the first of each kind is logged as it
+    // happens.
+    let dropped_input = connection.end(&served);
 
     let peer = connection.peer;
     let duration = started.elapsed();
     match result {
-        Ok(()) => info!(%peer, ?duration, "RDP client disconnected"),
+        Ok(()) => info!(%peer, ?duration, dropped_input, "RDP client disconnected"),
         Err(error) => info!(
             %peer,
             ?duration,
+            dropped_input,
             error = format!("{error:#}"),
             "RDP client disconnected"
         ),
@@ -897,7 +901,11 @@ impl Connection {
     /// its client still held is released to the session it served. If
     /// it served none, the releases have nowhere to go and are
     /// discarded uncounted.
-    fn end(self: &Arc<Self>, served: &Served) {
+    ///
+    /// Returns how many of the client's input events were dropped over
+    /// the connection's life, the releases included, for the line that
+    /// logs its end. Nothing else reports that count (#645).
+    fn end(self: &Arc<Self>, served: &Served) -> u64 {
         let session = lock(&self.session).take().or_else(|| self.slot.current());
         self.slot.clear();
         served
@@ -907,6 +915,7 @@ impl Connection {
             Some(session) => self.release_held(&session),
             None => drop(self.held.end_connection()),
         }
+        self.dropped.load(Ordering::Relaxed)
     }
 }
 
@@ -1172,11 +1181,13 @@ mod tests {
             press(&mut input, code);
         }
         assert_eq!(input.dropped(), 1);
-        connection.end(&Served::default());
+        let dropped = connection.end(&Served::default());
 
         // Neither release fits, so both are counted, and the record
-        // is cleared regardless.
+        // is cleared regardless. The connection's end reports the
+        // total, which is what its disconnect line logs (#645).
         assert_eq!(input.dropped(), 3);
+        assert_eq!(dropped, 3);
         assert!(matches!(input_rx.try_recv(), Ok(InputEvent::KeyDown(0x1E))));
         assert!(input_rx.try_recv().is_err());
         assert!(held.end_connection().is_empty());
