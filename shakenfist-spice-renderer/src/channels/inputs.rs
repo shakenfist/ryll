@@ -83,6 +83,27 @@ impl MotionWedgeDetector {
     }
 }
 
+/// Why the ack window looks wedged, as far as the inputs channel can
+/// tell from what else the session receives.
+///
+/// The two causes look the same from the inputs channel alone: acks
+/// stop and the window stays full. They differ in whether the rest of
+/// the server has gone quiet too, which the session-wide
+/// [`ByteCounter`] total shows (#574).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WedgeCause {
+    /// Nothing has arrived from the server on any channel since its
+    /// last ack, so the server appears to have stalled as a whole: a
+    /// guest or display it is blocked on, say. The mouse mode is not
+    /// the likely cause, because it would not silence the other
+    /// channels.
+    ServerQuiet,
+    /// Other traffic still arrives, so the server is alive but not
+    /// consuming the pointer messages ryll sends: typically the form
+    /// the negotiated mouse mode does not use.
+    PointerIgnored,
+}
+
 /// Most motion bunches [`MotionRoundTrip`] waits on at once. The send
 /// throttle keeps two outstanding, and the position updates sent with
 /// each button press and release can add a few more. Past this the
@@ -100,7 +121,8 @@ const MAX_ROUND_TRIPS_PENDING: usize = 8;
 /// receives and acknowledges each `MOTION_ACK_BUNCH`-th, as andris does,
 /// so the n-th ack answers the (n x `MOTION_ACK_BUNCH`)-th pointer
 /// message ryll sent. That includes the position update sent with each
-/// button press and release, which the send throttle does not count.
+/// button press and release, which the send throttle counts but does
+/// not gate.
 ///
 /// Bunches are numbered, so the n-th ack is paired with bunch n by
 /// number rather than by queue position: forgetting a bunch the server
@@ -153,8 +175,15 @@ impl MotionRoundTrip {
     }
 }
 
-/// Maximum number of recent input events to keep in the snapshot.
+/// Most key, button and modifier events kept in the snapshot's
+/// `recent_events`.
 const MAX_RECENT_EVENTS: usize = 50;
+
+/// Most pointer moves kept in the snapshot's `recent_motion`. Motion
+/// has its own ring because it arrives fast enough to evict everything
+/// else from a shared one within two seconds, losing the very clicks
+/// an input bug report is filed about (#432).
+const MAX_RECENT_MOTION: usize = 50;
 
 /// Maximum characters for a single paste-as-keystrokes sequence.
 const PASTE_MAX_CHARS: usize = 4096;
@@ -197,10 +226,18 @@ pub struct InputsChannel {
     buffer: ReceiveBuffer,
     last_key_time: Option<Instant>,
     button_state: u32,
+    /// Pointer messages (`MOUSE_POSITION` and `MOUSE_MOTION`) sent and
+    /// not yet acknowledged, as the server counts them: every one sent,
+    /// gated or not. Moves are dropped while it is at
+    /// `MOTION_ACK_BUNCH * 2` or more.
     motion_count: u32,
     /// Distinguishes a busy ack window from a wedged one. See
     /// [`MotionWedgeDetector`].
     motion_wedge: MotionWedgeDetector,
+    /// When the server last acked pointer messages (or the channel was
+    /// made, before the first ack), and the session's received-byte
+    /// total at that moment. See [`WedgeCause`].
+    last_ack: (Instant, u64),
     /// See [`MotionRoundTrip`].
     motion_round_trip: MotionRoundTrip,
     /// The last round trip it measured, in milliseconds.
@@ -210,7 +247,10 @@ pub struct InputsChannel {
     traffic: Arc<dyn TrafficSink>,
     log_config: LogConfig,
     snapshot: Arc<Mutex<InputsSnapshot>>,
+    /// Keys, buttons and modifiers sent; see [`MAX_RECENT_EVENTS`].
     recent_events: VecDeque<InputEventRecord>,
+    /// Pointer moves sent; see [`MAX_RECENT_MOTION`].
+    recent_motion: VecDeque<InputEventRecord>,
     bytes_in: u64,
     bytes_out: u64,
     /// Local cache of disconnect-cause diagnostic fields,
@@ -245,6 +285,7 @@ impl InputsChannel {
         enable_paste: bool,
         log_config: LogConfig,
     ) -> Self {
+        let last_ack = (Instant::now(), byte_counter.total());
         InputsChannel {
             stream,
             events,
@@ -254,6 +295,7 @@ impl InputsChannel {
             button_state: 0,
             motion_count: 0,
             motion_wedge: MotionWedgeDetector::default(),
+            last_ack,
             motion_round_trip: MotionRoundTrip::default(),
             last_round_trip_ms: None,
             capture,
@@ -262,6 +304,7 @@ impl InputsChannel {
             log_config,
             snapshot,
             recent_events: VecDeque::new(),
+            recent_motion: VecDeque::new(),
             bytes_in: 0,
             bytes_out: 0,
             last_recv_ts_secs: None,
@@ -540,6 +583,7 @@ impl InputsChannel {
             inputs_server::MOUSE_MOTION_ACK => {
                 self.motion_count = self.motion_count.saturating_sub(MOTION_ACK_BUNCH);
                 self.motion_wedge.note_ack();
+                self.last_ack = (Instant::now(), self.byte_counter.total());
                 debug!("inputs: mouse motion ack (pending={})", self.motion_count);
                 if let Some(rtt_ms) = self.motion_round_trip.note_ack(Instant::now()) {
                     self.last_round_trip_ms = Some(rtt_ms);
@@ -711,7 +755,7 @@ impl InputsChannel {
             InputEvent::MouseMove { x, y } => {
                 // Throttle: don't exceed MOTION_ACK_BUNCH * 2 pending
                 if self.motion_count < MOTION_ACK_BUNCH * 2 {
-                    self.record_event(InputEventRecord {
+                    self.record_motion(InputEventRecord {
                         event_type: "MouseMove".to_string(),
                         scancode: 0,
                         x,
@@ -731,16 +775,15 @@ impl InputsChannel {
                     let msg = make_message(inputs_client::MOUSE_POSITION, &payload);
                     self.send_with_log(inputs_client::MOUSE_POSITION, &msg)
                         .await?;
-                    self.motion_count += 1;
                 } else {
-                    self.note_motion_throttled();
+                    self.note_motion_throttled(inputs_client::MOUSE_POSITION);
                 }
             }
 
             InputEvent::MouseMotion { dx, dy } => {
                 // Server mouse mode: send relative deltas.
                 if self.motion_count < MOTION_ACK_BUNCH * 2 {
-                    self.record_event(InputEventRecord {
+                    self.record_motion(InputEventRecord {
                         event_type: "MouseMotion".to_string(),
                         scancode: 0,
                         x: dx as u32,
@@ -759,9 +802,8 @@ impl InputsChannel {
                     let msg = make_message(inputs_client::MOUSE_MOTION, &payload);
                     self.send_with_log(inputs_client::MOUSE_MOTION, &msg)
                         .await?;
-                    self.motion_count += 1;
                 } else {
-                    self.note_motion_throttled();
+                    self.note_motion_throttled(inputs_client::MOUSE_MOTION);
                 }
             }
 
@@ -983,9 +1025,10 @@ impl InputsChannel {
         Ok(())
     }
 
-    /// Note a pointer move dropped by the ack-window throttle, and
-    /// complain once per session if the throttle looks wedged
-    /// rather than merely busy.
+    /// Note a pointer move of `msg_type` (`MOUSE_POSITION` or
+    /// `MOUSE_MOTION`) dropped by the ack-window throttle, and complain
+    /// once per wedge if the throttle looks wedged rather than merely
+    /// busy.
     ///
     /// The throttle matches spice-gtk (`channel-inputs.c`): at most
     /// `MOTION_ACK_BUNCH * 2` motions may be outstanding, and the
@@ -995,36 +1038,81 @@ impl InputsChannel {
     ///
     /// What is not normal is the window never draining. The count
     /// only falls on an ack, so if the server acks nothing the
-    /// window stays full for the rest of the session and every
-    /// later pointer move is discarded — the guest pointer just
-    /// stops moving. A client sending the wrong message type for
-    /// the negotiated mouse mode produces exactly that, because
-    /// the server does not ack what it did not consume.
+    /// window stays full and every later pointer move is discarded —
+    /// the guest pointer just stops moving. Two causes produce that,
+    /// and the warning says which one the rest of the session points
+    /// at (see [`WedgeCause`]).
     ///
     /// [`MOTION_WEDGE_THRESHOLD`] consecutive drops with no
-    /// intervening ack is the line between the two. Below it, say
-    /// nothing; above it, say so once. The original failure had no
+    /// intervening ack is the line between busy and wedged. Below it,
+    /// say nothing; above it, say so once. The original failure had no
     /// log line at all, which made an input problem look like a
     /// rendering or transport one.
-    fn note_motion_throttled(&mut self) {
+    fn note_motion_throttled(&mut self, msg_type: u16) {
         if self.motion_wedge.note_drop() {
-            warn!(
-                "inputs: {} consecutive pointer moves dropped with {} \
-                 motions outstanding and no MOUSE_MOTION_ACK in between; \
-                 further motion will be dropped silently. If the guest \
-                 pointer is not moving, check the negotiated mouse mode — \
-                 the server does not acknowledge messages it ignores.",
-                self.motion_wedge.drops(),
-                self.motion_count
-            );
+            warn!("{}", self.wedge_warning(msg_type));
         }
     }
 
-    /// Record an input event in the local deque.
+    /// Why the window looks wedged: whether anything has arrived from
+    /// the server, on any channel, since its last ack.
+    fn wedge_cause(&self) -> WedgeCause {
+        if self.byte_counter.total() == self.last_ack.1 {
+            WedgeCause::ServerQuiet
+        } else {
+            WedgeCause::PointerIgnored
+        }
+    }
+
+    /// The warning for a wedged window, naming the cause the rest of
+    /// the session points at. `msg_type` is the pointer message ryll
+    /// is sending, which says which mouse mode it believes is in use.
+    fn wedge_warning(&self, msg_type: u16) -> String {
+        let head = format!(
+            "inputs: {} consecutive pointer moves dropped with {} motions \
+             outstanding and no MOUSE_MOTION_ACK in between; further motion \
+             will be dropped silently.",
+            self.motion_wedge.drops(),
+            self.motion_count
+        );
+        match self.wedge_cause() {
+            WedgeCause::ServerQuiet => format!(
+                "{head} Nothing has arrived from the server on any channel in the \
+                 {:.1}s since its last ack either, so the server itself appears to \
+                 have stalled; the mouse mode is not the likely cause.",
+                self.last_ack.0.elapsed().as_secs_f64()
+            ),
+            WedgeCause::PointerIgnored => {
+                let (message, mode) = if msg_type == inputs_client::MOUSE_MOTION {
+                    ("MOUSE_MOTION", "server")
+                } else {
+                    ("MOUSE_POSITION", "client")
+                };
+                format!(
+                    "{head} The server is still sending on other channels ({} bytes \
+                     since its last ack), so it is ignoring the {message} messages \
+                     ryll sends in {mode} mouse mode. Check the negotiated mouse \
+                     mode — the server does not acknowledge messages it ignores.",
+                    self.byte_counter.total().saturating_sub(self.last_ack.1)
+                )
+            }
+        }
+    }
+
+    /// Record a key, button or modifier event in its ring.
     fn record_event(&mut self, event: InputEventRecord) {
         self.recent_events.push_back(event);
         if self.recent_events.len() > MAX_RECENT_EVENTS {
             self.recent_events.pop_front();
+        }
+    }
+
+    /// Record a pointer move in its own ring, where it ages out on its
+    /// own timescale rather than evicting the clicks and keys.
+    fn record_motion(&mut self, event: InputEventRecord) {
+        self.recent_motion.push_back(event);
+        if self.recent_motion.len() > MAX_RECENT_MOTION {
+            self.recent_motion.pop_front();
         }
     }
 
@@ -1035,6 +1123,7 @@ impl InputsChannel {
         snap.motion_count = self.motion_count;
         snap.secs_since_last_key = self.last_key_time.map(|t| t.elapsed().as_secs_f64());
         snap.recent_events = self.recent_events.clone();
+        snap.recent_motion = self.recent_motion.clone();
         snap.bytes_in = self.bytes_in;
         snap.bytes_out = self.bytes_out;
         snap.last_recv_ts_secs = self.last_recv_ts_secs;
@@ -1068,6 +1157,14 @@ impl InputsChannel {
             && (msg_type == inputs_client::MOUSE_POSITION
                 || msg_type == inputs_client::MOUSE_MOTION)
         {
+            // Every pointer message the server receives counts towards
+            // its acks, including the position sent with each button
+            // press and release, which the throttle lets through
+            // ungated. Counting only the gated sends left the window
+            // over-drained by two per click, pinned near zero, and the
+            // throttle inert (#431). spice-gtk counts them too
+            // (`mouse_position()` in channel-inputs.c).
+            self.motion_count = self.motion_count.saturating_add(1);
             self.motion_round_trip.note_sent(Instant::now());
         }
         self.update_snapshot();
@@ -2867,6 +2964,238 @@ mod tests {
                 .handle_server_message(inputs_server::PING, &[0; Ping::SIZE - 1])
                 .await
                 .is_err());
+        }
+    }
+
+    // The ack window's accounting: what counts towards it, and whether
+    // the throttle it drives ever engages.
+
+    mod motion_accounting {
+        use std::sync::{Arc, Mutex};
+
+        use shakenfist_spice_protocol::{inputs_client, inputs_server};
+        use tokio::sync::mpsc;
+
+        use super::super::{
+            InputEvent, InputsChannel, WedgeCause, MAX_RECENT_EVENTS, MAX_RECENT_MOTION,
+            MOTION_ACK_BUNCH,
+        };
+        use crate::channels::test_support::{loopback, NullTraffic, TestChannelPeers};
+        use crate::snapshots::InputsSnapshot;
+        use crate::{ByteCounter, LogConfig};
+
+        async fn test_inputs_channel() -> (InputsChannel, TestChannelPeers) {
+            let (stream, events, peers) = loopback().await;
+            let (_input_tx, input_rx) = mpsc::channel(1);
+            let channel = InputsChannel::new(
+                stream,
+                events,
+                input_rx,
+                None,
+                Arc::new(ByteCounter::new()),
+                Arc::new(NullTraffic::new()),
+                Arc::new(Mutex::new(InputsSnapshot::default())),
+                false,
+                LogConfig::default(),
+            );
+            (channel, peers)
+        }
+
+        async fn click(channel: &mut InputsChannel) {
+            for event in [
+                InputEvent::MouseDown {
+                    button: 1,
+                    x: 10,
+                    y: 20,
+                },
+                InputEvent::MouseUp {
+                    button: 1,
+                    x: 10,
+                    y: 20,
+                },
+            ] {
+                channel.handle_input_event(event).await.expect("sent");
+            }
+        }
+
+        async fn ack(channel: &mut InputsChannel) {
+            channel
+                .handle_server_message(inputs_server::MOUSE_MOTION_ACK, &[])
+                .await
+                .expect("an ack is handled");
+        }
+
+        /// The server counts the position sent with each press and
+        /// release towards its acks, so ryll must too (#431).
+        #[tokio::test]
+        async fn a_click_counts_its_two_position_updates() {
+            let (mut channel, _peers) = test_inputs_channel().await;
+            click(&mut channel).await;
+            assert_eq!(channel.motion_count, 2);
+        }
+
+        /// Clicks the server has not acknowledged fill the window, and
+        /// the next move is throttled. Before #431 the window sat near
+        /// zero and the throttle never engaged.
+        #[tokio::test]
+        async fn unacknowledged_clicks_engage_the_throttle() {
+            let (mut channel, _peers) = test_inputs_channel().await;
+            for _ in 0..MOTION_ACK_BUNCH {
+                click(&mut channel).await;
+            }
+            assert_eq!(channel.motion_count, MOTION_ACK_BUNCH * 2);
+
+            channel
+                .handle_input_event(InputEvent::MouseMove { x: 1, y: 1 })
+                .await
+                .expect("a throttled move is not an error");
+            assert_eq!(
+                channel.motion_wedge.drops(),
+                1,
+                "the move was not throttled"
+            );
+            assert_eq!(channel.motion_count, MOTION_ACK_BUNCH * 2);
+        }
+
+        /// A click is never gated, even with the window full: a click
+        /// that does not reach the guest is worse than a burst of
+        /// position updates.
+        #[tokio::test]
+        async fn a_full_window_does_not_gate_a_click() {
+            let (mut channel, _peers) = test_inputs_channel().await;
+            for _ in 0..=MOTION_ACK_BUNCH {
+                click(&mut channel).await;
+            }
+            assert_eq!(channel.motion_count, MOTION_ACK_BUNCH * 2 + 2);
+            assert_eq!(channel.button_state, 0, "the last release was lost");
+        }
+
+        /// Each ack drains one bunch of what was sent, clicks
+        /// included, and reopens the window to moves.
+        #[tokio::test]
+        async fn an_ack_drains_a_bunch_and_reopens_the_window() {
+            let (mut channel, _peers) = test_inputs_channel().await;
+            for _ in 0..MOTION_ACK_BUNCH {
+                click(&mut channel).await;
+            }
+            ack(&mut channel).await;
+            assert_eq!(channel.motion_count, MOTION_ACK_BUNCH);
+
+            channel
+                .handle_input_event(InputEvent::MouseMove { x: 1, y: 1 })
+                .await
+                .expect("sent");
+            assert_eq!(channel.motion_wedge.drops(), 0, "the move was throttled");
+            assert_eq!(channel.motion_count, MOTION_ACK_BUNCH + 1);
+        }
+
+        /// A window wedged while nothing at all arrives from the server
+        /// is the server stalling, and the warning must not send the
+        /// reader off to check the mouse mode (#574).
+        #[tokio::test]
+        async fn a_wedge_with_the_server_silent_blames_the_server() {
+            let (mut channel, _peers) = test_inputs_channel().await;
+            for _ in 0..MOTION_ACK_BUNCH {
+                click(&mut channel).await;
+            }
+            assert_eq!(channel.wedge_cause(), WedgeCause::ServerQuiet);
+            let warning = channel.wedge_warning(inputs_client::MOUSE_POSITION);
+            assert!(
+                warning.contains("appears to have stalled"),
+                "the warning should blame the server: {warning}"
+            );
+            assert!(
+                !warning.contains("Check the negotiated mouse mode"),
+                "the warning should not blame the mouse mode: {warning}"
+            );
+        }
+
+        /// With other channels still delivering, the server is alive
+        /// and ignoring the pointer form ryll sends: the mouse-mode
+        /// hint, naming the message and the mode it implies.
+        #[tokio::test]
+        async fn a_wedge_with_the_server_talking_blames_the_pointer_form() {
+            let (mut channel, _peers) = test_inputs_channel().await;
+            for _ in 0..MOTION_ACK_BUNCH {
+                click(&mut channel).await;
+            }
+            channel.byte_counter.add(100);
+            assert_eq!(channel.wedge_cause(), WedgeCause::PointerIgnored);
+
+            let warning = channel.wedge_warning(inputs_client::MOUSE_POSITION);
+            assert!(
+                warning.contains("MOUSE_POSITION messages ryll sends in client mouse mode"),
+                "{warning}"
+            );
+            assert!(
+                warning.contains("100 bytes since its last ack"),
+                "{warning}"
+            );
+            let warning = channel.wedge_warning(inputs_client::MOUSE_MOTION);
+            assert!(
+                warning.contains("MOUSE_MOTION messages ryll sends in server mouse mode"),
+                "{warning}"
+            );
+        }
+
+        /// Only traffic since the server's last ack counts: a server
+        /// that was busy and then stopped is still a stalled server.
+        #[tokio::test]
+        async fn traffic_before_the_last_ack_does_not_count() {
+            let (mut channel, _peers) = test_inputs_channel().await;
+            channel.byte_counter.add(100);
+            ack(&mut channel).await;
+            assert_eq!(channel.wedge_cause(), WedgeCause::ServerQuiet);
+        }
+
+        /// A click followed by a long run of pointer motion keeps the
+        /// click in the snapshot: motion ages out of its own ring and
+        /// never evicts buttons or keys (#432).
+        #[tokio::test]
+        async fn motion_does_not_evict_clicks_from_the_snapshot() {
+            let (mut channel, _peers) = test_inputs_channel().await;
+            channel
+                .handle_input_event(InputEvent::KeyDown(0x1E))
+                .await
+                .expect("sent");
+            click(&mut channel).await;
+            // Far more moves than either ring holds, each acknowledged
+            // as the server would, so none is throttled.
+            for i in 0..(MAX_RECENT_EVENTS + MAX_RECENT_MOTION) as u32 {
+                channel
+                    .handle_input_event(InputEvent::MouseMove { x: i, y: i })
+                    .await
+                    .expect("sent");
+                if i % MOTION_ACK_BUNCH == MOTION_ACK_BUNCH - 1 {
+                    ack(&mut channel).await;
+                }
+            }
+            let snap = channel.snapshot.lock().unwrap().clone();
+            let kinds: Vec<&str> = snap
+                .recent_events
+                .iter()
+                .map(|e| e.event_type.as_str())
+                .collect();
+            assert_eq!(kinds, ["KeyDown", "MouseDown", "MouseUp"]);
+            assert_eq!(snap.recent_motion.len(), MAX_RECENT_MOTION);
+            assert!(snap
+                .recent_motion
+                .iter()
+                .all(|e| e.event_type == "MouseMove"));
+            let last = MAX_RECENT_EVENTS + MAX_RECENT_MOTION - 1;
+            assert_eq!(snap.recent_motion.back().unwrap().x, last as u32);
+        }
+
+        /// The key ring is still bounded by its own cap.
+        #[tokio::test]
+        async fn the_key_and_button_ring_is_bounded() {
+            let (mut channel, _peers) = test_inputs_channel().await;
+            for _ in 0..MAX_RECENT_EVENTS {
+                click(&mut channel).await;
+                ack(&mut channel).await;
+            }
+            assert_eq!(channel.recent_events.len(), MAX_RECENT_EVENTS);
+            assert!(channel.recent_motion.is_empty());
         }
     }
 }

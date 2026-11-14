@@ -438,6 +438,22 @@ The SPICE connection was lost, and ryll is retrying. The log says so:
 If the retries fail, ryll exits and logs why: `rdp: not reconnecting to SPICE:
 ...`.
 
+What the client sends while the frame is dark has no session to go to and is
+dropped. When a session returns, ryll logs how many were dropped during that
+outage (`rdp: dropped N input events while the SPICE session was down`), and
+at exit it logs the total over the whole run, which also covers an outage still
+under way when ryll stopped.
+
+### Keys or clicks went missing
+
+Each `RDP client disconnected` line carries `dropped_input`: how many of that
+client's input events were dropped over the connection, because the SPICE
+session's input queue was full, no session was being served, or the keys and
+buttons it still held could not be released when it left. As they happen, a
+full or closed queue is logged once per run at warning level and a missing
+session only at debug, so a non-zero count here is the place to see how many
+there were.
+
 ### No audio
 
 The client has to ask for it (`/sound` in FreeRDP). If ryll logs `the SPICE

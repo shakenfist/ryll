@@ -377,7 +377,8 @@ pub struct DisplaySnapshot {
 /// A recorded input event for the inputs channel snapshot.
 #[derive(Debug, Clone, Serialize)]
 pub struct InputEventRecord {
-    /// "KeyDown", "KeyUp", "MouseDown", "MouseUp", "MouseMove".
+    /// "KeyDown", "KeyUp", "KeyModifiers", "MouseDown", "MouseUp",
+    /// "MouseMove" or "MouseMotion".
     pub event_type: String,
     /// Scancode for key events, 0 for mouse events.
     pub scancode: u32,
@@ -396,7 +397,15 @@ pub struct InputsSnapshot {
     pub button_state: u32,
     pub motion_count: u32,
     pub secs_since_last_key: Option<f64>,
+    /// The most recent key, button and modifier events sent, oldest
+    /// first. Pointer moves are kept apart in `recent_motion`, so a
+    /// burst of motion cannot evict the clicks and keys a bug report is
+    /// filed about.
     pub recent_events: VecDeque<InputEventRecord>,
+    /// The most recent pointer moves sent (`MouseMove` in client mouse
+    /// mode, `MouseMotion` in server mode), oldest first. Timestamps
+    /// share `recent_events`' clock, so the two interleave by time.
+    pub recent_motion: VecDeque<InputEventRecord>,
     pub bytes_in: u64,
     pub bytes_out: u64,
     /// See `DisplaySnapshot::last_recv_ts_secs`.

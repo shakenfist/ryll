@@ -19,7 +19,7 @@
 
 use std::future::Future;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -177,14 +177,15 @@ impl SessionLink {
 /// Forward what the RDP side sends on `rx` to the session `route`
 /// names, dropping it while there is none or that session's queue
 /// has closed. Logs how many were dropped once one gets through
-/// again, and returns how many were dropped in all once every sender
-/// of `rx` has gone.
+/// again, and adds each to `dropped`, which outlives the task: the
+/// relays are aborted at teardown rather than awaited, so a count the
+/// task returned would be lost with it (#645).
 async fn relay<T>(
     mut rx: mpsc::Receiver<T>,
     route: watch::Receiver<Option<mpsc::Sender<T>>>,
     what: &str,
-) -> u64 {
-    let mut dropped = 0;
+    dropped: Arc<AtomicU64>,
+) {
     let mut unreported = 0;
     while let Some(item) = rx.recv().await {
         let to = route.borrow().clone();
@@ -193,7 +194,7 @@ async fn relay<T>(
             None => false,
         };
         if !delivered {
-            dropped += 1;
+            dropped.fetch_add(1, Ordering::Relaxed);
             unreported += 1;
         } else if unreported > 0 {
             info!(
@@ -203,7 +204,18 @@ async fn relay<T>(
             unreported = 0;
         }
     }
-    dropped
+}
+
+/// The line logged at shutdown with what the relays dropped over the
+/// whole run, or `None` if they dropped nothing. The per-outage lines
+/// [`relay`] logs miss an outage still under way when ryll stops.
+fn relay_drop_summary(input_events: u64, resize_requests: u64) -> Option<String> {
+    (input_events > 0 || resize_requests > 0).then(|| {
+        format!(
+            "rdp: dropped {input_events} input events and {resize_requests} resize \
+             requests in all while the SPICE session was down"
+        )
+    })
 }
 
 /// Copy every value of one attempt's state watch to the fixed one the
@@ -647,9 +659,20 @@ pub fn run_rdp(
         let volume_control = VolumeControl::new();
 
         let link = Arc::new(SessionLink::new(surface_mirror.clone()));
-        let input_relay = tokio::spawn(relay(input_rx, link.input.subscribe(), "input events"));
-        let resize_relay =
-            tokio::spawn(relay(resize_rx, link.resize.subscribe(), "resize requests"));
+        let input_dropped = Arc::new(AtomicU64::new(0));
+        let resize_dropped = Arc::new(AtomicU64::new(0));
+        let input_relay = tokio::spawn(relay(
+            input_rx,
+            link.input.subscribe(),
+            "input events",
+            input_dropped.clone(),
+        ));
+        let resize_relay = tokio::spawn(relay(
+            resize_rx,
+            link.resize.subscribe(),
+            "resize requests",
+            resize_dropped.clone(),
+        ));
 
         // Start the RDP server before dialling SPICE, so a port that
         // cannot be bound or an unusable certificate fails the launch
@@ -864,6 +887,12 @@ pub fn run_rdp(
 
         input_relay.abort();
         resize_relay.abort();
+        if let Some(summary) = relay_drop_summary(
+            input_dropped.load(Ordering::Relaxed),
+            resize_dropped.load(Ordering::Relaxed),
+        ) {
+            info!("{}", summary);
+        }
         event_bus_handles.forwarder.abort();
         event_bus_handles.mirror.abort();
         cursor_relay.abort();
@@ -1348,7 +1377,13 @@ mod tests {
     async fn input_reaches_only_a_session_that_exists() {
         let link = link_in_an_outage();
         let (fixed_tx, fixed_rx) = mpsc::channel(8);
-        let relay = tokio::spawn(relay(fixed_rx, link.input.subscribe(), "input events"));
+        let dropped = Arc::new(AtomicU64::new(0));
+        let relay = tokio::spawn(relay(
+            fixed_rx,
+            link.input.subscribe(),
+            "input events",
+            dropped.clone(),
+        ));
         let (routes, mut attempt_rx) = routes();
 
         // Before the attempt's session begins: dropped.
@@ -1366,10 +1401,23 @@ mod tests {
         fixed_tx.send(InputEvent::KeyDown(3)).await.unwrap();
         relayed(&fixed_tx).await;
 
-        drop(fixed_tx);
-        assert_eq!(relay.await.unwrap(), 2);
+        // The count is readable while the relay still runs, and after
+        // it is aborted, as it is at teardown (#645).
+        assert_eq!(dropped.load(Ordering::Relaxed), 2);
+        relay.abort();
+        let _ = relay.await;
+        assert_eq!(dropped.load(Ordering::Relaxed), 2);
         assert!(matches!(attempt_rx.try_recv(), Ok(InputEvent::KeyDown(2))));
         assert!(attempt_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn the_shutdown_summary_reports_drops_and_only_drops() {
+        assert_eq!(relay_drop_summary(0, 0), None);
+        let summary = relay_drop_summary(3, 0).expect("input drops are reported");
+        assert!(summary.contains("dropped 3 input events and 0 resize requests"));
+        let summary = relay_drop_summary(0, 2).expect("resize drops are reported");
+        assert!(summary.contains("0 input events and 2 resize requests"));
     }
 
     /// Wait for `rx`'s next value, failing the test if none comes.
