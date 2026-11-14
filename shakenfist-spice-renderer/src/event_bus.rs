@@ -17,7 +17,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::channels::ChannelEvent;
-use crate::surface_mirror::SurfaceMirror;
+use crate::surface_mirror::{SurfaceLedger, SurfaceMirror};
 
 /// The tasks [`EventBus::start`] spawned, for a caller that needs to
 /// abort or join them on teardown.
@@ -97,9 +97,18 @@ impl EventBus {
         // Forwarder: `broadcast::Sender::send` is non-blocking. An
         // error means there are no current receivers, which is fine
         // for events nobody is waiting on (the sender re-arms
-        // automatically when subscribers appear).
+        // automatically when subscribers appear). The forwarder sees
+        // every event, since the mpsc it drains loses none, so it also
+        // keeps the ledger of which surfaces exist that the mirror task
+        // resyncs from after a lag. It observes before it sends, so the
+        // ledger is never behind anything the mirror has received.
+        let ledger = Arc::new(std::sync::Mutex::new(SurfaceLedger::new()));
+        let forwarder_ledger = ledger.clone();
         let forwarder = tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
+                if let Ok(mut ledger) = forwarder_ledger.lock() {
+                    ledger.observe(&event);
+                }
                 let _ = tx.send(event);
             }
         });
@@ -109,12 +118,13 @@ impl EventBus {
         // mirror, so the apply dispatch is single-sourced inside
         // `surface_mirror.rs` itself. A `Lagged` error means a slow
         // consumer missed N events, so the mirror's pixels and damage
-        // have diverged from what SPICE sent: mark every surface
-        // fully damaged so downstream consumers resend whole
-        // surfaces, and carry on rather than tearing the session down.
-        // That stops a consumer trusting a partial damage region; it
-        // does not restore the missed draws, or a missed surface
-        // create or destroy, which recover only as the guest redraws.
+        // have diverged from what SPICE sent. The mirror resyncs its
+        // surface list from the forwarder's ledger, so a missed create
+        // or destroy is repaired at once, and marks every surface
+        // fully damaged so downstream consumers resend whole surfaces;
+        // then it carries on rather than tearing the session down. The
+        // missed draws are not restored, and recover only as the guest
+        // redraws.
         let mirror_task = tokio::spawn(async move {
             loop {
                 match mirror_rx.recv().await {
@@ -124,10 +134,16 @@ impl EventBus {
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(
-                            "{}: surface mirror lagged by {} events; resending every surface in full",
+                            "{}: surface mirror lagged by {} events; resyncing its surfaces \
+                             and resending every surface in full",
                             label, n
                         );
-                        mirror.lock().await.mark_all_damaged();
+                        let snapshot = ledger.lock().map(|l| l.clone()).ok();
+                        let mut m = mirror.lock().await;
+                        match snapshot {
+                            Some(ledger) => m.resync(&ledger),
+                            None => m.mark_all_damaged(),
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         info!("{}: surface mirror task exiting (broadcast closed)", label);
@@ -202,15 +218,17 @@ mod tests {
         let mirror = bus.mirror();
         let (tx, rx) = mpsc::channel(16);
 
-        // Start from a surface with no pending damage.
+        // Start from a surface with no pending damage, created through
+        // the bus so the forwarder's ledger knows it exists.
+        let handles = bus.start(rx, "test");
+        tx.send(surface_created(4, 4)).await.unwrap();
+        wait_for_surfaces(&mirror, &[(0, 0)]).await;
         {
             let mut m = mirror.lock().await;
-            m.apply_event(&surface_created(4, 4));
             let s = m.primary_surface_mut().unwrap();
             s.take_damage();
             s.consume_dirty();
         }
-        let handles = bus.start(rx, "test");
 
         let guard = mirror.lock().await;
         for _ in 0..10 {
@@ -231,5 +249,75 @@ mod tests {
         // Draws of 1x1 alone would leave a 1x1 damage rect.
         assert_eq!(s.damage().rects(), &[DamageRect::new(0, 0, 4, 4)]);
         assert!(s.is_dirty());
+    }
+
+    /// Wait until the mirror holds exactly `keys`.
+    async fn wait_for_surfaces(mirror: &Arc<Mutex<SurfaceMirror>>, keys: &[(u8, u32)]) {
+        loop {
+            {
+                let m = mirror.lock().await;
+                let mut held: Vec<_> = m.surfaces.keys().copied().collect();
+                held.sort_unstable();
+                if held == keys {
+                    return;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    fn surface_event(surface_id: u32, created: bool) -> ChannelEvent {
+        if created {
+            ChannelEvent::SurfaceCreated {
+                display_channel_id: 0,
+                surface_id,
+                width: 2,
+                height: 2,
+            }
+        } else {
+            ChannelEvent::SurfaceDestroyed {
+                display_channel_id: 0,
+                surface_id,
+            }
+        }
+    }
+
+    // A create and a destroy that fall inside a lag are not lost
+    // (#651): the mirror resyncs its surface list from the forwarder's
+    // ledger, so it gains the surface created while it lagged and drops
+    // the one destroyed, rather than waiting for the guest to redraw.
+    #[tokio::test]
+    async fn lagged_mirror_resyncs_its_surface_list() {
+        let bus = EventBus::new(1);
+        let mirror = bus.mirror();
+        let (tx, rx) = mpsc::channel(16);
+        let handles = bus.start(rx, "test");
+
+        tx.send(surface_event(0, true)).await.unwrap();
+        wait_for_surfaces(&mirror, &[(0, 0)]).await;
+
+        // Held on the lock, the mirror task misses both lifecycle
+        // events: the bus keeps only the last of the marks after them.
+        let guard = mirror.lock().await;
+        tx.send(surface_event(1, true)).await.unwrap();
+        tx.send(surface_event(0, false)).await.unwrap();
+        for _ in 0..5 {
+            tx.send(ChannelEvent::DisplayMark {
+                produced_at_secs: 0.0,
+            })
+            .await
+            .unwrap();
+        }
+        while tx.capacity() < tx.max_capacity() {
+            tokio::task::yield_now().await;
+        }
+        drop(guard);
+        drop(tx);
+        handles.forwarder.await.unwrap();
+        handles.mirror.await.unwrap();
+
+        let m = mirror.lock().await;
+        let held: Vec<_> = m.surfaces.keys().copied().collect();
+        assert_eq!(held, vec![(0, 1)]);
     }
 }

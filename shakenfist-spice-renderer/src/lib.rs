@@ -71,7 +71,7 @@ pub use snapshots::{
     ChannelSnapshots, CursorCacheEntry, CursorSnapshot, DecodeResult, DisplaySnapshot,
     InputEventRecord, InputsSnapshot, MainSnapshot, StreamSnapshot,
 };
-pub use surface_mirror::{DrawOutcome, SurfaceMirror};
+pub use surface_mirror::{DrawOutcome, SurfaceLedger, SurfaceMirror};
 // Re-exported so a caller can shut a control socket down without
 // taking a direct tokio-util dependency of its own.
 #[cfg(unix)]

@@ -64,7 +64,9 @@ use agent_state::{mac_paste_chord, paste_hint, AgentState};
 use bug_report::{PendingBugReport, PendingDisconnectReport};
 use connection::build_connection_runtime;
 use notification_snapshots::NotificationSnapshotStore;
-use reconnect::{forbid_retry_modal, format_expiry_local, ModalVariant, ReconnectState};
+use reconnect::{
+    forbid_retry_modal, format_expiry_local, server_ended_body, ModalVariant, ReconnectState,
+};
 use resize::{
     compute_auto_resize, compute_outgoing_resize, resolution_notification_due, send_guest_size,
     RESOLUTION_NOTIFY_DEBOUNCE, STATS_BAR_HEIGHT,
@@ -151,6 +153,10 @@ pub struct RyllApp {
     /// reconnect from the modal (user intervention starts a
     /// fresh budget).
     last_modal_at: Option<Instant>,
+    /// When the most recent main-channel server `NOTIFY` arrived, and
+    /// its text: the reason a `DISCONNECTING` right after it gives in
+    /// the `ServerEnded` modal.
+    last_main_notice: Option<(Instant, String)>,
     /// Count of `Pending` entries (per-attempt) over the
     /// session's lifetime, surfaced in `session.json` for
     /// post-hoc analysis of how rocky the session was.
@@ -704,6 +710,7 @@ impl RyllApp {
             reconnect_state: ReconnectState::Idle,
             awaiting_reconnect_outcome: false,
             last_modal_at: None,
+            last_main_notice: None,
             auto_reconnect_count: 0,
             ticket_expiry_warned: false,
             pointer: PointerTranslator::new(),
@@ -2894,13 +2901,22 @@ impl eframe::App for RyllApp {
                     format!("Could not connect to {}.\n\n{}", self.target, error),
                     true,
                 ),
+                ModalVariant::ServerEnded { notice, ticket } => {
+                    let (body, allow_reconnect) = server_ended_body(notice.as_deref(), *ticket);
+                    ("Session ended by the server", body, allow_reconnect)
+                }
             };
             egui::Window::new(title)
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    ui.label(body);
+                    // The body can carry text from the server or an error
+                    // string of any length; scroll it rather than let it
+                    // push the buttons below the bottom of the window.
+                    egui::ScrollArea::vertical()
+                        .max_height(ctx.content_rect().height() * 0.5)
+                        .show(ui, |ui| ui.label(body));
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if allow_reconnect && ui.button("Reconnect").clicked() {

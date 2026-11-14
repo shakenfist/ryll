@@ -39,13 +39,18 @@ use super::vd_agent::VdAgentMessageHeader;
 use super::WireType;
 use crate::constants::vd_agent::VD_AGENT_PROTOCOL;
 
+/// The most clipboard data one agent message carries, in bytes, as it
+/// goes on the wire (after any line-ending conversion for the guest):
+/// spice-gtk's default `max-clipboard` (100 MiB), the largest clipboard
+/// the reference client accepts or sends.
+pub const MAX_CLIPBOARD_DATA_SIZE: usize = 100 * 1024 * 1024;
+
 /// The default cap on a reassembled message's body, in bytes.
 ///
-/// This is spice-gtk's default `max-clipboard` (100 MiB), the largest
-/// clipboard the reference client accepts, plus 4 KiB for the clipboard
+/// This is [`MAX_CLIPBOARD_DATA_SIZE`] plus 4 KiB for the clipboard
 /// message's own headers in front of the data. Any clipboard spice-gtk
 /// would take, the reassembler takes too.
-pub const MAX_AGENT_MESSAGE_SIZE: usize = 100 * 1024 * 1024 + 4096;
+pub const MAX_AGENT_MESSAGE_SIZE: usize = MAX_CLIPBOARD_DATA_SIZE + 4096;
 
 /// A complete guest agent message.
 #[derive(Debug, Clone, PartialEq, Eq)]

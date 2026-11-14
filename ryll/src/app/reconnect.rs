@@ -1,4 +1,4 @@
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use shakenfist_spice_protocol::NotifySeverity;
 
@@ -34,6 +34,95 @@ pub(super) enum ModalVariant {
     /// user's call, so the Reconnect button is offered whatever
     /// the ticket policy says.
     ConnectFailed { error: String },
+    /// The server sent the main channel's `DISCONNECTING`: it ended the
+    /// session on purpose, typically because another client took it
+    /// over. spice-server never sends this, so it is not a network
+    /// fault, and an automatic reconnect would only take the session
+    /// back from whoever has it now, who may retry in turn. `notice` is
+    /// the text of the server `NOTIFY` that came just before, if one
+    /// did. The Reconnect button is offered, since pressing it is a
+    /// deliberate takeover, unless `ticket` says the ticket cannot be
+    /// used again, in which case the modal says so instead.
+    ServerEnded {
+        notice: Option<String>,
+        ticket: Option<TicketBlock>,
+    },
+}
+
+/// The most of a server's `NOTIFY` text the `ServerEnded` modal shows.
+/// The text is the server's to choose; the modal scrolls a long body
+/// rather than push its buttons out of reach, but a reason is a sentence
+/// or two, and anything much longer is not one.
+pub(super) const MAX_SERVER_NOTICE_CHARS: usize = 500;
+
+/// How recently a main-channel server `NOTIFY` must have arrived to be
+/// taken as the reason for the `DISCONNECTING` that follows it. A server
+/// that explains itself sends the two back to back.
+pub(super) const SERVER_NOTICE_WINDOW: Duration = Duration::from_secs(5);
+
+/// The text of `last`, the most recent main-channel server `NOTIFY`, if
+/// it arrived within [`SERVER_NOTICE_WINDOW`] of `now`, as one line of
+/// at most [`MAX_SERVER_NOTICE_CHARS`] characters: whitespace control
+/// characters (line breaks, tabs) become spaces and the rest are
+/// dropped, so a reason cannot spread over hundreds of lines.
+pub(super) fn server_notice(last: Option<&(Instant, String)>, now: Instant) -> Option<String> {
+    last.filter(|(at, _)| now.saturating_duration_since(*at) <= SERVER_NOTICE_WINDOW)
+        .map(|(_, text)| {
+            let line: String = text
+                .chars()
+                .filter_map(|c| match c {
+                    c if c.is_control() && c.is_whitespace() => Some(' '),
+                    c if c.is_control() => None,
+                    c => Some(c),
+                })
+                .collect();
+            match line.char_indices().nth(MAX_SERVER_NOTICE_CHARS) {
+                Some((cut, _)) => format!("{}…", &line[..cut]),
+                None => line,
+            }
+        })
+}
+
+/// The body of the `ServerEnded` modal, and whether it offers the
+/// Reconnect button.
+pub(super) fn server_ended_body(
+    notice: Option<&str>,
+    ticket: Option<TicketBlock>,
+) -> (String, bool) {
+    // The notice is only the server's last word before it ended the
+    // session, not necessarily its reason, so it is quoted as such.
+    let reason = match notice {
+        Some(notice) => format!("The server said: \u{201c}{notice}\u{201d}"),
+        None => "The server gave no reason.".to_string(),
+    };
+    match ticket {
+        None => (
+            format!(
+                "{reason}\n\nThe server ended this session on purpose, so ryll has \
+                 not reconnected. Reconnecting takes the session back from \
+                 whoever has it now."
+            ),
+            true,
+        ),
+        Some(TicketBlock::SingleUse) => (
+            format!(
+                "{reason}\n\nThe server ended this session on purpose. This \
+                 connection used a single-use ticket, so it cannot be resumed \
+                 from here: request a new connection from the system that \
+                 issued the original link."
+            ),
+            false,
+        ),
+        Some(TicketBlock::Expired { expired_at }) => (
+            format!(
+                "{reason}\n\nThe server ended this session on purpose. The \
+                 ticket for it expired at {}, so it cannot be resumed from \
+                 here: request a new connection.",
+                format_expiry_local(expired_at)
+            ),
+            false,
+        ),
+    }
 }
 
 /// Auto-reconnect state machine. Replaces the implicit
@@ -105,6 +194,10 @@ impl ReconnectState {
         policy: ReconnectPolicy,
         latest_error: String,
     ) -> Option<Self> {
+        if self.server_ended() {
+            return None;
+        }
+
         // Ticket-bound deployments: any further reconnect would
         // be rejected, so trip the modal on the first disconnect
         // event of any kind — no point in burning the budget.
@@ -153,6 +246,62 @@ impl ReconnectState {
             }
         }
     }
+
+    /// Pure transition for a connection attempt that failed before it set
+    /// a session up, and was neither an auto-retry nor a session that a
+    /// secondary channel then failed (those are disconnects, and go
+    /// through [`ReconnectState::on_disconnect`]). The user is told what
+    /// failed, with the Reconnect button, unless the server has ended the
+    /// session: an attempt still linking secondary channels when the
+    /// server sent `DISCONNECTING` fails too, and offering to reconnect
+    /// in place of saying the server ended it would invite the user to
+    /// take the session straight back. `None` means the event changes
+    /// nothing.
+    pub(super) fn on_connect_failed(&self, error: String) -> Option<Self> {
+        if self.server_ended() {
+            return None;
+        }
+        Some(ReconnectState::Modal(ModalVariant::ConnectFailed { error }))
+    }
+
+    /// Whether the server ended the session on purpose. That holds for
+    /// the rest of it: nothing that follows the main channel's
+    /// `DISCONNECTING` -- the display and inputs channels it closes, a
+    /// connection attempt it cut short -- may start a retry or replace
+    /// the modal that explains why there is none. Only the user's
+    /// Reconnect, or a new session, leaves this state.
+    fn server_ended(&self) -> bool {
+        matches!(
+            self,
+            ReconnectState::Modal(ModalVariant::ServerEnded { .. })
+        )
+    }
+
+    /// Pure transition for the server's `DISCONNECTING` on the main
+    /// channel. A session that was up, or that is waiting out the
+    /// backoff after a display or inputs channel closed first, lands in
+    /// [`ModalVariant::ServerEnded`] instead of being retried. An
+    /// existing modal is kept: it already stops the retries, and a
+    /// ticket modal also says why a manual reconnect cannot work.
+    /// `policy` decides whether the modal may offer a manual reconnect,
+    /// as it decides whether a lost session may be retried.
+    /// `None` means the event changes nothing.
+    pub(super) fn on_server_ended(
+        &self,
+        notice: Option<String>,
+        policy: ReconnectPolicy,
+        now_wall: SystemTime,
+    ) -> Option<Self> {
+        match self {
+            ReconnectState::Idle | ReconnectState::Pending { .. } => {
+                Some(ReconnectState::Modal(ModalVariant::ServerEnded {
+                    notice,
+                    ticket: policy.forbid_retry(now_wall),
+                }))
+            }
+            ReconnectState::Modal(_) => None,
+        }
+    }
 }
 
 /// Format a `SystemTime` as a `HH:MM:SS` clock string in UTC
@@ -197,6 +346,13 @@ pub(super) fn modal_variant_notification(variant: &ModalVariant) -> (NotifySever
         ModalVariant::ConnectFailed { .. } => (
             NotifySeverity::Error,
             "Connection attempt failed".to_string(),
+        ),
+        ModalVariant::ServerEnded { notice, .. } => (
+            NotifySeverity::Warn,
+            match notice {
+                Some(notice) => format!("The server ended the session: {notice}"),
+                None => "The server ended the session".to_string(),
+            },
         ),
     }
 }
@@ -529,5 +685,197 @@ mod tests {
         });
         assert_eq!(sev, NotifySeverity::Error);
         assert_eq!(msg, "Connection ended — ticket expired");
+    }
+
+    // ── The server ends the session (#598) ──────────────────
+
+    fn server_ended(notice: Option<&str>) -> ReconnectState {
+        ReconnectState::Modal(ModalVariant::ServerEnded {
+            notice: notice.map(str::to_string),
+            ticket: None,
+        })
+    }
+
+    #[test]
+    fn a_server_disconnecting_lands_in_the_modal_instead_of_a_retry() {
+        let notice = Some("another client (10.0.0.2) took over this session".to_string());
+        assert_eq!(
+            ReconnectState::Idle.on_server_ended(notice.clone(), no_policy(), epoch()),
+            Some(server_ended(notice.as_deref()))
+        );
+    }
+
+    // A manual reconnect cannot work on a ticket that has been used up
+    // or has expired, so the modal says so rather than offer one.
+    #[test]
+    fn a_server_ended_session_offers_no_reconnect_the_ticket_forbids() {
+        let single_use = ReconnectPolicy {
+            ticket_is_single_use: true,
+            ..ReconnectPolicy::default()
+        };
+        let state = ReconnectState::Idle
+            .on_server_ended(Some("taken over".into()), single_use, epoch())
+            .unwrap();
+        let ReconnectState::Modal(ModalVariant::ServerEnded { notice, ticket }) = state else {
+            panic!("expected Modal(ServerEnded), got {state:?}");
+        };
+        assert_eq!(ticket, Some(TicketBlock::SingleUse));
+        let (body, allow_reconnect) = server_ended_body(notice.as_deref(), ticket);
+        assert!(!allow_reconnect);
+        assert!(
+            body.starts_with("The server said: \u{201c}taken over\u{201d}"),
+            "{body}"
+        );
+        assert!(body.contains("single-use ticket"), "{body}");
+
+        let expired_at = UNIX_EPOCH + Duration::from_secs(3600);
+        let (body, allow_reconnect) =
+            server_ended_body(None, Some(TicketBlock::Expired { expired_at }));
+        assert!(!allow_reconnect);
+        assert!(body.contains("expired at 01:00:00 UTC"), "{body}");
+
+        let (body, allow_reconnect) = server_ended_body(None, None);
+        assert!(allow_reconnect);
+        assert!(body.starts_with("The server gave no reason."), "{body}");
+    }
+
+    // A display or inputs channel that closed first has started the
+    // backoff; the main channel's DISCONNECTING arriving during it
+    // still stops the retry.
+    #[test]
+    fn a_server_disconnecting_during_the_backoff_cancels_the_retry() {
+        let now = Instant::now();
+        let pending = ReconnectState::Idle
+            .on_disconnect(false, None, now, epoch(), no_policy(), err("eof"))
+            .unwrap();
+        assert!(matches!(pending, ReconnectState::Pending { .. }));
+        assert_eq!(
+            pending.on_server_ended(None, no_policy(), epoch()),
+            Some(server_ended(None))
+        );
+    }
+
+    #[test]
+    fn a_server_disconnecting_keeps_an_existing_modal() {
+        assert_eq!(
+            server_ended(None).on_server_ended(Some("x".into()), no_policy(), epoch()),
+            None
+        );
+        assert_eq!(
+            ReconnectState::Modal(ModalVariant::OneShotConsumed).on_server_ended(
+                None,
+                no_policy(),
+                epoch()
+            ),
+            None
+        );
+    }
+
+    // The channels the server closes after DISCONNECTING must not start
+    // a retry or swap the modal, even under a ticket policy that would
+    // otherwise replace any modal with its own.
+    #[test]
+    fn later_disconnects_leave_a_server_ended_session_alone() {
+        let now = Instant::now();
+        let single_use = ReconnectPolicy {
+            ticket_is_single_use: true,
+            ..ReconnectPolicy::default()
+        };
+        for policy in [no_policy(), single_use] {
+            assert_eq!(
+                server_ended(None).on_disconnect(false, None, now, epoch(), policy, err("eof")),
+                None
+            );
+        }
+    }
+
+    // A connection attempt the server cut short by ending the session
+    // must not swap the modal saying so for one offering to take the
+    // session back (#718 review). Any other state shows the failure.
+    #[test]
+    fn a_failed_connection_attempt_leaves_a_server_ended_session_alone() {
+        assert_eq!(
+            server_ended(Some("taken over")).on_connect_failed(err("refused")),
+            None
+        );
+        let failed = Some(ReconnectState::Modal(ModalVariant::ConnectFailed {
+            error: err("refused"),
+        }));
+        for state in [
+            ReconnectState::Idle,
+            ReconnectState::Modal(ModalVariant::OneShotConsumed),
+            ReconnectState::Modal(ModalVariant::Generic {
+                latest_error: err("eof"),
+            }),
+        ] {
+            assert_eq!(
+                state.on_connect_failed(err("refused")),
+                failed,
+                "from {state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_recent_notice_explains_the_disconnecting() {
+        let now = Instant::now() + Duration::from_secs(60);
+        let recent = (now - SERVER_NOTICE_WINDOW, "taken over".to_string());
+        assert_eq!(server_notice(Some(&recent), now), Some("taken over".into()));
+        let stale = (
+            now - SERVER_NOTICE_WINDOW - Duration::from_millis(1),
+            "guest rebooting".to_string(),
+        );
+        assert_eq!(server_notice(Some(&stale), now), None);
+        assert_eq!(server_notice(None, now), None);
+    }
+
+    // A reason is a sentence or two, so a longer notice is cut short,
+    // on a character boundary.
+    #[test]
+    fn a_long_notice_is_cut_short() {
+        let now = Instant::now();
+        let long = (now, "é".repeat(MAX_SERVER_NOTICE_CHARS + 1));
+        let cut = server_notice(Some(&long), now).unwrap();
+        assert_eq!(cut.chars().count(), MAX_SERVER_NOTICE_CHARS + 1);
+        assert!(cut.ends_with("é…"), "{cut}");
+        let fits = (now, "é".repeat(MAX_SERVER_NOTICE_CHARS));
+        assert_eq!(server_notice(Some(&fits), now), Some(fits.1.clone()));
+    }
+
+    // The notice is the server's text: line breaks would let a short
+    // one stand taller than the window, and other control characters
+    // have no business in a dialog.
+    #[test]
+    fn a_notice_is_shown_on_one_line() {
+        let now = Instant::now();
+        let notice = (now, "taken\r\nover\tby\u{7}\u{1b} 10.0.0.2\n".to_string());
+        assert_eq!(
+            server_notice(Some(&notice), now),
+            Some("taken  over by 10.0.0.2 ".into())
+        );
+        let tall = (now, "\n".repeat(MAX_SERVER_NOTICE_CHARS));
+        assert!(!server_notice(Some(&tall), now).unwrap().contains('\n'));
+    }
+
+    #[test]
+    fn a_server_ended_session_is_announced_with_its_notice() {
+        assert_eq!(
+            modal_variant_notification(&ModalVariant::ServerEnded {
+                notice: Some("taken over".into()),
+                ticket: None,
+            }),
+            (
+                NotifySeverity::Warn,
+                "The server ended the session: taken over".to_string()
+            )
+        );
+        assert_eq!(
+            modal_variant_notification(&ModalVariant::ServerEnded {
+                notice: None,
+                ticket: None,
+            })
+            .1,
+            "The server ended the session"
+        );
     }
 }

@@ -3,7 +3,7 @@ use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
 
 use crate::bugreport::SurfaceInfo;
-use crate::notifications::NotificationSource;
+use crate::notifications::{NotificationEntry, NotificationSource};
 use shakenfist_spice_protocol::{ChannelType, NotifySeverity, MOUSE_MODE_SERVER};
 use shakenfist_spice_renderer::channels::{DisconnectReason, PasteFailureKind};
 use shakenfist_spice_renderer::{ChannelEvent, DrawOutcome};
@@ -92,11 +92,7 @@ impl RyllApp {
                     ..
                 } => self.handle_paste_refused(reason),
                 ChannelEvent::PasteFailed { reason, .. } => self.handle_paste_failed(reason),
-                ChannelEvent::Notification(entry) => {
-                    if let Ok(mut guard) = self.notifications.lock() {
-                        guard.push(entry);
-                    }
-                }
+                ChannelEvent::Notification(entry) => self.handle_notification(entry),
                 ChannelEvent::Disconnected(channel, reason) => {
                     self.handle_disconnected(channel, reason)
                 }
@@ -176,6 +172,8 @@ impl RyllApp {
         info!("app: session {} initialized", session_id);
         self.current_session_id = Some(session_id);
         self.connected = true;
+        // A notice from the session before cannot explain this one's end.
+        self.last_main_notice = None;
         // A fresh successful link clears any pending
         // reconnect state. Whether this resulted from
         // an auto-retry or a user clicking Reconnect,
@@ -407,6 +405,23 @@ impl RyllApp {
         self.paste_error_message = Some(reason);
     }
 
+    /// Store a notification, remembering a main-channel server `NOTIFY`
+    /// as the likely reason for a `DISCONNECTING` that follows it.
+    fn handle_notification(&mut self, entry: NotificationEntry) {
+        if matches!(
+            entry.source,
+            NotificationSource::Spice {
+                channel: ChannelType::Main,
+                ..
+            }
+        ) {
+            self.last_main_notice = Some((Instant::now(), entry.message.clone()));
+        }
+        if let Ok(mut guard) = self.notifications.lock() {
+            guard.push(entry);
+        }
+    }
+
     /// A channel's connection ended without an error: clean up after
     /// it, and tear the session down if it was a critical one.
     fn handle_disconnected(&mut self, channel: ChannelType, reason: DisconnectReason) {
@@ -450,6 +465,10 @@ impl RyllApp {
         // are snapshotted above but do not tear down
         // the session.
         match channel {
+            // The server ended the session on purpose: no auto-reconnect.
+            ChannelType::Main if reason == DisconnectReason::ServerAnnounced => {
+                self.handle_server_ended();
+            }
             ChannelType::Main | ChannelType::Display | ChannelType::Inputs => {
                 let reason = format!("Connection lost ({} channel disconnected)", channel.name());
                 // The report was requested above, so

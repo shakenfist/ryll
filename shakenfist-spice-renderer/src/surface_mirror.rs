@@ -15,7 +15,7 @@
 //! the renderer cannot back-depend on `ryll`. Lifting the mirror
 //! up here keeps the crate boundary clean.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use shakenfist_spice_protocol::warn_once;
 use tracing::{debug, info};
@@ -320,38 +320,74 @@ impl SurfaceMirror {
     /// [`MAX_TOTAL_SURFACE_PIXELS`] beside the surfaces already held.
     /// `key` must not be held already. Logs, once, why not.
     fn admits(&self, key: (u8, u32), width: u32, height: u32) -> bool {
-        if key.1 >= MAX_SURFACE_ID {
-            warn_once!(
-                "display:decode_failure:surface:id_out_of_range",
-                "surface_mirror: refusing surface {}:{}: ids must be below {}",
-                key.0,
-                key.1,
-                MAX_SURFACE_ID
-            );
-            return false;
-        }
-        let (w, h) = DisplaySurface::clamped_size(width, height);
         let held: usize = self
             .surfaces
             .values()
             .map(|s| s.width as usize * s.height as usize)
             .sum();
-        let wanted = w as usize * h as usize;
-        if held + wanted > MAX_TOTAL_SURFACE_PIXELS {
-            warn_once!(
-                "display:decode_failure:surface:budget_exceeded",
-                "surface_mirror: refusing surface {}:{} ({}x{}): {} pixels already held, \
-                 and the limit across all surfaces is {}",
-                key.0,
-                key.1,
-                w,
-                h,
-                held,
-                MAX_TOTAL_SURFACE_PIXELS
-            );
-            return false;
+        match refusal(held, key, width, height) {
+            None => true,
+            Some(Refusal::IdOutOfRange) => {
+                warn_once!(
+                    "display:decode_failure:surface:id_out_of_range",
+                    "surface_mirror: refusing surface {}:{}: ids must be below {}",
+                    key.0,
+                    key.1,
+                    MAX_SURFACE_ID
+                );
+                false
+            }
+            Some(Refusal::OverBudget) => {
+                let (w, h) = DisplaySurface::clamped_size(width, height);
+                warn_once!(
+                    "display:decode_failure:surface:budget_exceeded",
+                    "surface_mirror: refusing surface {}:{} ({}x{}): {} pixels already held, \
+                     and the limit across all surfaces is {}",
+                    key.0,
+                    key.1,
+                    w,
+                    h,
+                    held,
+                    MAX_TOTAL_SURFACE_PIXELS
+                );
+                false
+            }
         }
-        true
+    }
+
+    /// Bring the set of surfaces into line with `ledger` after this
+    /// mirror missed events.
+    ///
+    /// A surface the ledger does not hold is dropped, and one it holds
+    /// that is missing here, or held at another size, is created afresh
+    /// through [`apply_event`](Self::apply_event), so the usual limits
+    /// apply. A surface already held at the ledger's size keeps its
+    /// pixels. Every surface is then marked fully damaged, since the
+    /// draws that were missed are not restored. Events the mirror goes
+    /// on to receive may repeat some the ledger already reflects: the
+    /// broadcast channel still holds a suffix of the stream the mirror
+    /// has just been brought past. Replaying it can briefly re-add or
+    /// re-drop a surface, but the suffix is in order and the ledger
+    /// reflects at least its end, so the mirror ends with the ledger's
+    /// surfaces.
+    pub fn resync(&mut self, ledger: &SurfaceLedger) {
+        self.surfaces
+            .retain(|key, _| ledger.surfaces.contains_key(key));
+        for (&(display_channel_id, surface_id), &(width, height)) in &ledger.surfaces {
+            let current = self
+                .surfaces
+                .get(&(display_channel_id, surface_id))
+                .map(|s| (s.width, s.height));
+            if current != Some(DisplaySurface::clamped_size(width, height)) {
+                self.apply_event(&ChannelEvent::SurfaceCreated {
+                    display_channel_id,
+                    surface_id,
+                    width,
+                    height,
+                });
+            }
+        }
+        self.mark_all_damaged();
     }
 
     /// Key of the primary surface. SPICE convention is
@@ -399,6 +435,121 @@ impl SurfaceMirror {
 impl Default for SurfaceMirror {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Why a new surface is refused.
+enum Refusal {
+    /// Its id is not below [`MAX_SURFACE_ID`].
+    IdOutOfRange,
+    /// It would take the total past [`MAX_TOTAL_SURFACE_PIXELS`].
+    OverBudget,
+}
+
+/// Whether a new surface at `key`, asked for as `width` x `height`, is
+/// refused beside `held` pixels of other surfaces. The one rule both
+/// [`SurfaceMirror`] and [`SurfaceLedger`] apply, so that they agree on
+/// which surfaces exist.
+fn refusal(held: usize, key: (u8, u32), width: u32, height: u32) -> Option<Refusal> {
+    if key.1 >= MAX_SURFACE_ID {
+        return Some(Refusal::IdOutOfRange);
+    }
+    let (w, h) = DisplaySurface::clamped_size(width, height);
+    if held + w as usize * h as usize > MAX_TOTAL_SURFACE_PIXELS {
+        return Some(Refusal::OverBudget);
+    }
+    None
+}
+
+/// Which surfaces exist and at what size, without their pixels.
+///
+/// For a task that sees every event when the mirror might not. The
+/// event bus's forwarder drains the renderer's queue, which loses
+/// nothing, and observes each event here before it broadcasts it; the
+/// mirror's subscription can lag and miss a `SurfaceCreated` or
+/// `SurfaceDestroyed`, and [`SurfaceMirror::resync`] then repairs the
+/// surface list from this. It tracks creates, destroys and
+/// `ImageReady`'s auto-create by the same rules as
+/// [`SurfaceMirror::apply_event`], so it holds the surfaces a mirror
+/// that missed nothing would hold.
+///
+/// It also forgets every surface at `SessionInitialized`, which
+/// `apply_event` does not do. A frontend that keeps one bus across
+/// reconnects (the RDP bridge) empties its mirror itself when a new
+/// session begins, and the surfaces of the session that ended do not
+/// exist on the server any more: a resync must not bring them back,
+/// or let them crowd a new session's surfaces out of the pixel budget.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SurfaceLedger {
+    /// Requested `(width, height)` by `(display_channel_id,
+    /// surface_id)`. Ordered, so a resync admits surfaces in the same
+    /// order every time.
+    surfaces: BTreeMap<(u8, u32), (u32, u32)>,
+}
+
+impl SurfaceLedger {
+    /// An empty ledger.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record what `event` does to the set of surfaces, if anything.
+    pub fn observe(&mut self, event: &ChannelEvent) {
+        match event {
+            // A new session starts with no surfaces. Its display
+            // channels are opened only after the main channel has
+            // handled INIT, so none of its surfaces precede this.
+            ChannelEvent::SessionInitialized(_) => self.surfaces.clear(),
+            ChannelEvent::SurfaceCreated {
+                display_channel_id,
+                surface_id,
+                width,
+                height,
+            } => {
+                let key = (*display_channel_id, *surface_id);
+                self.surfaces.remove(&key);
+                self.admit(key, *width, *height);
+            }
+            ChannelEvent::SurfaceDestroyed {
+                display_channel_id,
+                surface_id,
+            } => {
+                self.surfaces.remove(&(*display_channel_id, *surface_id));
+            }
+            ChannelEvent::ImageReady {
+                display_channel_id,
+                surface_id,
+                left,
+                top,
+                width,
+                height,
+                ..
+            } => {
+                let key = (*display_channel_id, *surface_id);
+                if !self.surfaces.contains_key(&key) {
+                    self.admit(
+                        key,
+                        left.saturating_add(*width),
+                        top.saturating_add(*height),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn admit(&mut self, key: (u8, u32), width: u32, height: u32) {
+        let held: usize = self
+            .surfaces
+            .values()
+            .map(|&(w, h)| {
+                let (w, h) = DisplaySurface::clamped_size(w, h);
+                w as usize * h as usize
+            })
+            .sum();
+        if refusal(held, key, width, height).is_none() {
+            self.surfaces.insert(key, (width, height));
+        }
     }
 }
 
@@ -948,5 +1099,143 @@ mod tests {
                 height: u32::MAX
             }
         );
+    }
+
+    /// Each surface a mirror holds, by key, with its size.
+    fn sizes(m: &SurfaceMirror) -> Vec<((u8, u32), (u32, u32))> {
+        let mut sizes: Vec<_> = m
+            .surfaces
+            .iter()
+            .map(|(&key, s)| (key, (s.width, s.height)))
+            .collect();
+        sizes.sort_unstable();
+        sizes
+    }
+
+    fn draw_to(surface_id: u32, left: u32, top: u32) -> ChannelEvent {
+        ChannelEvent::ImageReady {
+            display_channel_id: 0,
+            surface_id,
+            left,
+            top,
+            width: 1,
+            height: 1,
+            pixels: vec![0u8; 4],
+            image_id: 0,
+            produced_at_secs: 0.0,
+        }
+    }
+
+    fn created_event(surface_id: u32, width: u32, height: u32) -> ChannelEvent {
+        ChannelEvent::SurfaceCreated {
+            display_channel_id: 0,
+            surface_id,
+            width,
+            height,
+        }
+    }
+
+    fn destroyed_event(surface_id: u32) -> ChannelEvent {
+        ChannelEvent::SurfaceDestroyed {
+            display_channel_id: 0,
+            surface_id,
+        }
+    }
+
+    // The ledger must hold exactly the surfaces a mirror that saw the
+    // same events holds, or a resync from it would add or drop the
+    // wrong ones (#651).
+    #[test]
+    fn a_ledger_holds_what_a_mirror_fed_the_same_events_holds() {
+        let events = [
+            created_event(0, 8, 8),
+            created_event(MAX_SURFACE_ID, 8, 8),
+            draw_to(2, 5, 3),
+            draw_to(2, 9, 9),
+            created_event(1, 4, 4),
+            created_event(1, 6, 2),
+            created_event(3, 2, 2),
+            destroyed_event(3),
+            destroyed_event(9),
+            draw_to(0, 1, 1),
+        ];
+        let mut mirror = SurfaceMirror::new();
+        let mut ledger = SurfaceLedger::new();
+        for event in &events {
+            mirror.apply_event(event);
+            ledger.observe(event);
+        }
+        let mut resynced = SurfaceMirror::new();
+        resynced.resync(&ledger);
+        assert_eq!(
+            sizes(&mirror),
+            vec![((0, 0), (8, 8)), ((0, 1), (6, 2)), ((0, 2), (6, 4))]
+        );
+        assert_eq!(sizes(&resynced), sizes(&mirror));
+    }
+
+    // A reconnect on a bus that outlives the session must not leave
+    // the ended session's surfaces in the ledger, or a resync would put
+    // them back beside the new session's, or recreate a surface the
+    // new session holds at another size at the old one.
+    #[test]
+    fn a_new_session_empties_the_ledger() {
+        let mut ledger = SurfaceLedger::new();
+        for event in [
+            ChannelEvent::SessionInitialized(1),
+            created_event(0, 8, 8),
+            created_event(1, 4, 4),
+            ChannelEvent::SessionInitialized(2),
+            created_event(0, 6, 6),
+        ] {
+            ledger.observe(&event);
+        }
+        // What the RDP bridge's mirror holds: emptied when the second
+        // session began, then fed that session's surface.
+        let mut mirror = SurfaceMirror::new();
+        mirror.apply_event(&created_event(0, 6, 6));
+        mirror.resync(&ledger);
+        assert_eq!(sizes(&mirror), vec![((0, 0), (6, 6))]);
+    }
+
+    // A resync drops what the ledger does not hold, creates what it
+    // holds and the mirror lacks, recreates a surface held at the wrong
+    // size, and leaves a surface already right alone, pixels and all.
+    #[test]
+    fn resync_changes_only_the_surfaces_that_differ() {
+        let mut m = SurfaceMirror::new();
+        m.apply_event(&created_event(0, 2, 2));
+        m.apply_event(&ChannelEvent::ImageReady {
+            display_channel_id: 0,
+            surface_id: 0,
+            left: 0,
+            top: 0,
+            width: 2,
+            height: 2,
+            pixels: vec![255u8; 16],
+            image_id: 0,
+            produced_at_secs: 0.0,
+        });
+        m.apply_event(&created_event(2, 2, 2));
+        m.apply_event(&created_event(5, 2, 2));
+        m.surfaces.get_mut(&(0, 0)).unwrap().take_damage();
+
+        let mut ledger = SurfaceLedger::new();
+        for event in [
+            created_event(0, 2, 2),
+            created_event(1, 3, 3),
+            created_event(2, 4, 4),
+        ] {
+            ledger.observe(&event);
+        }
+        m.resync(&ledger);
+
+        assert_eq!(
+            sizes(&m),
+            vec![((0, 0), (2, 2)), ((0, 1), (3, 3)), ((0, 2), (4, 4))]
+        );
+        let kept = &m.surfaces[&(0, 0)];
+        assert_eq!(kept.pixels(), &[255u8; 16][..], "pixels kept");
+        assert_eq!(kept.damage().rects(), &[DamageRect::new(0, 0, 2, 2)]);
     }
 }

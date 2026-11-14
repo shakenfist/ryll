@@ -55,7 +55,7 @@ use crate::clipboard::MemoryClipboard;
 use crate::display::MAX_SURFACE_DIMENSION;
 use crate::snapshots::{DisplaySnapshot, PlaybackSnapshot};
 use crate::surface_mirror::SurfaceMirror;
-use shakenfist_spice_protocol::messages::agent_stream::MAX_AGENT_MESSAGE_SIZE;
+use shakenfist_spice_protocol::messages::agent_stream::MAX_CLIPBOARD_DATA_SIZE;
 
 /// Capacity of the per-client outbound queue (request responses +
 /// translated event lines).  If the writer falls behind by more
@@ -1640,11 +1640,12 @@ async fn handle_screenshot(
 
 /// The longest text `clipboard_set` accepts, in bytes: 100 MiB,
 /// spice-gtk's default `max-clipboard`. It is the clipboard size the
-/// agent-message budget in the protocol crate is built from (that
-/// budget adds 4 KiB for the clipboard message's headers), so a client
+/// agent-message budget in the protocol crate is built from, so a client
 /// can never set more than ryll itself would accept from a guest, or
-/// than spice-gtk would send.
-pub const MAX_CLIPBOARD_SET_BYTES: usize = MAX_AGENT_MESSAGE_SIZE - 4096;
+/// than spice-gtk would send. For a guest that wants CRLF line endings
+/// the limit that binds is on the converted text, which the main channel
+/// checks when it answers the guest's request.
+pub const MAX_CLIPBOARD_SET_BYTES: usize = MAX_CLIPBOARD_DATA_SIZE;
 
 /// Refuse clipboard text longer than [`MAX_CLIPBOARD_SET_BYTES`].
 fn check_clipboard_set_len(len: usize) -> Result<(), String> {
