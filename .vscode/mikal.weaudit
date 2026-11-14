@@ -84,10 +84,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/byte_counter.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/src/device_config.rs",
       "author": "mikal"
     },
@@ -620,10 +616,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/channel-diagnostics-audit.md",
-      "author": "mikal"
-    },
-    {
       "path": ".github/workflows/ci.yml",
       "author": "mikal"
     },
@@ -792,10 +784,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-rdp/src/server.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-rdp/src/tls.rs",
       "author": "mikal"
     },
@@ -920,10 +908,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/web-frontend.md",
-      "author": "mikal"
-    },
-    {
       "path": "tools/kasm/custom_startup.sh",
       "author": "mikal"
     },
@@ -1045,10 +1029,6 @@
     },
     {
       "path": ".devcontainer",
-      "author": "mikal"
-    },
-    {
-      "path": ".pre-commit-config.yaml",
       "author": "mikal"
     }
   ],

@@ -81,10 +81,6 @@
       "sha": "1f53f681ae0be57f075ddf35696097b2771a9b0e",
       "date": "2026-11-08"
     },
-    ".pre-commit-config.yaml": {
-      "sha": "36a994221a7b007e4b519d1d6cde0158fcf064f2",
-      "date": "2026-11-08"
-    },
     "Cargo.toml": {
       "sha": "5f2bbfb6c452e5099443414951ce1a9d54d83be1",
       "date": "2026-11-08"
@@ -117,10 +113,6 @@
       "sha": "154626ef4e81f6aa3e7c271ef613fe017ad658f9",
       "date": "2026-09-23"
     },
-    "docs/channel-diagnostics-audit.md": {
-      "sha": "789383eaa2b614b16b52dda69a909dedf5559a9f",
-      "date": "2026-10-22"
-    },
     "docs/development-macos.md": {
       "sha": "9fef25179d5ec56bb52e4a5b5edeecadcff74097",
       "date": "2026-09-17"
@@ -151,10 +143,6 @@
     },
     "docs/rdp-mode-internals.md": {
       "sha": "2ea9a8f852ed24b03efc3eb7c7e62b08209bda2d",
-      "date": "2026-11-08"
-    },
-    "docs/web-frontend.md": {
-      "sha": "8cd4e811869c8118ab4d5fb99c088f592adf1de5",
       "date": "2026-11-08"
     },
     "examples/control-socket-demo.py": {
@@ -497,10 +485,6 @@
       "sha": "d88abd5fde3216c3af7c5fa336853720c6e1bfd8",
       "date": "2026-11-07"
     },
-    "shakenfist-spice-rdp/src/server.rs": {
-      "sha": "b15b4f11ae2e46869b385d885cbf6a4000a90295",
-      "date": "2026-11-07"
-    },
     "shakenfist-spice-rdp/src/tls.rs": {
       "sha": "544ef01949a6140995091390e92d9ef71dae5707",
       "date": "2026-11-07"
@@ -516,10 +500,6 @@
     "shakenfist-spice-renderer/README.md": {
       "sha": "e85ae5e7398447de9a1833174114082bcd150647",
       "date": "2026-11-07"
-    },
-    "shakenfist-spice-renderer/src/byte_counter.rs": {
-      "sha": "d9b32a0b373832330a33bbff2e950273eac1e34e",
-      "date": "2026-07-21"
     },
     "shakenfist-spice-renderer/src/capture_sink.rs": {
       "sha": "42a0ad4fa92d18ac82e769de430979e664f9a4d7",
