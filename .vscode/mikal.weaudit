@@ -576,10 +576,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-protocol/src/messages/agent_stream.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-protocol/src/messages/common.rs",
       "author": "mikal"
     },
@@ -609,10 +605,6 @@
     },
     {
       "path": "shakenfist-spice-protocol/src/messages/vd_agent.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-protocol/src/messages",
       "author": "mikal"
     },
     {
@@ -673,10 +665,6 @@
     },
     {
       "path": "ryll/src/web/inputs.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/app/reconnect.rs",
       "author": "mikal"
     },
     {
@@ -764,10 +752,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-protocol/src",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/Cargo.toml",
       "author": "mikal"
     },
@@ -781,10 +765,6 @@
     },
     {
       "path": "shakenfist-spice-rdp/src/lib.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-rdp/src/clipboard.rs",
       "author": "mikal"
     },
     {
@@ -824,14 +804,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-rdp/src",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-rdp",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/src/channels/webdav.rs",
       "author": "mikal"
     },
@@ -857,10 +829,6 @@
     },
     {
       "path": "shakenfist-spice-renderer/src/control/mod.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/event_bus.rs",
       "author": "mikal"
     },
     {
@@ -916,10 +884,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/lib.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-webrtc/src/bridge.rs",
       "author": "mikal"
     },
@@ -952,27 +916,11 @@
       "author": "mikal"
     },
     {
-      "path": "docs/rdp-frontend.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/rdp-mode-internals.md",
       "author": "mikal"
     },
     {
-      "path": "docs/rendering-pipeline.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/session-lifecycle.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/web-frontend.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/web-mode-internals.md",
       "author": "mikal"
     },
     {

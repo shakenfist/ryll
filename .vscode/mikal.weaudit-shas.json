@@ -149,28 +149,12 @@
       "sha": "dc06c44e9d9a0e7fe4888d35adb50908ab37fc7d",
       "date": "2026-10-16"
     },
-    "docs/rdp-frontend.md": {
-      "sha": "9ce33d52e0c1e9c06019c6da21035e2292ae7b66",
-      "date": "2026-11-08"
-    },
     "docs/rdp-mode-internals.md": {
       "sha": "2ea9a8f852ed24b03efc3eb7c7e62b08209bda2d",
       "date": "2026-11-08"
     },
-    "docs/rendering-pipeline.md": {
-      "sha": "fe45cc4b8988352eacdeff26cdc654731fa9159d",
-      "date": "2026-11-08"
-    },
-    "docs/session-lifecycle.md": {
-      "sha": "017806552696300e19cdd4463191a32e36cc6248",
-      "date": "2026-11-08"
-    },
     "docs/web-frontend.md": {
       "sha": "8cd4e811869c8118ab4d5fb99c088f592adf1de5",
-      "date": "2026-11-08"
-    },
-    "docs/web-mode-internals.md": {
-      "sha": "6a85aa2449fb6cf6b51ff1c367870345c8729861",
       "date": "2026-11-08"
     },
     "examples/control-socket-demo.py": {
@@ -200,10 +184,6 @@
     "ryll/src/app/notification_snapshots.rs": {
       "sha": "76c732cf34ff7fb901bd042373fd699b8bac1d1f",
       "date": "2026-10-17"
-    },
-    "ryll/src/app/reconnect.rs": {
-      "sha": "2e3ec93a7c4bb8ab56bcceb2028c974cc75c52ee",
-      "date": "2026-11-03"
     },
     "ryll/src/app/resize.rs": {
       "sha": "255eff1eefba2e7cb50f981662e61cc77ca5a3d3",
@@ -441,10 +421,6 @@
       "sha": "421d82a4b1f1931122a4559a1262e84174d62c1b",
       "date": "2026-11-05"
     },
-    "shakenfist-spice-protocol/src/messages/agent_stream.rs": {
-      "sha": "df3ccacd5fd3c6361b874811c85215b577f76164",
-      "date": "2026-10-20"
-    },
     "shakenfist-spice-protocol/src/messages/common.rs": {
       "sha": "33bf4fb1b93f2fbc2d7f557e786161453a3013c7",
       "date": "2026-10-20"
@@ -503,10 +479,6 @@
     },
     "shakenfist-spice-rdp/src/auth.rs": {
       "sha": "08a9e10cbcd8f0ccac8f3f9ed69b2ccfd6728d79",
-      "date": "2026-11-07"
-    },
-    "shakenfist-spice-rdp/src/clipboard.rs": {
-      "sha": "957d1099766c17b05455b5b2511b0bb1265828c1",
       "date": "2026-11-07"
     },
     "shakenfist-spice-rdp/src/cursor.rs": {
@@ -621,17 +593,9 @@
       "sha": "1983ac9f5a058874e3894f188050bce525a6ad62",
       "date": "2026-11-07"
     },
-    "shakenfist-spice-renderer/src/event_bus.rs": {
-      "sha": "7732353bb2846bc16b1b37674170c18dba3c4d8c",
-      "date": "2026-11-07"
-    },
     "shakenfist-spice-renderer/src/image_cache.rs": {
       "sha": "96afd58b68815692f90d4c7fed1ae6b98d52063c",
       "date": "2026-09-19"
-    },
-    "shakenfist-spice-renderer/src/lib.rs": {
-      "sha": "3c352efcd33d527f88037dace77970b55506c465",
-      "date": "2026-11-07"
     },
     "shakenfist-spice-renderer/src/log_config.rs": {
       "sha": "7339aea51a0a9ff9efbb09f489e17bae62df7315",
