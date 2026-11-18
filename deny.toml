@@ -69,6 +69,20 @@ ignore = [
     # async-dnssd. Tracked in PLAN-supply-chain-followups.md.
     # https://rustsec.org/advisories/RUSTSEC-2026-0441
     "RUSTSEC-2026-0441",
+
+    # RUSTSEC-2026-0543: chrono unmaintained; no successor release.
+    # Reaches us via dav-server (the WebDAV folder-sharing server,
+    # default-on), which has no chrono-free release yet: 0.12.0
+    # still requires it. Tracked in PLAN-supply-chain-followups.md.
+    # https://rustsec.org/advisories/RUSTSEC-2026-0543
+    "RUSTSEC-2026-0543",
+
+    # RUSTSEC-2026-0542: humantime unmaintained, as a consequence
+    # of chrono. Reaches us only via console-subscriber behind the
+    # diagnostic-only `tokio-console` feature. Tracked in
+    # PLAN-supply-chain-followups.md.
+    # https://rustsec.org/advisories/RUSTSEC-2026-0542
+    "RUSTSEC-2026-0542",
 ]
 
 [licenses]
