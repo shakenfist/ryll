@@ -47,3 +47,4 @@
 - PLAN-decoder-hardening.md: Image decoder hardening
 - PLAN-app-split.md: Splitting app.rs
 - PLAN-rdp-frontend.md: RDP frontend
+- PLAN-pr739-followup.md: PR 739 follow-up
