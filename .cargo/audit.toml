@@ -43,4 +43,14 @@ ignore = [
     # (rtp -> webrtc-util -> nix) and via ironrdp-connector -> sspi
     # -> async-dnssd. See PLAN-supply-chain-followups.md item 6.
     "RUSTSEC-2026-0441",
+
+    # chrono unmaintained, no successor release; transitive via
+    # dav-server (WebDAV folder sharing). See
+    # PLAN-supply-chain-followups.md item 7.
+    "RUSTSEC-2026-0543",
+
+    # humantime unmaintained (follows chrono); transitive via
+    # console-subscriber behind the diagnostic `tokio-console`
+    # feature only. See PLAN-supply-chain-followups.md item 8.
+    "RUSTSEC-2026-0542",
 ]
