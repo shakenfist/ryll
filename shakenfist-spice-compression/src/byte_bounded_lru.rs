@@ -29,22 +29,25 @@
 //! that an operator reading a bug report sees the cumulative eviction
 //! pressure regardless of how many explicit invalidations arrived.
 //!
-//! This type is deliberately concrete (`u64` keys, `Vec<u8>` values)
-//! rather than generic: both current consumers — the renderer's
-//! `BoundedImageCache` and the GLZ dictionary in this crate — want
-//! exactly that shape, and keeping it concrete avoids paying for
-//! generic machinery we don't need.
+//! The public API remains concrete (`u64` keys, `Vec<u8>` values).
+//! Internally, values are shared with `Arc<Vec<u8>>` so the GLZ
+//! decoder can read a reference fragment without copying its entire
+//! source image. Wrapping the Vec retains its existing pixel allocation.
+//! The byte cap accounts for cache-owned payloads; an active decoder
+//! may retain an evicted value until it finishes copying its fragment.
 
 use lru::LruCache;
+use std::sync::Arc;
 
 /// Per-entry container overhead charged when deriving the entry cap,
 /// in bytes.
 ///
 /// Not measured at runtime — a floor estimated from the layout an
-/// entry actually occupies: the boxed `LruCache` node (key, `Vec`
-/// header, two list pointers — 48 bytes, rounded up by the allocator),
-/// the hash-map slot that points at it at hashbrown's load factor, and
-/// the allocator header on the value's own heap buffer.  Around 96
+/// entry actually occupies: the boxed `LruCache` node (key, shared value
+/// header, two list pointers), the hash-map slot that points at it at
+/// hashbrown's load factor, and allocation headers. Sharing values
+/// adds an Arc allocation while reducing the value header in the LRU
+/// node; this remains a rough floor rather than an exact RSS cap. Around 96
 /// bytes in total; the real figure varies with allocator and target,
 /// and the point is that the accounting is now the right order of
 /// magnitude rather than exact.
@@ -99,7 +102,7 @@ pub enum RefusedReason {
 /// [`clear`][Self::clear] calls (server-driven invalidation) are
 /// *not* counted as evictions.
 pub struct ByteBoundedLru {
-    inner: LruCache<u64, Vec<u8>>,
+    inner: LruCache<u64, Arc<Vec<u8>>>,
     bytes: usize,
     cap_bytes: usize,
     max_entries: usize,
@@ -196,7 +199,7 @@ impl ByteBoundedLru {
         // evicted element (if any), and then increase it by the size of
         // the new element. saturating_sub() here ensures that we never
         // experience a negative number as part of the subtraction.
-        let displaced = self.inner.put(key, value);
+        let displaced = self.inner.put(key, Arc::new(value));
         if let Some(old_val) = &displaced {
             self.bytes = self.bytes.saturating_sub(old_val.len());
         }
@@ -249,7 +252,17 @@ impl ByteBoundedLru {
     ///
     /// Returns `None` on a cache miss.
     pub fn get(&mut self, key: &u64) -> Option<&Vec<u8>> {
-        self.inner.get(key)
+        self.inner.get(key).map(Arc::as_ref)
+    }
+
+    /// Share a cached pixel allocation, bumping it to MRU.
+    ///
+    /// The handle keeps the pixels valid after removal or eviction.
+    /// Only the GLZ decoder needs this ownership; other consumers keep
+    /// using the existing borrowed `get` API.
+    #[cfg(any(feature = "glz", test))]
+    pub(crate) fn get_shared(&mut self, key: &u64) -> Option<Arc<Vec<u8>>> {
+        self.inner.get(key).map(Arc::clone)
     }
 
     /// Remove `key` from the cache.
@@ -349,6 +362,73 @@ impl ByteBoundedLru {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_lookup_preserves_original_pixel_allocation() {
+        let mut cache = ByteBoundedLru::new(1024);
+        let pixels = vec![17u8; 512];
+        let original_pixels = pixels.as_ptr();
+        cache.insert(1, pixels);
+
+        let first = cache.get_shared(&1).unwrap();
+        let second = cache.get_shared(&1).unwrap();
+        assert_eq!(first.as_ptr(), original_pixels);
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(cache.get(&1).unwrap().as_ptr(), original_pixels);
+        assert_eq!(cache.bytes(), 512);
+    }
+
+    #[test]
+    fn shared_lookup_updates_recency_and_survives_eviction() {
+        let mut cache = ByteBoundedLru::with_caps(200, 8);
+        cache.insert(1, vec![1; 100]);
+        cache.insert(2, vec![2; 100]);
+        let pixels = cache.get_shared(&1).unwrap();
+        let lifetime = Arc::downgrade(&pixels);
+
+        // Reading through the shared API makes id 1 most recent.
+        cache.insert(3, vec![3; 100]);
+        assert!(cache.get(&2).is_none());
+        assert!(cache.get(&1).is_some());
+
+        // A replacement larger than either entry evicts id 1 as well.
+        cache.insert(4, vec![4; 200]);
+        assert!(cache.get(&1).is_none());
+        assert_eq!(cache.bytes(), 200);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.evictions_total(), 3);
+        assert_eq!(cache.evicted_bytes_total(), 300);
+        assert_eq!(&**pixels, &[1; 100]);
+        assert_eq!(Arc::strong_count(&pixels), 1);
+
+        drop(pixels);
+        assert!(lifetime.upgrade().is_none());
+    }
+
+    #[test]
+    fn replacing_shared_entry_keeps_old_readers_and_exact_accounting() {
+        let mut cache = ByteBoundedLru::with_caps(200, 8);
+        cache.insert(1, vec![1; 100]);
+        let old_pixels = cache.get_shared(&1).unwrap();
+        assert_eq!(cache.insert(1, vec![2; 40]), InsertOutcome::Inserted);
+
+        let new_pixels = cache.get_shared(&1).unwrap();
+        assert!(!Arc::ptr_eq(&old_pixels, &new_pixels));
+        assert_eq!(&**old_pixels, &[1; 100]);
+        assert_eq!(&**new_pixels, &[2; 40]);
+        assert_eq!(cache.bytes(), 40);
+        assert_eq!(cache.evictions_total(), 0);
+
+        // Refusing an oversized replacement must preserve the current entry.
+        assert!(matches!(
+            cache.insert(1, vec![3; 201]),
+            InsertOutcome::Refused { .. }
+        ));
+        assert!(Arc::ptr_eq(&new_pixels, &cache.get_shared(&1).unwrap()));
+        cache.clear();
+        assert_eq!(cache.bytes(), 0);
+        assert_eq!(&**new_pixels, &[2; 40]);
+    }
 
     /// A 200-byte cache with the entry cap set out of the way, so the
     /// byte-cap arithmetic these tests assert on is what actually

@@ -143,6 +143,13 @@ windows = { version = "0.62", features = [
 libloading = "0.9"
 
 [dev-dependencies]
+# GLZ tests and the manual benchmark need a runtime when this crate is
+# tested independently of the renderer's Tokio feature selection.
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 # Property tests. Only `std` is needed: the default features add
 # process forking and timeouts we do not use, and their dependencies.
 proptest = { version = "1", default-features = false, features = ["std"] }
+
+[[example]]
+name = "glz_references"
+required-features = ["glz"]
