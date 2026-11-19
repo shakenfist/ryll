@@ -305,17 +305,9 @@
       "sha": "ed18e13bae620b5e684caf735f361982d52b32fb",
       "date": "2026-08-02"
     },
-    "shakenfist-spice-compression/Cargo.toml": {
-      "sha": "1b04f056cfb512416980276e4ab7542950907956",
-      "date": "2026-11-04"
-    },
     "shakenfist-spice-compression/README.md": {
       "sha": "d8d5c0587fadb87c80855a954b82288a327a4799",
       "date": "2026-11-04"
-    },
-    "shakenfist-spice-compression/src/byte_bounded_lru.rs": {
-      "sha": "7a7323cc6153643991583fd44ba6ab04cdb5cded",
-      "date": "2026-09-18"
     },
     "shakenfist-spice-compression/src/dimensions.rs": {
       "sha": "85174bc3b055bd36c1cc74aebed1cba3b16db6a6",

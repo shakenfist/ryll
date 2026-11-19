@@ -240,10 +240,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-compression/src/byte_bounded_lru.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/src/channels/watchdog.rs",
       "author": "mikal"
     },
@@ -669,10 +665,6 @@
     },
     {
       "path": "shakenfist-spice-compression/README.md",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-compression/Cargo.toml",
       "author": "mikal"
     },
     {
