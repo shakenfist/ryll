@@ -29,12 +29,17 @@ stale comment at `glz.rs:425-426`, a stray trailing-comma edit
 at `byte_bounded_lru.rs:748`, and moving the benchmark runbook
 out of the crate README. This plan tracks everything else.
 
-If the contributor does not engage, those four items fall back
-into this plan as well — see "Administration" below.
+**The contributor delivered all four on 2026-11-18 in
+1269a38fd385 ("Guard GLZ cross-image copy bounds"), reviewed
+2026-11-19.** Wave 0 was clean on the new head, the delta was
+four files and nine added lines, and `make lint`, `make test`
+and `make package-check` passed again. They also took item 10
+below unprompted. Nothing in that commit changed what this plan
+has to do, except where noted against each item.
 
 ## Must fix
 
-1. **`ENTRY_OVERHEAD_BYTES` understates real per-entry cost,
+1. **`PER_ENTRY_OVERHEAD_BYTES` understates real per-entry cost,
    and the module's RSS bound is now wrong.**
    Storing `Arc<Vec<u8>>` shrinks the `lru` node by 16 bytes
    (an `Arc` pointer replaces a `Vec` header) but adds a whole
@@ -42,7 +47,7 @@ into this plan as well — see "Administration" below.
    allocator rounds to a 48-byte chunk. Measured on
    x86-64/glibc, real per-entry overhead moves from about 111
    bytes to about 143. The constant stays at 96, so the module
-   doc's claim at `byte_bounded_lru.rs:18-26` that the entry
+   doc's claim at `byte_bounded_lru.rs:15-25` that the entry
    cap "budgets container overhead at no more than the payload
    budget, so the worst-case footprint is about twice
    `cap_bytes`" is now out by 25-35%: for the default 256 MiB
@@ -58,11 +63,11 @@ into this plan as well — see "Administration" below.
    entries before eviction. It restores the "about twice
    `cap_bytes`" bound honestly rather than hedging the prose
    around an unsupported number.
-   Work: bump `ENTRY_OVERHEAD_BYTES` to 128 in
+   Work: bump `PER_ENTRY_OVERHEAD_BYTES` to 128 in
    `shakenfist-spice-compression/src/byte_bounded_lru.rs`,
-   re-derive the figure in its doc comment (lines 44-54) with
+   re-derive the figure in its doc comment (lines 42-54) with
    the layout above rather than the hedge PR 739 left there,
-   fix the corollary at lines 18-26, and update
+   fix the corollary at lines 15-25, and update
    `docs/troubleshooting.md:1023-1031`, which repeats the 96
    estimate and says an entry "really costs around a hundred".
    `entry_cap_is_derived_from_the_byte_cap` is written in terms
@@ -70,21 +75,23 @@ into this plan as well — see "Administration" below.
    entry-cap tests for hard-coded expectations.
 
 2. **The dictionary-miss paths advance `out_idx` unclipped.**
-   `glz.rs:455` and `glz.rs:503` both do
+   `glz.rs:452` and `glz.rs:500` both do
    `out_idx += length * 4` on a miss, where `length` is
    attacker-controlled and grows with `0xFF` continuation
    bytes, so `out_idx` can land far past `output_size`. That is
    safe today only because each is immediately followed by
    `continue`, which re-enters the `while out_idx < output_size`
-   guard. PR 739's new bulk copy computes
-   `(output_size - out_idx) / 4`, so it now *depends* on that,
+   guard. PR 739's first draft of the bulk copy computed
+   `(output_size - out_idx) / 4`, so it *depended* on that,
    where the per-pixel loop it replaced was self-guarding.
-   The contributor has been asked for the one-line
-   `saturating_sub` at the copy; this item is the other half,
-   clamping at the source:
+   1269a38fd385 restored the self-guard: `saturating_sub` plus
+   an `if bytes > 0` skip, which together make the copy total
+   for any `out_idx`, including one past `output_size` — where
+   even an empty slice index would otherwise panic. So nothing
+   is load-bearing on this item any more. It is still worth
+   doing, as the other half, clamping at the source:
    `out_idx = out_idx.saturating_add(length * 4).min(output_size)`
-   at both sites. Do both, not either — the point is that
-   neither line should be load-bearing on the other.
+   at both sites, so that neither line depends on the other.
    See also test gap 5 below.
 
 ## Should fix
@@ -115,8 +122,11 @@ into this plan as well — see "Administration" below.
    channel. One sentence at `troubleshooting.md:1104`, for
    example: "The cap counts cache-owned pixels; a decode in
    flight can keep an evicted source alive until its copy
-   finishes." PR 739 states this honestly in its own README and
-   module docs; our operator-facing docs do not say it yet.
+   finishes." PR 739 states this honestly in
+   `byte_bounded_lru.rs`'s module docs — the README paragraph
+   that said it too went out in 1269a38fd385 along with the
+   benchmark section — but our operator-facing docs do not say
+   it yet.
 
 5. **Document the new benchmark example where our other
    manual benchmarks live.** `docs/development.md` has
@@ -125,9 +135,12 @@ into this plan as well — see "Administration" below.
    Add a short subsection: the command, that it measures
    elapsed decode time and not session frame rate, that there
    is no CI threshold, and that comparisons need the same build
-   profile on both revisions. This is the destination for the
-   runbook the contributor has been asked to take out of the
-   crate README; if they decline, move the text ourselves.
+   profile on both revisions. **Now required rather than
+   tidying:** 1269a38fd385 removed the README section, so after
+   #739 merges the only record of how to run the benchmark is
+   the `//!` header of `examples/glz_references.rs`, which is
+   the right place for the command but not for the caveats. The
+   text to carry across is in that commit's README deletion.
 
 6. **Say what the benchmark does not measure.** The example
    times a single-threaded decode against a one-entry
@@ -172,14 +185,15 @@ into this plan as well — see "Administration" below.
    leniency is deliberate and why, or change it — but not
    silently.
 
-10. **The example's comment overstates its own coverage.**
+10. **Done by the contributor in 1269a38fd385.** The example's
+    comment overstated its own coverage.
     `examples/glz_references.rs:66` says the non-uniform RGBA
     pixels "expose incorrect offsets and channel ordering". The
     generated stream contains only cross-image references and
     no literals, so the BGR-to-RGBA literal path never runs and
     channel ordering is not exercised. Offsets are covered
-    thoroughly. Drop the second clause if the contributor does
-    not.
+    thoroughly. They cut the clause to "expose incorrect
+    reference offsets". No work left.
 
 ## Test coverage gaps
 
@@ -255,10 +269,11 @@ against an independently written model. The gaps are:
 
 Must-fix 1 is a deliberate behaviour change and should land on
 its own commit with the docs edits that justify it. Must-fix 2
-is the other half of what the contributor was asked for, so it
-should land after #739 merges, whichever way they answer. It is
-the cross-image analogue of #626 ("LZ and GLZ back-reference
-one pixel before the image start panics"), which
+is the other half of what the contributor was asked for, and
+they did their half in 1269a38fd385, so it should land after
+#739 merges. It is the cross-image analogue of #626 ("LZ and
+GLZ back-reference one pixel before the image start panics"),
+which
 `PLAN-decoder-hardening.md` closed by adding the
 `out_idx.checked_sub` guard that still stands in the
 self-reference path — so the fix has a precedent in this very
@@ -269,13 +284,11 @@ are polish. The test gaps are independent of each other; gaps
 the only guard on the change's purpose and gaps 2 and 5 are
 about CI reliability and bounds respectively.
 
-If the contributor does not engage with the PR comment, add
-their four items to this plan and apply them ourselves on
-their branch before merging — `maintainerCanModify` is true on
-#739, which preserves their authorship on the rest. The
-review's local state file (`REVIEW-STATE.md` in the
-`ryll-wt-pr739` worktree, never committed) has the full finding
-list and the plan-B steps.
+The contributor answered within a day and did all four items,
+so the plan-B fallback (apply them ourselves on their branch
+under `maintainerCanModify`) was not needed. The review's local
+state file (`REVIEW-STATE.md` in the `ryll-wt-pr739` worktree,
+never committed) has the full finding list and those steps.
 
 ### Context
 
