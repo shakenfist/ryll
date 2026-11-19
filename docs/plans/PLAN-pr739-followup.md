@@ -33,7 +33,15 @@ out of the crate README. This plan tracks everything else.
 1269a38fd385 ("Guard GLZ cross-image copy bounds"), reviewed
 2026-11-19.** Wave 0 was clean on the new head, the delta was
 four files and nine added lines, and `make lint`, `make test`
-and `make package-check` passed again. They also took item 10
+and `make package-check` passed again. Note for the record that
+the README section F7 asked about was added by this same pull
+request (in b795aaa), not inherited from develop: the README at
+the branch head is byte-identical to develop's and the file has
+left the diff entirely. `PUSH-AUDIT.md`'s `readme-discipline`
+block calls README growth of that kind a blocking finding in its
+own right and says to flag it *and move it* — the contributor did
+the deleting half, and item 5 below is the moving half, which is
+ours. They also took item 10
 below unprompted. Nothing in that commit changed what this plan
 has to do, except where noted against each item.
 
@@ -94,6 +102,33 @@ has to do, except where noted against each item.
    at both sites, so that neither line depends on the other.
    See also test gap 5 below.
 
+   Two things an independent read of the round-2 delta turned up
+   that whoever writes the clamp has to decide about:
+
+   - **The two advances are inconsistent with the hit path.** A
+     cross-reference *miss* advances `out_idx` by the full
+     `length * 4`, leaving a hole in the output; a *hit whose
+     source is truncated* advances only by the bytes it actually
+     copied, which shifts every later pixel instead. Both are
+     safe, both are attacker-visible as garbage, and they
+     disagree about what a reference that cannot be satisfied
+     means. Clamping does not settle that — pick one meaning and
+     say why in the code.
+   - **The multiply is unclamped as well as the addition.** On a
+     32-bit target `length * 4` overflows at roughly 1.07e9
+     pixels, which about 4.2 MiB of `0xFF` continuation bytes
+     reaches inside the 257 MiB `MAX_MESSAGE_BODY` — debug
+     panics, release wraps to a wrong but in-range `out_idx`.
+     The workspace targets 64-bit only and no 32-bit target
+     appears in the release workflow, so this is theoretical
+     today; `saturating_add` and `saturating_mul` cost nothing
+     and make it moot.
+
+   Note the irony worth avoiding in the commit message: round 2
+   hardened the one expression that could not break the
+   `out_idx` invariant and left untouched the two statements
+   that do.
+
 ## Should fix
 
 3. **`docs/design-decisions.md:91-93` records a parity check
@@ -129,13 +164,20 @@ has to do, except where noted against each item.
    it yet.
 
 5. **Document the new benchmark example where our other
-   manual benchmarks live.** `docs/development.md` has
-   "Measuring idle CPU" (around line 233) and manual-diagnostic
-   material under "Test suite specifics" (around line 413).
-   Add a short subsection: the command, that it measures
-   elapsed decode time and not session frame rate, that there
-   is no CI threshold, and that comparisons need the same build
-   profile on both revisions. **Now required rather than
+   manual benchmarks live.** The precedent is
+   `docs/development.md`'s "Manual verification against a
+   desktop guest" section (line 493), whose "Example
+   control-socket client" subsection (line 675) documents
+   `examples/control-socket-demo.py` — the same shape of thing
+   as this one: a workspace example with a prose home. "Measuring
+   idle CPU" (line 233) is the other nearby precedent for a
+   manual measurement. `docs/index.md` needs nothing; it lists
+   pages, not subsections, and already carries a row for
+   `development.md`. Add a short subsection: the command, that
+   it measures elapsed decode time and not session frame rate,
+   that there is no CI threshold, and that comparisons need the
+   same build profile on both revisions. **Now required rather
+   than
    tidying:** 1269a38fd385 removed the README section, so after
    #739 merges the only record of how to run the benchmark is
    the `//!` header of `examples/glz_references.rs`, which is
@@ -291,6 +333,20 @@ state file (`REVIEW-STATE.md` in the `ryll-wt-pr739` worktree,
 never committed) has the full finding list and those steps.
 
 ### Context
+
+Round 2's delta (1269a38fd385) was additionally given two
+independent reads — one on the arithmetic against the spice
+reference sources, one on scope, documentation loss, repository
+conventions, packaging and provenance. Neither found anything
+merge-blocking. The items they added to this plan are marked
+above. One claim from those reads was rejected on local
+evidence: that the trailing comma proves the first two commits
+were `cargo fmt --check` dirty. `make lint` passed at 6e495e4
+in round 1 and at 1269a38fd385 in round 2, so rustfmt accepts
+both forms inside the `assert_eq!` macro and the series is
+format-clean. Two rounds of review have now guessed wrong about
+rustfmt's behaviour inside a macro from first principles; run it
+instead.
 
 Created while reviewing PR 739 under `MERGE-TEMPLATE.md`,
 before merging it, per that document's Step 6. The PR is at
