@@ -47,3 +47,4 @@
 - PLAN-decoder-hardening.md: Image decoder hardening
 - PLAN-app-split.md: Splitting app.rs
 - PLAN-rdp-frontend.md: RDP frontend
+- PLAN-crate-boundaries.md: Crate boundaries and transcoding out
