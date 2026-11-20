@@ -184,7 +184,9 @@ libloading = { version = "0.9", optional = true }
 [dev-dependencies]
 # GLZ tests and the manual benchmark need a runtime when this crate is
 # tested independently of the renderer's Tokio feature selection.
-tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+# `test-util` is what lets the cross-reference timeout be asserted on a
+# paused clock instead of a wall clock the CI runner can deschedule.
+tokio = { version = "1", features = ["rt-multi-thread", "time", "test-util"] }
 # Property tests. Only `std` is needed: the default features add
 # process forking and timeouts we do not use, and their dependencies.
 proptest = { version = "1", default-features = false, features = ["std"] }
