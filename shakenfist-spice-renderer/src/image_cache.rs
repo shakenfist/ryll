@@ -40,6 +40,20 @@ impl BoundedImageCache {
         }
     }
 
+    /// Create a cache with an explicit entry cap as well as a byte
+    /// cap, for tests of the byte-cap arithmetic at small caps.
+    ///
+    /// [`new`][Self::new] derives the entry cap from the byte cap, as
+    /// production wants; see [`ByteBoundedLru::with_caps`] for why a
+    /// test that means to exercise the byte cap has to say so.
+    #[cfg(test)]
+    fn with_caps(cap_bytes: usize, max_entries: usize) -> Self {
+        Self {
+            inner: ByteBoundedLru::with_caps(cap_bytes, max_entries),
+            first_eviction_logged: false,
+        }
+    }
+
     /// Insert (or replace) an entry.  See
     /// [`ByteBoundedLru::insert`] for the byte-cap semantics.
     pub fn insert(&mut self, key: u64, value: Vec<u8>) -> InsertOutcome {
@@ -137,8 +151,11 @@ mod tests {
     use super::*;
 
     /// Helper: a cache with a 200-byte cap.
+    /// A 200-byte cache whose entry cap is set explicitly: every test
+    /// below is about byte-cap behaviour, and the entry cap derived
+    /// from 200 bytes would be the constraint that evicted instead.
     fn cache_200() -> BoundedImageCache {
-        BoundedImageCache::new(200)
+        BoundedImageCache::with_caps(200, 8)
     }
 
     #[test]
@@ -299,7 +316,7 @@ mod tests {
 
     #[test]
     fn first_eviction_sets_logged_flag() {
-        let mut c = BoundedImageCache::new(100);
+        let mut c = BoundedImageCache::with_caps(100, 8);
         assert!(!c.was_first_eviction_logged());
 
         c.insert(1, vec![0u8; 60]);
