@@ -80,6 +80,25 @@ impl GlzDictionary {
         }
     }
 
+    /// Create a dictionary with an explicit entry cap as well as a
+    /// byte cap, for tests of the byte-cap arithmetic at small caps.
+    ///
+    /// [`with_cap`][Self::with_cap] derives the entry cap from the
+    /// byte cap, which is what production wants; see
+    /// [`ByteBoundedLru::with_caps`] for why a test that means to
+    /// exercise the byte cap has to say so.
+    #[cfg(test)]
+    fn with_caps(cap_bytes: usize, max_entries: usize) -> Self {
+        Self {
+            images: Mutex::new(ByteBoundedLru::with_caps(cap_bytes, max_entries)),
+            notify: tokio::sync::Notify::new(),
+            evicted_ids: Mutex::new(LruCache::new(
+                NonZeroUsize::new(EVICTED_ID_TOMBSTONES).expect("tombstone capacity is non-zero"),
+            )),
+            first_eviction_logged: Mutex::new(false),
+        }
+    }
+
     /// Insert an image into the dictionary and wake any
     /// waiters blocked on a cross-frame reference.
     ///
@@ -824,7 +843,9 @@ mod tests {
 
     #[test]
     fn dict_insert_over_cap_evicts_oldest() {
-        let dict = GlzDictionary::with_cap(300);
+        // An explicit entry cap: this test is about the byte cap, and
+        // the entry cap derived from 300 bytes would evict first.
+        let dict = GlzDictionary::with_caps(300, 8);
         dict.insert(1, vec![0u8; 100]);
         dict.insert(2, vec![0u8; 100]);
         dict.insert(3, vec![0u8; 100]);
@@ -873,7 +894,9 @@ mod tests {
 
     #[test]
     fn dict_tombstones_cap_evicted_ids_only() {
-        let dict = GlzDictionary::with_cap(300);
+        // As in dict_insert_over_cap_evicts_oldest: the eviction under
+        // test is a byte-cap one, so the entry cap is set explicitly.
+        let dict = GlzDictionary::with_caps(300, 8);
         dict.insert(1, vec![0u8; 100]);
         dict.insert(2, vec![0u8; 100]);
         dict.insert(3, vec![0u8; 100]);
