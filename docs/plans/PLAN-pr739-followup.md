@@ -45,6 +45,46 @@ ours. They also took item 10
 below unprompted. Nothing in that commit changed what this plan
 has to do, except where noted against each item.
 
+## What has landed
+
+#739 merged on 2026-11-19 as 128f572; CodeQL's post-merge run on
+develop passed. The first follow-up branch carries:
+
+| Commit | Closes |
+|---|---|
+| 64c25ed | Must fix 1, and the troubleshooting half of should fix 4 |
+| 5c6fdbf | Must fix 2, test gaps 1, 2 and 5 |
+| 3d6dcd2 | Should fix 3, 5 and 6, and the configuration half of 4 |
+
+`make lint`, `make test` (1825 tests) and `make package-check` all
+pass on that tree. The three guards in 5c6fdbf were mutation-checked:
+both clamps and the `Arc` sharing were each reverted in turn and each
+was caught by its own test. Writing those mutants is what found that
+only one of the two skip paths had a test at all.
+
+Two things worth recording against the items as written:
+
+- **Must fix 1's figures were derived again and came out lower.** The
+  review's estimate was 111 bytes before #739 and 143 after. Deriving
+  it from `lru` 0.19's node layout against glibc gives about 91 and
+  123. The +32 delta the decision rested on is the same either way,
+  and 128 still sits inside the honest band, so the operator's choice
+  stands; the doc comment now shows the derivation rather than
+  asserting a figure.
+- **Should fix 3 was re-verified rather than softened.** Both kerbside
+  references are deleted upstream (`kerbside/utilities/glz.py` in
+  8bc00cc, `testclient/ryll/decompressors.py` in 32dfbf8), but git
+  still has them, so the claim was checked against the real file. For
+  RGB32 the new bulk copy moves the same bytes as kerbside's loop on
+  any well-formed stream. Malformed streams are where kerbside,
+  spice-gtk and ryll all differ, which sharpens should consider 9
+  below from an unease into a decision.
+
+## Still open
+
+Should consider 7-10, and test gaps 3, 4, 6, 7 and 8. Gap 8 stays
+tracked as #135 rather than duplicated here.
+
 ## Must fix
 
 1. **`PER_ENTRY_OVERHEAD_BYTES` understates real per-entry cost,
