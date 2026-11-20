@@ -237,6 +237,30 @@ impl Default for GlzDictionary {
     }
 }
 
+/// Advance `out_idx` past a cross-image reference that could not be
+/// satisfied, clamped to the end of the output.
+///
+/// Skipping the whole reference leaves the pixels it would have
+/// written as zeros and keeps everything after it in place. The
+/// clipping path does the opposite — a hit whose source runs short
+/// advances only by what it copied, so later pixels shift — which
+/// `clipped_cross_reference_leaves_next_literal_at_actual_copy_end`
+/// pins as deliberate. Both are lenient readings of a malformed
+/// stream, and which one is right is a question about the decoder's
+/// contract rather than about these two lines.
+///
+/// The clamp is what makes `out_idx <= output_size` an invariant of
+/// the decode loop instead of a property of where its `continue`
+/// statements happen to sit: `length` grows with `0xFF` continuation
+/// bytes under the sender's control. The arithmetic saturates so that
+/// a 32-bit target cannot wrap it either, where `length * 4` would
+/// overflow at about 4 MiB of continuation bytes.
+fn skip_unsatisfied_reference(out_idx: usize, length: usize, output_size: usize) -> usize {
+    out_idx
+        .saturating_add(length.saturating_mul(4))
+        .min(output_size)
+}
+
 pub async fn decompress_glz(data: &[u8], dictionary: &GlzDictionary) -> Result<DecompressedImage> {
     if data.len() < 33 {
         return Err(anyhow!("GLZ data too short for header"));
@@ -468,7 +492,7 @@ pub async fn decompress_glz(data: &[u8], dictionary: &GlzDictionary) -> Result<D
                             image_id,
                             image_dist
                         );
-                        out_idx += length * 4;
+                        out_idx = skip_unsatisfied_reference(out_idx, length, output_size);
                         continue;
                     }
                     None => {
@@ -516,7 +540,7 @@ pub async fn decompress_glz(data: &[u8], dictionary: &GlzDictionary) -> Result<D
                                     image_id,
                                     image_dist
                                 );
-                                out_idx += length * 4;
+                                out_idx = skip_unsatisfied_reference(out_idx, length, output_size);
                                 continue;
                             }
                         }
@@ -547,6 +571,11 @@ pub async fn decompress_glz(data: &[u8], dictionary: &GlzDictionary) -> Result<D
         }
     }
 
+    debug_assert!(
+        out_idx <= output_size,
+        "decode loop left out_idx past the end of the output: {out_idx} > {output_size}"
+    );
+
     if !top_down {
         let row_bytes = width as usize * 4;
         let mut flipped = vec![0u8; output.len()];
@@ -562,9 +591,79 @@ pub async fn decompress_glz(data: &[u8], dictionary: &GlzDictionary) -> Result<D
         .ok_or_else(|| anyhow!("GLZ image dimensions refused: {}x{}", width, height))
 }
 
+/// Counts the bytes this thread allocates, for the one test that has
+/// to observe an allocation that no decoded pixel reflects.
+///
+/// `fragmented_cross_references_share_the_source_allocation` is the
+/// only guard on the purpose of the `Arc` in the dictionary: sharing
+/// the source and cloning it per fragment produce identical output, so
+/// nothing else in this suite would notice if the clone came back.
+/// Counting is per thread and the counter is only read by that test,
+/// so tests running in parallel do not interfere.
+#[cfg(test)]
+mod alloc_counter {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    thread_local! {
+        static BYTES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub struct Counting;
+
+    // SAFETY: every method forwards to `System` with the layout it was
+    // given; the counter is a thread-local `Cell<usize>` with a const
+    // initialiser, so no allocation happens inside the allocator.
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            add(layout.size());
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            add(new_size);
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    fn add(bytes: usize) {
+        // `try_with` rather than `with`: during thread teardown the
+        // thread-local is gone and an allocation there must not panic.
+        let _ = BYTES.try_with(|counter| counter.set(counter.get().saturating_add(bytes)));
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: Counting = Counting;
+
+    /// Run `f`, returning its value and the bytes allocated on this
+    /// thread while it ran.
+    pub fn measure<T>(f: impl FnOnce() -> T) -> (T, usize) {
+        let before = BYTES.with(Cell::get);
+        let value = f();
+        let after = BYTES.with(Cell::get);
+        (value, after.saturating_sub(before))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    /// A current-thread runtime with the clock paused, so a test can
+    /// assert on `CROSS_REF_TIMEOUT_MS` without spending it and
+    /// without a loaded runner's deschedule deciding the outcome.
+    fn paused_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .start_paused(true)
+            .build()
+            .expect("current-thread runtime with a paused clock")
+    }
 
     /// Repeated two-pixel references with changing source images and
     /// offsets exercise the same source allocations across many fragments.
@@ -614,7 +713,9 @@ mod tests {
         let (data, first, second, expected) = fragmented_cross_ref_image();
         let dict = GlzDictionary::with_cap(1024);
         dict.insert(8, second);
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        // Paused: the 100 ms safety-net timer must not be left running
+        // behind a test whose ordering is already deterministic.
+        let rt = paused_runtime();
         rt.block_on(async {
             let mut decode = Box::pin(decompress_glz(&data, &dict));
             // Poll once to register the missing-image notification. This
@@ -954,15 +1055,20 @@ mod tests {
         assert!(dict.was_evicted(4), "test setup: id 4 should be evicted");
 
         let data = glz_cross_ref_image(5);
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let start = std::time::Instant::now();
-        let result = rt.block_on(decompress_glz(&data, &dict));
-        let elapsed = start.elapsed();
+        let rt = paused_runtime();
+        let (result, elapsed) = rt.block_on(async {
+            let start = tokio::time::Instant::now();
+            let result = decompress_glz(&data, &dict).await;
+            (result, start.elapsed())
+        });
 
         assert!(result.is_ok(), "decode should still succeed: {result:?}");
-        assert!(
-            elapsed < std::time::Duration::from_millis(CROSS_REF_TIMEOUT_MS / 2),
-            "reference to an evicted id must not wait for the timeout (took {elapsed:?})"
+        // On a paused clock the fast path is exact rather than
+        // approximate: it awaits no timer at all.
+        assert_eq!(
+            elapsed,
+            Duration::ZERO,
+            "a reference to an evicted id must not wait"
         );
     }
 
@@ -976,15 +1082,147 @@ mod tests {
         assert!(!dict.was_evicted(4));
 
         let data = glz_cross_ref_image(5);
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let start = std::time::Instant::now();
-        let result = rt.block_on(decompress_glz(&data, &dict));
-        let elapsed = start.elapsed();
+        let rt = paused_runtime();
+        let (result, elapsed) = rt.block_on(async {
+            let start = tokio::time::Instant::now();
+            let result = decompress_glz(&data, &dict).await;
+            (result, start.elapsed())
+        });
 
         assert!(result.is_ok(), "decode should still succeed: {result:?}");
-        assert!(
-            elapsed >= std::time::Duration::from_millis(CROSS_REF_TIMEOUT_MS),
-            "an unknown id should still wait out the timeout (took {elapsed:?})"
+        assert_eq!(
+            elapsed,
+            Duration::from_millis(CROSS_REF_TIMEOUT_MS),
+            "an unknown id should wait out the whole timeout"
         );
+    }
+
+    /// 128 two-pixel fragments against one 64 KiB source: enough that
+    /// cloning the source per fragment is megabytes of allocation,
+    /// while sharing the dictionary's own buffer costs the 1 KiB
+    /// output and little else.
+    fn many_fragments_one_large_source() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        const FRAGMENTS: usize = 128;
+        const SOURCE_PIXELS: usize = 16 * 1024;
+        let source: Vec<u8> = (0..SOURCE_PIXELS)
+            .flat_map(|pixel| [pixel as u8, (pixel >> 8) as u8, 7, 255])
+            .collect();
+        let mut payload = Vec::new();
+        let mut expected = Vec::new();
+        for fragment in 0..FRAGMENTS {
+            let pixel_offset = fragment * 2;
+            // ctrl 0x40: length two pixels, source in a previous image,
+            // low nibble of the pixel offset; then the rest of the
+            // offset, then image_dist 1.
+            payload.push(0x40 | (pixel_offset & 0x0F) as u8);
+            payload.push((pixel_offset >> 4) as u8);
+            payload.push(0x01);
+            expected.extend_from_slice(&source[pixel_offset * 4..pixel_offset * 4 + 8]);
+        }
+        (
+            glz_rgb32_row((FRAGMENTS * 2) as u32, &payload),
+            source,
+            expected,
+        )
+    }
+
+    #[test]
+    fn fragmented_cross_references_share_the_source_allocation() {
+        let (data, source, expected) = many_fragments_one_large_source();
+        let source_bytes = source.len();
+        let dict = GlzDictionary::with_cap(1024 * 1024);
+        dict.insert(0, source);
+        let rt = paused_runtime();
+
+        let (image, allocated) =
+            alloc_counter::measure(|| rt.block_on(decompress_glz(&data, &dict)).unwrap());
+
+        assert_eq!(image.pixels, expected);
+        // Cloning the source once per fragment would allocate 128 x
+        // 64 KiB = 8 MiB. Sharing it allocates the output buffer and
+        // the decode's own small structures. The threshold sits far
+        // from both, so this fails on a returning clone rather than on
+        // an allocator detail.
+        assert!(
+            allocated < source_bytes,
+            "decode allocated {allocated} bytes against a {source_bytes}-byte source: \
+             a per-fragment clone of the source has come back"
+        );
+    }
+
+    #[test]
+    fn evicted_cross_reference_longer_than_the_output_is_skipped_whole() {
+        let dict = GlzDictionary::with_cap(200);
+        dict.insert(0, vec![7u8; 100]);
+        dict.insert(1, vec![8u8; 100]);
+        dict.insert(2, vec![9u8; 100]);
+        assert!(dict.was_evicted(0), "test setup: id 0 must be tombstoned");
+
+        // ctrl 0xE0 asks for the extended length form; three 0xFF
+        // continuations and a 250 make it 1022 pixels, against an
+        // output of two. Then code1 0, image_dist 1 (so source id 0,
+        // the tombstoned one), then one literal pixel that the
+        // exhausted output must drop rather than misplace.
+        let payload = [0xE0, 0xFF, 0xFF, 0xFF, 250, 0x00, 0x01, 0x00, 9, 10, 11];
+        let data = glz_rgb32_row(2, &payload);
+        let rt = paused_runtime();
+        let image = rt.block_on(decompress_glz(&data, &dict)).unwrap();
+
+        // The output is the same whether or not the skip is clamped;
+        // what catches an unclamped skip is the `debug_assert!` on
+        // `out_idx` at the end of the decode loop, which this stream
+        // is what reaches.
+        assert_eq!(image.pixels, vec![0u8; 8]);
+    }
+
+    #[test]
+    fn timed_out_cross_reference_longer_than_the_output_is_skipped_whole() {
+        // The counterpart of the test above on the other miss path:
+        // there the source was tombstoned and the skip is immediate,
+        // here it is an id the dictionary has never held, so the skip
+        // happens after the timeout. Both advance `out_idx` past a
+        // reference the sender sized far beyond the output, and both
+        // have to leave it no further than the end.
+        let dict = GlzDictionary::with_cap(1024);
+        assert!(!dict.was_evicted(0), "test setup: id 0 is simply unknown");
+
+        let payload = [0xE0, 0xFF, 0xFF, 0xFF, 250, 0x00, 0x01, 0x00, 9, 10, 11];
+        let data = glz_rgb32_row(2, &payload);
+        let rt = paused_runtime();
+        let (image, elapsed) = rt.block_on(async {
+            let start = tokio::time::Instant::now();
+            let image = decompress_glz(&data, &dict).await.unwrap();
+            (image, start.elapsed())
+        });
+
+        assert_eq!(elapsed, Duration::from_millis(CROSS_REF_TIMEOUT_MS));
+        assert_eq!(image.pixels, vec![0u8; 8]);
+    }
+
+    #[test]
+    fn cross_reference_to_a_cleared_id_waits_instead_of_short_circuiting() {
+        // `clear` is server-driven invalidation, not a cap eviction, so
+        // it leaves no tombstone: the id may still arrive from another
+        // display channel, and the decode has to wait for it rather
+        // than take the evicted-id fast path.
+        let dict = GlzDictionary::with_cap(1024);
+        dict.insert(0, vec![5u8; 8]);
+        dict.clear();
+        assert!(!dict.was_evicted(0), "clear must not tombstone an id");
+
+        let data = glz_rgb32_row(2, &[0x40, 0x00, 0x01]);
+        let rt = paused_runtime();
+        let (image, elapsed) = rt.block_on(async {
+            let start = tokio::time::Instant::now();
+            let image = decompress_glz(&data, &dict).await.unwrap();
+            (image, start.elapsed())
+        });
+
+        assert_eq!(
+            elapsed,
+            Duration::from_millis(CROSS_REF_TIMEOUT_MS),
+            "a cleared id must take the wait path, not the tombstone path"
+        );
+        assert_eq!(image.pixels, vec![0u8; 8]);
     }
 }
