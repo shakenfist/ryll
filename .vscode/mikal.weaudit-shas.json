@@ -157,6 +157,10 @@
       "sha": "2c97e8ec7903966e139887718c3d63c530f4521f",
       "date": "2026-11-08"
     },
+    "docs/installation.md": {
+      "sha": "f4c4a9fa60c5274b07a431bc9d7c3e3479c65e5f",
+      "date": "2026-11-20"
+    },
     "docs/kasm-workspace.md": {
       "sha": "2f68fd05593d2bd39db194a8f1d1ec33954149a4",
       "date": "2026-11-08"
@@ -169,13 +173,49 @@
       "sha": "518de92ccf3999ad33e5104a4a519d0d1fb24b51",
       "date": "2026-08-18"
     },
+    "docs/multi-mode-parity.md": {
+      "sha": "1cb00926c8ec99fa60c979b164f5fdb50fe5d2d1",
+      "date": "2026-11-20"
+    },
     "docs/portability.md": {
       "sha": "dc06c44e9d9a0e7fe4888d35adb50908ab37fc7d",
       "date": "2026-10-16"
     },
+    "docs/rdp-frontend.md": {
+      "sha": "55decaa086a9c2127fa86e73198d00b71fe02862",
+      "date": "2026-11-20"
+    },
     "docs/rdp-mode-internals.md": {
       "sha": "2ea9a8f852ed24b03efc3eb7c7e62b08209bda2d",
       "date": "2026-11-08"
+    },
+    "docs/releasing.md": {
+      "sha": "06471f1a44d3558d41afe8bcd1965d2ce30174ad",
+      "date": "2026-11-20"
+    },
+    "docs/rendering-pipeline.md": {
+      "sha": "dbe1322e23c9a916b31107ce0f8cdae08b97d75d",
+      "date": "2026-11-20"
+    },
+    "docs/session-lifecycle.md": {
+      "sha": "f05c2e88926402e5ed2af32686315245cc692af8",
+      "date": "2026-11-20"
+    },
+    "docs/spice-protocol.md": {
+      "sha": "ea87100fd548afbc45821738a068f99e7045cbe8",
+      "date": "2026-11-20"
+    },
+    "docs/troubleshooting.md": {
+      "sha": "45ffffc1e8f702a59e7171132dfb241f1d61a709",
+      "date": "2026-11-20"
+    },
+    "docs/web-frontend.md": {
+      "sha": "e22ea41a5650583371b86c29361e5b6327f0bf69",
+      "date": "2026-11-20"
+    },
+    "docs/web-mode-internals.md": {
+      "sha": "117df84c3907319d8eace4a0919b4a252716f802",
+      "date": "2026-11-20"
     },
     "examples/control-socket-demo.py": {
       "sha": "1e39ea70aaa51526508b15997706449a378ce09a",
