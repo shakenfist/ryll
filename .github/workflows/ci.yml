@@ -503,17 +503,19 @@ jobs:
   # this repository's CI runs each hook as a job rather than
   # `pre-commit run --all-files`, so without this job the check would
   # gate only commits made with hooks installed.
+  #
+  # It does not consume check_paths, for the reason the hook is
+  # always_run: a source file anywhere, docs/ included, or the baseline
+  # or exclude file can change the verdict, and the job takes seconds.
   source-size-ratchet:
     name: source size ratchet
     runs-on: [self-hosted, vm, debian-13, s]
     timeout-minutes: 15
-    needs: [check_paths]
     # Fork-guarded for the same reason as the bidi scan above: it runs
     # tools/source-size-ratchet.py from the checkout, which a fork can
     # edit.
     if: >-
       github.event_name != 'merge_group'
-      && needs.check_paths.outputs.code_changed != 'false'
       && (github.event_name != 'pull_request'
           || github.event.pull_request.head.repo.full_name == github.repository)
     concurrency:

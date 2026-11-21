@@ -292,6 +292,7 @@ The pre-commit hooks run:
 - **rustfmt** - Code formatting
 - **clippy** - Linting with warnings as errors
 - **shellcheck** - Shell script linting
+- **source-size-ratchet** - File-length ratchet, described below
 
 ## The function-length lint
 
@@ -332,6 +333,47 @@ safe here: an exemption cannot be satisfied in one of the eleven
 clippy lanes `make lint` runs and unfulfilled in another, which was
 the real risk, since `shakenfist-spice-renderer` holds the longest
 functions in the workspace and is linted in ten of those lanes.
+
+## The source size ratchet
+
+`tools/source-size-ratchet.py` stops a source file that is already
+over 1,500 lines from growing silently, and stops a new file crossing
+that line. It never asks for a file to be split: a file listed in
+`tools/source-size-baseline` may stay exactly as long as its entry for
+ever. It counts every tracked file with a source extension (`.rs`,
+`.py`, `.sh`, `.js`, `.css` and the like, wherever it lives), skipping
+the trees listed in `tools/source-size-exclude`, each of which carries
+a comment saying why it is not reviewed here. It runs as a pre-commit
+hook and as the `source size ratchet` CI job (see [CI](ci.md)).
+
+When it fails, the file in question either grew past its baseline
+entry or is new to the list. The choices, in order of preference:
+
+- Put the growth somewhere else — a new module along a seam that
+  already exists, not a split at a line number.
+- Or raise the entry (or add one, keeping the file sorted by path) by
+  hand, and say in the pull request description why the file should
+  stay whole and grow. The tool deliberately cannot do this edit for
+  you; the one-line baseline diff is what makes the decision visible
+  to a reviewer.
+
+Never get under the line by deleting comments or docstrings that
+explain why the code is the way it is. The tool counts lines and
+cannot tell rationale from scaffolding, so a reviewer has to.
+
+When a file shrinks, `python3 -I tools/source-size-ratchet.py
+--update` lowers its entry, or drops it once the file is at or under
+the threshold. `--update` only ever moves the baseline downwards.
+`--init` rewrites the baseline from the current tree and is for
+adoption only.
+
+The script is vendored byte-for-byte from shakenfist/development's
+`templates/source-size-ratchet/`, so one review of the template covers
+every copy in the fleet. Change it there and re-copy it; never edit it
+in place. Its tests live with the template, in that repository's
+`scripts/tests/test_source_size_ratchet.py`, and that repository's
+consistency audit is where a check that this copy is still current
+belongs.
 
 ## Review tracking
 

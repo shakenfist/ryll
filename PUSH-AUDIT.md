@@ -385,15 +385,20 @@ copy lives in shakenfist/development at
 
 !!! note "In this project"
 
-    ryll has not adopted the `source-size-ratchet` tooling from
-    shakenfist/development's `templates/source-size-ratchet/`, so
-    nothing checks the ratchet on commit and there is no baseline
-    file in `tools/`. The push auditor applies the rule by hand:
-    for each source file the branch touches, compare its length
-    before and after the range, and raise any file over 1,500
-    lines that grew at all, or any file that crossed 1,500.
-    ryll does track whole-file human review in `REVIEWS.md`, so
-    the first bullet's repeated-review cost applies here in full.
+    ryll has adopted the ratchet from shakenfist/development's
+    `templates/source-size-ratchet/`. `tools/source-size-ratchet.py`
+    checks every tracked source file against
+    `tools/source-size-baseline`, skipping the trees listed in
+    `tools/source-size-exclude`, and runs both as a pre-commit hook
+    and as the `source size ratchet` CI job, so the auditor no
+    longer measures lengths by hand. What the line counter cannot
+    see stays with the auditor: whether a raised or added baseline
+    entry carries a good reason in the pull request description,
+    whether a new exclusion really is generated or vendored, and
+    whether a baselined file shrank by losing the rationale
+    comments the last bullet protects. ryll also tracks whole-file
+    human review in `REVIEWS.md`, so the first bullet's
+    repeated-review cost applies here in full.
 
 <!-- shared-block: python-version-discipline v1 -->
 Python version and typing (shared block; do not edit -- the

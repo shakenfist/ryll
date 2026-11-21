@@ -113,6 +113,14 @@
 # above would match it and the review-scope-completeness audit would
 # report it as an orphan; it is included by name.
 #
+# tools/source-size-ratchet.py stays in scope through *.py even though
+# it is vendored byte-for-byte from shakenfist/development's
+# templates/source-size-ratchet/: unlike the sfui copy it executes in
+# this repository's CI, so a reviewer here should still read it. A
+# finding in it is fixed in that template and re-copied, never edited
+# in place, or the copy stops being the one the template's review and
+# tests cover.
+#
 # The review tooling's own state files -- REVIEWS.md, this file, and
 # the .vscode/<user>.weaudit pair -- are excluded by the helper
 # itself (its BUILTIN_EXCLUDE is '.vscode/*' and REVIEWS.md) and are

@@ -241,15 +241,18 @@ Items in `ryll/src/app/ui/` are `pub(in crate::app)`, not
 `pub(super)`: `pub(super)` from a grandchild of `app` reaches only
 `app::ui`, and the callers are in `app` itself.
 
-## A long function is exempted with `#[expect]`
+## Long functions and long files
 
 A function over the `clippy::too_many_lines` threshold carries
-`#[expect(clippy::too_many_lines, reason = "...")]` and **never** an
-`#[allow]`: shortening it then fails the build until the exemption is
-deleted, where an `#[allow]` would outlive the need for it in silence.
-The reason says why that function is long and what splitting it would
-cost; one that restates the lint is worse than no annotation. The
-threshold and its derivation are in `docs/development.md`.
+`#[expect(clippy::too_many_lines, reason = "...")]`, **never** an
+`#[allow]`, so shortening it fails the build until the exemption goes.
+The reason says why it is long and what splitting it would cost. A
+source file over 1,500 lines may not grow past its entry in
+`tools/source-size-baseline`, nor a new one cross the line, unless the
+PR raises the entry by hand and says why; never shrink one by deleting
+rationale comments. `tools/source-size-ratchet.py` is vendored from
+shakenfist/development: change it there, never in place. Both are
+described in `docs/development.md`.
 
 ## Process documents
 
