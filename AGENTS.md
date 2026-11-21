@@ -75,19 +75,8 @@ fact, not a pin, and is also fine.
 
 ## Protocol reference sources
 
-When working on SPICE protocol implementation details, these
-local source trees are available for reference:
-
-| Source | Path | Use for |
-|--------|------|---------|
-| Kerbside Python proxy | `shakenfist/kerbside/` | Protocol docs in `docs/`, packet parsing in `kerbside/spiceprotocol/packets/`, reference test client in `testclient/ryll/` |
-| SPICE protocol headers | `/srv/src-reference/spice/spice-protocol/` | Canonical enum definitions, message structures, capability flags |
-| SPICE common library | `/srv/src-reference/spice/spice-common/` | Shared marshalling code used by both server and client |
-| SPICE GTK client | `/srv/src-reference/spice/spice-gtk/` | Reference client implementation (C/GTK) |
-| spice-html5 | `/srv/src-reference/spice/spice-html5/` | JavaScript SPICE client (useful for LZ/GLZ decompressor reference) |
-| virt-viewer | `/srv/src-reference/spice/virt-viewer/` | The standard SPICE client, .vv file handling |
-| QEMU | `/srv/src-reference/qemu/qemu/` | Server-side SPICE implementation in `ui/spice-*` |
-| Linux kernel | `/srv/src-reference/torvalds/linux/` | QXL driver in `drivers/gpu/drm/qxl/` |
+The local source trees to read when implementing a protocol detail
+are tabulated in `docs/spice-protocol.md`.
 
 ## Multi-mode parity is a requirement, not an aspiration
 
@@ -254,16 +243,13 @@ Items in `ryll/src/app/ui/` are `pub(in crate::app)`, not
 
 ## A long function is exempted with `#[expect]`
 
-`clippy::too_many_lines` is on workspace-wide; the threshold, how it
-was arrived at and the shape of its exemptions are in
-[`docs/development.md`](docs/development.md). A function over it
-carries `#[expect(clippy::too_many_lines, reason = "...")]` and
-**never** an `#[allow]`: an `#[expect]` whose lint stops firing is
-itself a warning, and `make lint` denies warnings, so shortening the
-function fails the build until the exemption is deleted. An `#[allow]`
-would outlive the need for it in silence. The `reason` says why that
-function is long and what splitting it would cost; one that restates
-the lint is worse than no annotation at all.
+A function over the `clippy::too_many_lines` threshold carries
+`#[expect(clippy::too_many_lines, reason = "...")]` and **never** an
+`#[allow]`: shortening it then fails the build until the exemption is
+deleted, where an `#[allow]` would outlive the need for it in silence.
+The reason says why that function is long and what splitting it would
+cost; one that restates the lint is worse than no annotation. The
+threshold and its derivation are in `docs/development.md`.
 
 ## Process documents
 
