@@ -252,6 +252,19 @@ Items in `ryll/src/app/ui/` are `pub(in crate::app)`, not
 `pub(super)`: `pub(super)` from a grandchild of `app` reaches only
 `app::ui`, and the callers are in `app` itself.
 
+## A long function is exempted with `#[expect]`
+
+`clippy::too_many_lines` is on workspace-wide; the threshold, how it
+was arrived at and the shape of its exemptions are in
+[`docs/development.md`](docs/development.md). A function over it
+carries `#[expect(clippy::too_many_lines, reason = "...")]` and
+**never** an `#[allow]`: an `#[expect]` whose lint stops firing is
+itself a warning, and `make lint` denies warnings, so shortening the
+function fails the build until the exemption is deleted. An `#[allow]`
+would outlive the need for it in silence. The `reason` says why that
+function is long and what splitting it would cost; one that restates
+the lint is worse than no annotation at all.
+
 ## Process documents
 
 Four process documents at the repo root capture the

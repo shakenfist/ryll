@@ -218,6 +218,15 @@ impl Default for GlzDictionary {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the GLZ format's decode loop. One pass over the compressed bytes \
+     advances a read offset and an output index through literal runs, \
+     same-image back-references with multi-byte extended offsets, and \
+     cross-image references that may wait on the dictionary. Every \
+     branch reads and writes both cursors and the output buffer, so an \
+     extracted arm would take and return all three"
+)]
 pub async fn decompress_glz(data: &[u8], dictionary: &GlzDictionary) -> Result<DecompressedImage> {
     if data.len() < 33 {
         return Err(anyhow!("GLZ data too short for header"));

@@ -1419,6 +1419,15 @@ impl DisplayChannel {
         Ok(())
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the display channel's wire dispatch: one arm per \
+         SPICE_MSG_DISPLAY_* opcode, each decoding its own payload against \
+         the surface, stream and image-cache state the channel holds. The \
+         draw arms already delegate to helpers; splitting the rest out \
+         would scatter the one list of which opcodes this channel answers, \
+         and hand every piece the same &mut self"
+    )]
     async fn handle_message(&mut self, msg_type: u16, payload: &[u8]) -> Result<()> {
         let msg_type_str = message_names::display_server(msg_type);
 
@@ -2431,6 +2440,14 @@ impl DisplayChannel {
     /// draw's fixed fields and before any mask, so a cache hit on a draw
     /// without a mask ends the payload. Each arm below checks the length
     /// of the data it reads.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one image from descriptor to painted pixels: a match over the \
+         image types, then the crop, the cache insert and the emit. Every \
+         arm feeds the same decompressed buffer, timing bracket and \
+         decode-history record, so splitting the dispatch from the tail \
+         would mean passing that half-built state out and back"
+    )]
     async fn decode_image_and_emit(
         &mut self,
         op_name: &str,

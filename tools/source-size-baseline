@@ -10,7 +10,7 @@
 # pull request description why the file should grow rather than split.
 # Comments here are not preserved when the tool rewrites this file.
 
-5101 ryll/src/bugreport.rs
+5110 ryll/src/bugreport.rs
 1783 ryll/src/capture.rs
 1703 ryll/src/config.rs
 1746 ryll/src/input_egui.rs
@@ -22,11 +22,11 @@
 2011 shakenfist-spice-rdp/src/display.rs
 1661 shakenfist-spice-rdp/tests/loopback.rs
 1543 shakenfist-spice-renderer/src/channels/cursor.rs
-6330 shakenfist-spice-renderer/src/channels/display.rs
-3201 shakenfist-spice-renderer/src/channels/inputs.rs
-3921 shakenfist-spice-renderer/src/channels/main_channel.rs
-2331 shakenfist-spice-renderer/src/channels/playback.rs
+6347 shakenfist-spice-renderer/src/channels/display.rs
+3210 shakenfist-spice-renderer/src/channels/inputs.rs
+3929 shakenfist-spice-renderer/src/channels/main_channel.rs
+2340 shakenfist-spice-renderer/src/channels/playback.rs
 1915 shakenfist-spice-renderer/src/control/server.rs
-1663 shakenfist-spice-renderer/src/session.rs
+1681 shakenfist-spice-renderer/src/session.rs
 2254 shakenfist-spice-renderer/tests/control_socket.rs
 3199 shakenfist-spice-webrtc/src/bridge.rs

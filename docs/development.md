@@ -293,6 +293,46 @@ The pre-commit hooks run:
 - **clippy** - Linting with warnings as errors
 - **shellcheck** - Shell script linting
 
+## The function-length lint
+
+`clippy::too_many_lines` is set to `warn` in the root `Cargo.toml`'s
+`[workspace.lints.clippy]`, so every crate carrying
+`[lints] workspace = true` inherits it, and every clippy lane in
+`make lint` denies warnings. The threshold is **200 lines**, set as
+`too-many-lines-threshold` in `clippy.toml`.
+
+That figure was measured rather than chosen. Of about 4,145 functions
+in the seven crates that inherit the workspace lints, 40 are over 100
+lines, 21 are over 150 and 13 are over 200. Clippy's default of 100
+would have asked for 40 exemptions, which is more than anybody reads;
+200 asks for 13, which is an inventory a reviewer can take in at one
+sitting. What the lint is for — stopping the next 600-line function
+arriving unremarked — works at either figure, so the number was picked
+on how readable its exception list is.
+
+Those 13 functions each carry
+`#[expect(clippy::too_many_lines, reason = "...")]`, and they are an
+inventory rather than a backlog: turning the lint on asks for none of
+them to be split. Each reason says why that particular function is
+long and what splitting it would cost — a dispatch `match` over a wire
+protocol whose arms share one channel's state, a decode loop whose
+cursors every branch reads and writes, a mode entry point that is
+order-bound setup. If one of them is shortened later its `#[expect]`
+goes unfulfilled, which is a warning, which is a failed build, so the
+exemption leaves with the length that justified it.
+
+No function needed an `#[allow]`, and the reason is mechanical and
+worth knowing before adding one. The lint counts the lines of the
+function body's source span, not the code left after `cfg` stripping,
+so a feature flag changes only *whether* a function is linted, never
+its reported length. Every clippy lane that lints a given function
+reports the same count, and where a function is compiled out its
+`#[expect]` is compiled out with it. That is what makes `#[expect]`
+safe here: an exemption cannot be satisfied in one of the eleven
+clippy lanes `make lint` runs and unfulfilled in another, which was
+the real risk, since `shakenfist-spice-renderer` holds the longest
+functions in the workspace and is linted in ten of those lanes.
+
 ## Review tracking
 
 Whole-file human review state (`REVIEWS.md`, `.vscode/*.weaudit*`)

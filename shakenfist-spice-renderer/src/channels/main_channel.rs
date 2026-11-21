@@ -954,6 +954,14 @@ impl MainChannel {
         Ok(())
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the main channel's wire dispatch: one arm per SPICE_MSG_MAIN_* \
+         opcode, from INIT and CHANNELS_LIST through the agent token \
+         flow. The arms share the mm_time clock, the ack window and the \
+         session state they publish, so per-opcode methods would split one \
+         state machine across the file while each still needed all of it"
+    )]
     async fn handle_message(&mut self, msg_type: u16, payload: &[u8]) -> Result<()> {
         let msg_type_str = message_names::main_server(msg_type);
 

@@ -1056,6 +1056,15 @@ impl PlaybackChannel {
         Ok(())
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the playback channel's dispatch, inside the loop that takes \
+         framed messages off the buffer: one arm per SPICE_MSG_PLAYBACK_* \
+         opcode, where START and MODE reconfigure the decoder and output \
+         that DATA then feeds. Lifting the match out would separate the \
+         opcodes from the ack and byte accounting the loop does for each \
+         one"
+    )]
     async fn process_messages(&mut self) -> Result<()> {
         while let Some(message) = self.buffer.take_message(MAX_MESSAGE_BODY)? {
             let header = &message.header;

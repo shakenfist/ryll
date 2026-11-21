@@ -680,6 +680,15 @@ impl InputsChannel {
         Ok(())
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per input event, each recording the event for the \
+         bug-report snapshot and then encoding its own SPICE inputs \
+         message. The arms share the button mask, modifier and mouse-mode \
+         state that decides what goes on the wire; the repetition belongs \
+         to the protocol, and per-event methods would all still mutate the \
+         same channel"
+    )]
     async fn handle_input_event(&mut self, event: InputEvent) -> Result<()> {
         let ts = self.traffic.elapsed().as_secs_f64();
 

@@ -582,6 +582,15 @@ async fn shutdown_to_cancel_bridge(flag: &'static AtomicBool, cancel: Arc<Atomic
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "web mode's setup, sequential and order-bound: the flags are \
+     validated before the runtime starts, so a malformed media address \
+     fails the launch rather than every offer once a viewer arrives, \
+     and then the host-side scaffolding, the event bus and its mirror, \
+     the digest poller and the web server go up inside one async block \
+     that closes over them all"
+)]
 fn run_web(
     config: Config,
     args: &Args,

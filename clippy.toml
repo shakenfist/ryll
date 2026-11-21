@@ -1,1 +1,9 @@
 allow-unwrap-in-tests = true
+
+# The function-length threshold, measured on 2026-11-21 across the seven
+# crates that inherit the workspace lints: of about 4,145 functions, 40
+# are over 100 lines, 21 over 150 and 13 over 200. Each of the thirteen
+# carries an #[expect] whose reason says why it is long, which is an
+# inventory a reviewer can read in one sitting; clippy's default of 100
+# would have cost 40 of them. See docs/development.md.
+too-many-lines-threshold = 200
