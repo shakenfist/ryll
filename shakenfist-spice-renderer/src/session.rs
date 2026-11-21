@@ -219,6 +219,15 @@ impl crate::control::StatusProvider for SessionStatus {
 /// disks, the webdav receiver and share) are accepted and ignored, as
 /// is the volume control in a build without local audio output.
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the session's channel setup, which cannot be done in parallel: \
+     the main channel handshakes first because its channels list says \
+     what else to link, and then one pass over that list spawns each \
+     channel with the subset of the caller's receivers, the shared GLZ \
+     dictionary and the mm_time clock it needs. A failure part way \
+     through has to abort the channels already running"
+)]
 pub async fn run_connection(
     config: ConnectionConfig,
     event_tx: mpsc::Sender<ChannelEvent>,
@@ -740,6 +749,15 @@ pub fn spawn_digest_poller(
 /// A `control_socket_path` that cannot be bound is an `Err` before
 /// anything connects.
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "headless mode's setup, in the order the wiring requires: the \
+     control socket is bound before anything dials, the input sender \
+     is cloned before each consumer moves it, the stats drain \
+     subscribes before the event bus starts, and then an event loop \
+     and the join whose outcome is the exit code. Splitting it would \
+     hand the halves a dozen locals and lose that ordering"
+)]
 pub async fn run_headless(
     config: ConnectionConfig,
     cadence: bool,

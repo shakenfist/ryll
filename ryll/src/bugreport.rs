@@ -2505,6 +2505,15 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one fully populated DisplaySnapshot, built field by field so \
+         that serialising it pins down every name a bug report exposes, \
+         the per-stream and per-codec counters included. The assertions \
+         only mean anything read against the fixture they came from, and \
+         splitting them into several tests would duplicate the fixture, \
+         which is the thing under test"
+    )]
     fn test_display_snapshot_serialises() {
         let mut snap = DisplaySnapshot {
             image_cache_entries: 3,

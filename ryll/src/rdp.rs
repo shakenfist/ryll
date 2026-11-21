@@ -503,6 +503,15 @@ fn give_up(why: GiveUp, last: Result<()>) -> Result<()> {
     last.with_context(|| format!("the SPICE session ended, and {reason}"))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "RDP mode's entry point: arguments into configuration, a TLS \
+     identity loaded or generated before anything binds, the runtime, \
+     and then the async block that starts the RDP server, the input \
+     and resize relays and the SPICE attempt supervisor. The order is \
+     the contract -- an unusable certificate or port must fail the \
+     launch -- and the block closes over most of what precedes it"
+)]
 pub fn run_rdp(
     config: Config,
     args: &Args,

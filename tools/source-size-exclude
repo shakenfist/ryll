@@ -1,0 +1,7 @@
+# Vendored verbatim from shakenfist/sfui by that repository's
+# tools/vendor.sh, and reviewed there rather than here: a finding in
+# this copy has to be fixed upstream and re-vendored, or the next sync
+# discards it. Written down even though no file in it is over the
+# threshold today, because the reason does not depend on today's
+# line counts.
+ryll/src/web/assets/sfui/
