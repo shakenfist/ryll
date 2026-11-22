@@ -1112,10 +1112,6 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/app/mod.rs",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/app/reconnect.rs",
       "author": "mikal"
     },
@@ -1132,23 +1128,7 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/app",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/rdp.rs",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/streaming_state.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/main.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/bugreport.rs",
       "author": "mikal"
     },
     {
@@ -1168,15 +1148,7 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-compression/src/glz.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-compression/src/lz.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-compression/src",
       "author": "mikal"
     },
     {

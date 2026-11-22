@@ -225,10 +225,6 @@
       "sha": "da8f52f04759b46977e9cadacfab4c3b6d58cb17",
       "date": "2026-11-22"
     },
-    "ryll/src/app/mod.rs": {
-      "sha": "2ca64049f9ed8b42276943917ddb9d48b52c6723",
-      "date": "2026-11-22"
-    },
     "ryll/src/app/notification_snapshots.rs": {
       "sha": "76c732cf34ff7fb901bd042373fd699b8bac1d1f",
       "date": "2026-10-17"
@@ -309,10 +305,6 @@
       "sha": "f4225f528e3870b0e06b0a04238c1d0e89770517",
       "date": "2026-11-03"
     },
-    "ryll/src/bugreport.rs": {
-      "sha": "4207138cb94df954a4b5a67ba58c8545810d56b7",
-      "date": "2026-11-22"
-    },
     "ryll/src/capture.rs": {
       "sha": "5294404af54d8c8782cbce9655e479b9696a356b",
       "date": "2026-11-22"
@@ -333,17 +325,9 @@
       "sha": "44b5e6e108ab73c57fadd40d5e279be56694ff12",
       "date": "2026-11-03"
     },
-    "ryll/src/main.rs": {
-      "sha": "cc8f53c7e6920bb94c8cb55e4b21213f74c6b028",
-      "date": "2026-11-22"
-    },
     "ryll/src/notifications.rs": {
       "sha": "cfd7c5df773b57965f15ed83526d46f5d217b747",
       "date": "2026-09-18"
-    },
-    "ryll/src/rdp.rs": {
-      "sha": "1c3763cc07feef2b0b1267a09609eb5159f66871",
-      "date": "2026-11-22"
     },
     "ryll/src/reconnect_policy.rs": {
       "sha": "ea6dece117a787eda8c7eb2a8f01fbc41455f4a2",
@@ -440,10 +424,6 @@
     "shakenfist-spice-compression/src/encode/mod.rs": {
       "sha": "47fc1b1ac662abb43059dce97cc7d8d22f16a3ad",
       "date": "2026-11-04"
-    },
-    "shakenfist-spice-compression/src/glz.rs": {
-      "sha": "01651da46a0ee198daa298d7a7c33cedf374c83a",
-      "date": "2026-11-22"
     },
     "shakenfist-spice-compression/src/jpeg.rs": {
       "sha": "323af8a3a8f73b7139b62f8183544b53e01aa8ed",
