@@ -885,6 +885,10 @@
       "sha": "cad9883642ef2bddad4f2e88c5eb6045bfb6155f",
       "date": "2026-07-22"
     },
+    "shakenfist-spice-usbredir/src/messages.rs": {
+      "sha": "9d3b07a75223d40d3a9bef28d0efb841bec09a1d",
+      "date": "2026-11-23"
+    },
     "shakenfist-spice-usbredir/src/parser.rs": {
       "sha": "70308378d11d123fbed6f75df2e54e2e887382f8",
       "date": "2026-07-22"

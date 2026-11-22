@@ -1294,6 +1294,18 @@
     {
       "path": "shakenfist-spice-renderer",
       "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-usbredir/src/messages.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-usbredir/src",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-usbredir",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
