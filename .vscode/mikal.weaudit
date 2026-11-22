@@ -1050,6 +1050,174 @@
     {
       "path": "docs/rdp-frontend.md",
       "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/ui/cursor.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/ui/dialogs.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/ui/keys.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/ui/mod.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/ui/notifications_panel.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/ui/region_select.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/ui/stats_bar.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/ui/surface.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/ui/traffic_panel.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/ui/usb_panel.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/ui/webdav_panel.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/ui",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/bug_report.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/connection.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/events.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/mod.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/reconnect.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/resize.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/screenshots.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/trigger_snapshot.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/rdp.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/streaming_state.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/main.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/bugreport.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/capture.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/config.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/lib.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/byte_bounded_lru.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/glz.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/lz.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/examples/glz_references.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/examples",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/messages/agent_stream.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/messages",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/clipboard.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/server.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
