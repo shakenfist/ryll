@@ -1190,6 +1190,18 @@
     {
       "path": "shakenfist-spice-compression/examples",
       "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/messages/agent_stream.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/messages",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],

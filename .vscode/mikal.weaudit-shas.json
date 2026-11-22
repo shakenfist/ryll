@@ -565,6 +565,10 @@
       "sha": "421d82a4b1f1931122a4559a1262e84174d62c1b",
       "date": "2026-11-05"
     },
+    "shakenfist-spice-protocol/src/messages/agent_stream.rs": {
+      "sha": "7f3e9591f258c25e6aaf8e178f3f007d3d6d995b",
+      "date": "2026-11-22"
+    },
     "shakenfist-spice-protocol/src/messages/common.rs": {
       "sha": "33bf4fb1b93f2fbc2d7f557e786161453a3013c7",
       "date": "2026-10-20"
