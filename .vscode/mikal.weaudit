@@ -1306,6 +1306,26 @@
     {
       "path": "shakenfist-spice-usbredir",
       "author": "mikal"
+    },
+    {
+      "path": "ryll/src/rdp.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/bugreport.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/main.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/mod.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],

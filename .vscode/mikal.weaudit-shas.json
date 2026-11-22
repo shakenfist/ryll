@@ -225,6 +225,10 @@
       "sha": "da8f52f04759b46977e9cadacfab4c3b6d58cb17",
       "date": "2026-11-22"
     },
+    "ryll/src/app/mod.rs": {
+      "sha": "62f5b666d8d87d7915793451f3ba9d75f9153498",
+      "date": "2026-11-23"
+    },
     "ryll/src/app/notification_snapshots.rs": {
       "sha": "76c732cf34ff7fb901bd042373fd699b8bac1d1f",
       "date": "2026-10-17"
@@ -305,6 +309,10 @@
       "sha": "f4225f528e3870b0e06b0a04238c1d0e89770517",
       "date": "2026-11-03"
     },
+    "ryll/src/bugreport.rs": {
+      "sha": "0592d2318814405563536b8e7553a0c4e5a1e7ab",
+      "date": "2026-11-23"
+    },
     "ryll/src/capture.rs": {
       "sha": "5294404af54d8c8782cbce9655e479b9696a356b",
       "date": "2026-11-22"
@@ -325,9 +333,17 @@
       "sha": "44b5e6e108ab73c57fadd40d5e279be56694ff12",
       "date": "2026-11-03"
     },
+    "ryll/src/main.rs": {
+      "sha": "7c9738b8ca8d1cd2dcc03012f65349c0dbbabc7e",
+      "date": "2026-11-23"
+    },
     "ryll/src/notifications.rs": {
       "sha": "cfd7c5df773b57965f15ed83526d46f5d217b747",
       "date": "2026-09-18"
+    },
+    "ryll/src/rdp.rs": {
+      "sha": "81e0ca0cc6a37d6df2e647c0133fe63ac229182c",
+      "date": "2026-11-23"
     },
     "ryll/src/reconnect_policy.rs": {
       "sha": "ea6dece117a787eda8c7eb2a8f01fbc41455f4a2",
