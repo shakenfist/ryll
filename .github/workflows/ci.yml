@@ -497,6 +497,39 @@ jobs:
       - name: Scan tree for bidi and zero-width characters
         run: ./tools/check-bidi.sh
 
+  # Fails when a source file already over 1,500 lines grows past its
+  # entry in tools/source-size-baseline, or when a new file crosses that
+  # line with no entry. The pre-commit hook runs the same script, but
+  # this repository's CI runs each hook as a job rather than
+  # `pre-commit run --all-files`, so without this job the check would
+  # gate only commits made with hooks installed.
+  #
+  # It does not consume check_paths, for the reason the hook is
+  # always_run: a source file anywhere, docs/ included, or the baseline
+  # or exclude file can change the verdict, and the job takes seconds.
+  source-size-ratchet:
+    name: source size ratchet
+    runs-on: [self-hosted, vm, debian-13, s]
+    timeout-minutes: 15
+    # Fork-guarded for the same reason as the bidi scan above: it runs
+    # tools/source-size-ratchet.py from the checkout, which a fork can
+    # edit.
+    if: >-
+      github.event_name != 'merge_group'
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-source-size-ratchet
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v7
+
+      # -I (isolated mode) keeps tools/ off sys.path, so a module a pull
+      # request plants beside the script cannot shadow the standard
+      # library and run inside the check.
+      - name: Check source files against the baseline
+        run: python3 -I tools/source-size-ratchet.py
+
   # Lints the agent context (AGENTS.md and anything else an agent is
   # handed), by running the pre-commit hook rather than by invoking
   # skillsaw directly. Two reasons.
@@ -747,6 +780,7 @@ jobs:
       - gitleaks
       - shellcheck
       - bidi-check
+      - source-size-ratchet
       - skillsaw
     # A cross-repository reusable workflow cannot grant itself more
     # token scope than its caller has, so the permissions go here.
@@ -785,6 +819,7 @@ jobs:
       - gitleaks
       - shellcheck
       - bidi-check
+      - source-size-ratchet
       - skillsaw
     if: always() && github.event_name != 'merge_group'
     permissions:

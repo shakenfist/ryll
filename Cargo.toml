@@ -12,6 +12,7 @@ members = [
 
 [workspace.lints.clippy]
 unwrap_used = "warn"
+too_many_lines = "warn"
 
 [workspace.package]
 version = "0.3.0"

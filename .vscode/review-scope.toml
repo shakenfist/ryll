@@ -79,6 +79,15 @@
 #   a hand-added file there would be exempt from review and invisible
 #   to the drift check, which is why both AGENTS.md and
 #   docs/web-mode-internals.md say never to edit the copy in place.
+# - tools/source-size-baseline is the source-size ratchet's list of
+#   line counts, and the tool owns it: `--update` rewrites the whole
+#   file, header included, so a mark on it would be invalidated by
+#   edits nobody made by hand. The hand edits it takes -- raising an
+#   entry, or adding a line for a file that has just crossed the
+#   threshold -- are one-line diffs reviewed in the pull request that
+#   grows the file, with the reason in that pull request's
+#   description; a whole-file mark on a column of numbers attests to
+#   nothing more.
 # - Cargo.lock (both workspaces) is rewritten by cargo and by
 #   Renovate. The decisions in it are made in the manifests, which
 #   are in scope.
@@ -99,6 +108,19 @@
 #   property this repository wants, since no reviewable file in this
 #   repository is a .bin, an .lz4 or a .jpg.
 #
+# tools/source-size-exclude is the opposite case: hand-written, one
+# reason per line, and so reviewed. It has no extension, so nothing
+# above would match it and the review-scope-completeness audit would
+# report it as an orphan; it is included by name.
+#
+# tools/source-size-ratchet.py stays in scope through *.py even though
+# it is vendored byte-for-byte from shakenfist/development's
+# templates/source-size-ratchet/: unlike the sfui copy it executes in
+# this repository's CI, so a reviewer here should still read it. A
+# finding in it is fixed in that template and re-copied, never edited
+# in place, or the copy stops being the one the template's review and
+# tests cover.
+#
 # The review tooling's own state files -- REVIEWS.md, this file, and
 # the .vscode/<user>.weaudit pair -- are excluded by the helper
 # itself (its BUILTIN_EXCLUDE is '.vscode/*' and REVIEWS.md) and are
@@ -115,6 +137,7 @@ include = [
     '*requirements*.txt',
     '*Makefile', '*Dockerfile',
     '.devcontainer/*',
+    'tools/source-size-exclude',
 ]
 exclude = [
     'docs/plans/*',
@@ -129,4 +152,5 @@ exclude = [
     '*.bin',
     '*.lz4',
     '*.jpg',
+    'tools/source-size-baseline',
 ]

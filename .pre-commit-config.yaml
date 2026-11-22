@@ -148,6 +148,30 @@ repos:
           \b[\w./-]+\.(py|pyi|rs|go|sh|proto|js|ts|c|h|cc|cpp|toml|ya?ml|j2|html):\d+(?:[-,]\d+)*(?![\d:])|/blob/(?![0-9a-f]{40}/)[^\s)#]+#L\d+
         types: [markdown]
         exclude: (^|/)plans/
+      # The source size ratchet, from shakenfist/development's
+      # templates/source-size-ratchet/. It has a CI job of its own as
+      # well: CI here runs each hook as a separate job rather than
+      # `pre-commit run --all-files`, so the hook on its own would gate
+      # only commits made with hooks installed.
+      - id: source-size-ratchet
+        name: source size ratchet
+        # python3 rather than relying on the copy's executable bit,
+        # which a copy made by hand or through a web editor can lose.
+        # -I (isolated mode) keeps tools/ off sys.path, so a module a
+        # pull request plants there, such as tools/fnmatch.py, cannot
+        # shadow the standard library and run inside the hook.
+        entry: python3 -I tools/source-size-ratchet.py
+        # The script is stdlib only, so it needs no managed environment.
+        language: system
+        # It measures the whole tree against the baseline, not the
+        # files in the commit: a file's verdict depends on its entry in
+        # tools/source-size-baseline, and that file is not source.
+        pass_filenames: false
+        # Any source file, the baseline or the exclude file can change
+        # the verdict, including on a commit that touches only one of
+        # the latter two, so there is no `files:` pattern that is not
+        # narrower than what the check reads.
+        always_run: true
 
 # The review tracking helpers (stamp, prune, regen, next) are run by
 # hand via tools/review-tracking.sh, not from git hooks.

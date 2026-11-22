@@ -429,6 +429,14 @@ impl UsbredirChannel {
 
     // ── usbredir message handling ──────────────────────
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the usbredir protocol's dispatch: one arm per parser packet, \
+         with the control, bulk and interrupt arms doing their transfer \
+         bookkeeping inline. They share the device's configuration, \
+         alt-setting and in-flight transfer state, so pulling them apart \
+         would thread that state through a dozen small methods"
+    )]
     async fn handle_usbredir_message(&mut self, msg: UsbredirMessage) -> Result<()> {
         let type_name = payload_type_name(&msg.payload);
 

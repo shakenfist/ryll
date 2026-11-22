@@ -1,0 +1,32 @@
+# Source files over the 1,500-line threshold, one "<lines> <path>"
+# per line, sorted by path. Written by tools/source-size-ratchet.py, which fails
+# when a file over the threshold is missing from this list or is longer
+# than its entry here.
+#
+# Shrinking a file needs no edit by hand: `tools/source-size-ratchet.py --update`
+# lowers entries and drops files that fell under the threshold, and never
+# raises one. Raising an entry or adding a file is a deliberate hand edit:
+# make it in the pull request that grows the file, and say in the
+# pull request description why the file should grow rather than split.
+# Comments here are not preserved when the tool rewrites this file.
+
+5110 ryll/src/bugreport.rs
+1783 ryll/src/capture.rs
+1703 ryll/src/config.rs
+1746 ryll/src/input_egui.rs
+2319 shakenfist-spice-compression/src/jpeg.rs
+1918 shakenfist-spice-compression/src/quic.rs
+1962 shakenfist-spice-protocol/src/client.rs
+2044 shakenfist-spice-protocol/src/link.rs
+3153 shakenfist-spice-protocol/src/messages/display.rs
+2011 shakenfist-spice-rdp/src/display.rs
+1661 shakenfist-spice-rdp/tests/loopback.rs
+1543 shakenfist-spice-renderer/src/channels/cursor.rs
+6347 shakenfist-spice-renderer/src/channels/display.rs
+3210 shakenfist-spice-renderer/src/channels/inputs.rs
+3929 shakenfist-spice-renderer/src/channels/main_channel.rs
+2340 shakenfist-spice-renderer/src/channels/playback.rs
+1915 shakenfist-spice-renderer/src/control/server.rs
+1681 shakenfist-spice-renderer/src/session.rs
+2254 shakenfist-spice-renderer/tests/control_socket.rs
+3199 shakenfist-spice-webrtc/src/bridge.rs
