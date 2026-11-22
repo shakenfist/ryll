@@ -1158,6 +1158,38 @@
     {
       "path": "ryll/src/config.rs",
       "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/lib.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/byte_bounded_lru.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/glz.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/lz.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/examples/glz_references.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/examples",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
