@@ -629,6 +629,10 @@
       "sha": "08a9e10cbcd8f0ccac8f3f9ed69b2ccfd6728d79",
       "date": "2026-11-07"
     },
+    "shakenfist-spice-rdp/src/clipboard.rs": {
+      "sha": "4de39c0e6a24fcbfba403999e83cf4ebdf2d36cc",
+      "date": "2026-11-22"
+    },
     "shakenfist-spice-rdp/src/cursor.rs": {
       "sha": "591778595d265fb0a25c1369d495250f5a24709f",
       "date": "2026-11-07"
@@ -644,6 +648,10 @@
     "shakenfist-spice-rdp/src/lib.rs": {
       "sha": "d88abd5fde3216c3af7c5fa336853720c6e1bfd8",
       "date": "2026-11-07"
+    },
+    "shakenfist-spice-rdp/src/server.rs": {
+      "sha": "438556bae9f981c63682e96739cb18df119f4028",
+      "date": "2026-11-22"
     },
     "shakenfist-spice-rdp/src/tls.rs": {
       "sha": "544ef01949a6140995091390e92d9ef71dae5707",

@@ -1202,6 +1202,22 @@
     {
       "path": "shakenfist-spice-protocol/src",
       "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/clipboard.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src/server.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp/src",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-rdp",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
