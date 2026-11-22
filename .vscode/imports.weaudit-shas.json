@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "files": {
+    "tools/source-size-ratchet.py": {
+      "sha": "f07378a356f391be5a6c6d8d949bc1607786c618",
+      "date": "2026-11-17",
+      "imported": {
+        "repo": "shakenfist/development",
+        "reviewer": "mikal",
+        "path": "templates/source-size-ratchet/source-size-ratchet.py",
+        "commit": "eb964fc3f69b728152be391bf46af7a39dbbd688",
+        "verified": true
+      }
+    }
+  }
+}

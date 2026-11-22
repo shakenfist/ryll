@@ -368,10 +368,6 @@
       "author": "mikal"
     },
     {
-      "path": "clippy.toml",
-      "author": "mikal"
-    },
-    {
       "path": ".gitignore",
       "author": "mikal"
     },
@@ -772,10 +768,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/channels/playback.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/src/capture_sink.rs",
       "author": "mikal"
     },
@@ -797,10 +789,6 @@
     },
     {
       "path": "shakenfist-spice-renderer/src/encoder/task.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/channels/usbredir.rs",
       "author": "mikal"
     },
     {
@@ -861,10 +849,6 @@
     },
     {
       "path": "docs/features.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/index.md",
       "author": "mikal"
     },
     {
@@ -944,10 +928,6 @@
       "author": "mikal"
     },
     {
-      "path": "Cargo.toml",
-      "author": "mikal"
-    },
-    {
       "path": "PLAN-TEMPLATE.md",
       "author": "mikal"
     },
@@ -1008,23 +988,11 @@
       "author": "mikal"
     },
     {
-      "path": ".github/workflows/ci.yml",
-      "author": "mikal"
-    },
-    {
       "path": ".github/workflows/rdp-smoke.yml",
       "author": "mikal"
     },
     {
-      "path": ".github/workflows",
-      "author": "mikal"
-    },
-    {
       "path": "docs/channel-diagnostics-audit.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/ci.md",
       "author": "mikal"
     },
     {
@@ -1040,19 +1008,11 @@
       "author": "mikal"
     },
     {
-      "path": "docs/development.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/device-redirection.md",
       "author": "mikal"
     },
     {
       "path": "docs/diagnostics.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/spice-protocol.md",
       "author": "mikal"
     },
     {

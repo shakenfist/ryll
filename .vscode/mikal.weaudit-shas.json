@@ -25,10 +25,6 @@
       "sha": "7a223bb8c7f0875f3ecee14f61b63dee6c1338b2",
       "date": "2026-08-24"
     },
-    ".github/workflows/ci.yml": {
-      "sha": "47f0609cbc32d52ebf3f2bde2532e421a87cf17f",
-      "date": "2026-11-18"
-    },
     ".github/workflows/codeql-analysis.yml": {
       "sha": "975f656d8135aefe12ba2f2094d8671460ef1a8a",
       "date": "2026-10-05"
@@ -89,10 +85,6 @@
       "sha": "1f53f681ae0be57f075ddf35696097b2771a9b0e",
       "date": "2026-11-08"
     },
-    "Cargo.toml": {
-      "sha": "5f2bbfb6c452e5099443414951ce1a9d54d83be1",
-      "date": "2026-11-08"
-    },
     "PLAN-TEMPLATE.md": {
       "sha": "5f63d3a6e67eafc022395259b69fb2024b71bf7d",
       "date": "2026-11-08"
@@ -109,16 +101,8 @@
       "sha": "68ed393511c539b39cfbef283cdebdb0d29952fc",
       "date": "2026-11-08"
     },
-    "clippy.toml": {
-      "sha": "154626ef4e81f6aa3e7c271ef613fe017ad658f9",
-      "date": "2026-09-23"
-    },
     "docs/channel-diagnostics-audit.md": {
       "sha": "7599137fd333be94375e64ee9b21dc8d961b3141",
-      "date": "2026-11-18"
-    },
-    "docs/ci.md": {
-      "sha": "6e51a7ce45dfd561fbcdb4504011cc4a9770979f",
       "date": "2026-11-18"
     },
     "docs/configuration.md": {
@@ -137,10 +121,6 @@
       "sha": "9fef25179d5ec56bb52e4a5b5edeecadcff74097",
       "date": "2026-09-17"
     },
-    "docs/development.md": {
-      "sha": "4744b19fbefc09760d8f77e6bbbeda8a77e1bc60",
-      "date": "2026-11-18"
-    },
     "docs/device-redirection.md": {
       "sha": "818d3b0f56987db3b172ecb462f1ca9d6aaa2332",
       "date": "2026-11-18"
@@ -151,10 +131,6 @@
     },
     "docs/features.md": {
       "sha": "169359dcd7d5b54e0fd0b3dbcaff58499683e39f",
-      "date": "2026-11-08"
-    },
-    "docs/index.md": {
-      "sha": "2c97e8ec7903966e139887718c3d63c530f4521f",
       "date": "2026-11-08"
     },
     "docs/installation.md": {
@@ -199,10 +175,6 @@
     },
     "docs/session-lifecycle.md": {
       "sha": "f05c2e88926402e5ed2af32686315245cc692af8",
-      "date": "2026-11-20"
-    },
-    "docs/spice-protocol.md": {
-      "sha": "ea87100fd548afbc45821738a068f99e7045cbe8",
       "date": "2026-11-20"
     },
     "docs/troubleshooting.md": {
@@ -565,16 +537,8 @@
       "sha": "42a0ad4fa92d18ac82e769de430979e664f9a4d7",
       "date": "2026-11-07"
     },
-    "shakenfist-spice-renderer/src/channels/playback.rs": {
-      "sha": "a38d094a625d3e5b48310548d40152ce61d2475b",
-      "date": "2026-11-07"
-    },
     "shakenfist-spice-renderer/src/channels/test_support.rs": {
       "sha": "be4d5a1a4dd9a7a0e6245ee72c76c1ba5669841b",
-      "date": "2026-11-07"
-    },
-    "shakenfist-spice-renderer/src/channels/usbredir.rs": {
-      "sha": "daa05d283c123568c992fdbc39c54c60a18cb864",
       "date": "2026-11-07"
     },
     "shakenfist-spice-renderer/src/channels/volume.rs": {
