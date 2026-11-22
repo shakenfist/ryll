@@ -1,6 +1,10 @@
 {
   "version": 1,
   "files": {
+    ".cargo/audit.toml": {
+      "sha": "3abc04af2797047b5da62540dc2893881d76bb1b",
+      "date": "2026-11-23"
+    },
     ".devcontainer/Dockerfile": {
       "sha": "6c9fd633d49a305acf0f3d108692db3484b46e2e",
       "date": "2026-11-08"
@@ -24,6 +28,10 @@
     ".github/actions/cargo-cache/action.yml": {
       "sha": "7a223bb8c7f0875f3ecee14f61b63dee6c1338b2",
       "date": "2026-08-24"
+    },
+    ".github/workflows/ci.yml": {
+      "sha": "27e414233eae770f0e9b1bfa8cc546b6bf9c9345",
+      "date": "2026-11-23"
     },
     ".github/workflows/codeql-analysis.yml": {
       "sha": "975f656d8135aefe12ba2f2094d8671460ef1a8a",
@@ -85,9 +93,37 @@
       "sha": "1f53f681ae0be57f075ddf35696097b2771a9b0e",
       "date": "2026-11-08"
     },
+    ".pre-commit-config.yaml": {
+      "sha": "659d420112301ce60dca79a8e298ff4d888d076c",
+      "date": "2026-11-23"
+    },
+    "AGENTS.md": {
+      "sha": "6fec56f3165952b0036cd2e0f26090a9eaf22353",
+      "date": "2026-11-23"
+    },
+    "ARCHITECTURE.md": {
+      "sha": "3fbda6fe5281c5309d5ac5975aa7bf99143733fd",
+      "date": "2026-11-23"
+    },
+    "Cargo.toml": {
+      "sha": "55752bca73794915cab47295f3290927b8ac3efe",
+      "date": "2026-11-23"
+    },
+    "MERGE-TEMPLATE.md": {
+      "sha": "3745059d23bab5792a82857766ddaa4fcb85ceab",
+      "date": "2026-11-23"
+    },
+    "Makefile": {
+      "sha": "2c05c3fda0d2d3a07cd0fc21f4591757520a3ad4",
+      "date": "2026-11-23"
+    },
     "PLAN-TEMPLATE.md": {
       "sha": "5f63d3a6e67eafc022395259b69fb2024b71bf7d",
       "date": "2026-11-08"
+    },
+    "PUSH-AUDIT.md": {
+      "sha": "016a8b52eed612bce4851c07e2f89527b01b1908",
+      "date": "2026-11-23"
     },
     "README.md": {
       "sha": "0668ae25b892fde9a87eecbfe8a2695d012be742",
@@ -101,9 +137,21 @@
       "sha": "68ed393511c539b39cfbef283cdebdb0d29952fc",
       "date": "2026-11-08"
     },
+    "clippy.toml": {
+      "sha": "aae995e6645b33813fb2570d0e0819a5be05c9e3",
+      "date": "2026-11-23"
+    },
+    "deny.toml": {
+      "sha": "2d2e172949ca9c3bf384e8c08e9bb789ac2cfbc2",
+      "date": "2026-11-23"
+    },
     "docs/channel-diagnostics-audit.md": {
       "sha": "7599137fd333be94375e64ee9b21dc8d961b3141",
       "date": "2026-11-18"
+    },
+    "docs/ci.md": {
+      "sha": "ca118214a53feffe289a2f59ca6ece30a2914739",
+      "date": "2026-11-23"
     },
     "docs/configuration.md": {
       "sha": "a2653c7bd1f821e3e429b5189bb43daaad22804b",
@@ -121,6 +169,10 @@
       "sha": "9fef25179d5ec56bb52e4a5b5edeecadcff74097",
       "date": "2026-09-17"
     },
+    "docs/development.md": {
+      "sha": "d40f17ea58a38db2c1db122847d890b321b491c9",
+      "date": "2026-11-23"
+    },
     "docs/device-redirection.md": {
       "sha": "818d3b0f56987db3b172ecb462f1ca9d6aaa2332",
       "date": "2026-11-18"
@@ -132,6 +184,10 @@
     "docs/features.md": {
       "sha": "169359dcd7d5b54e0fd0b3dbcaff58499683e39f",
       "date": "2026-11-08"
+    },
+    "docs/index.md": {
+      "sha": "254f28acd18d9a81b0bf85b81c2c26df83b95040",
+      "date": "2026-11-23"
     },
     "docs/installation.md": {
       "sha": "f4c4a9fa60c5274b07a431bc9d7c3e3479c65e5f",
@@ -177,6 +233,10 @@
       "sha": "f05c2e88926402e5ed2af32686315245cc692af8",
       "date": "2026-11-20"
     },
+    "docs/spice-protocol.md": {
+      "sha": "0c6bf4f55bdd34f80e4e3ce46bc23232bbce986d",
+      "date": "2026-11-23"
+    },
     "docs/troubleshooting.md": {
       "sha": "45ffffc1e8f702a59e7171132dfb241f1d61a709",
       "date": "2026-11-20"
@@ -196,6 +256,10 @@
     "examples/ryll-web.service": {
       "sha": "ffeba1d4155450125fa098094f1167ed0cdbc9d2",
       "date": "2026-09-17"
+    },
+    "renovate.json": {
+      "sha": "44eaba1530d7a3a352a82dde065d9159530e63a9",
+      "date": "2026-11-23"
     },
     "ryll/Cargo.toml": {
       "sha": "6e77411f25e9bb28b23bb146644cd9f05bd680fb",
@@ -224,6 +288,10 @@
     "ryll/src/app/events.rs": {
       "sha": "da8f52f04759b46977e9cadacfab4c3b6d58cb17",
       "date": "2026-11-22"
+    },
+    "ryll/src/app/mod.rs": {
+      "sha": "62f5b666d8d87d7915793451f3ba9d75f9153498",
+      "date": "2026-11-23"
     },
     "ryll/src/app/notification_snapshots.rs": {
       "sha": "76c732cf34ff7fb901bd042373fd699b8bac1d1f",
@@ -305,6 +373,10 @@
       "sha": "f4225f528e3870b0e06b0a04238c1d0e89770517",
       "date": "2026-11-03"
     },
+    "ryll/src/bugreport.rs": {
+      "sha": "0592d2318814405563536b8e7553a0c4e5a1e7ab",
+      "date": "2026-11-23"
+    },
     "ryll/src/capture.rs": {
       "sha": "5294404af54d8c8782cbce9655e479b9696a356b",
       "date": "2026-11-22"
@@ -325,9 +397,17 @@
       "sha": "44b5e6e108ab73c57fadd40d5e279be56694ff12",
       "date": "2026-11-03"
     },
+    "ryll/src/main.rs": {
+      "sha": "7c9738b8ca8d1cd2dcc03012f65349c0dbbabc7e",
+      "date": "2026-11-23"
+    },
     "ryll/src/notifications.rs": {
       "sha": "cfd7c5df773b57965f15ed83526d46f5d217b747",
       "date": "2026-09-18"
+    },
+    "ryll/src/rdp.rs": {
+      "sha": "81e0ca0cc6a37d6df2e647c0133fe63ac229182c",
+      "date": "2026-11-23"
     },
     "ryll/src/reconnect_policy.rs": {
       "sha": "ea6dece117a787eda8c7eb2a8f01fbc41455f4a2",
@@ -424,6 +504,10 @@
     "shakenfist-spice-compression/src/encode/mod.rs": {
       "sha": "47fc1b1ac662abb43059dce97cc7d8d22f16a3ad",
       "date": "2026-11-04"
+    },
+    "shakenfist-spice-compression/src/glz.rs": {
+      "sha": "e764a33be4e93301abb172e5ddf16fdd1d7b087d",
+      "date": "2026-11-23"
     },
     "shakenfist-spice-compression/src/jpeg.rs": {
       "sha": "323af8a3a8f73b7139b62f8183544b53e01aa8ed",
@@ -649,13 +733,49 @@
       "sha": "e85ae5e7398447de9a1833174114082bcd150647",
       "date": "2026-11-07"
     },
+    "shakenfist-spice-renderer/src/byte_counter.rs": {
+      "sha": "43acd97960c831cc1716f3a160b017e29cbf72d0",
+      "date": "2026-11-23"
+    },
     "shakenfist-spice-renderer/src/capture_sink.rs": {
       "sha": "42a0ad4fa92d18ac82e769de430979e664f9a4d7",
       "date": "2026-11-07"
     },
+    "shakenfist-spice-renderer/src/channels/agent_queue.rs": {
+      "sha": "a950f922ebef76486b9317f7169bf0fd9248e52b",
+      "date": "2026-11-23"
+    },
+    "shakenfist-spice-renderer/src/channels/cursor.rs": {
+      "sha": "cc827463f21058b34732ffb42bc4dcb120bee6c5",
+      "date": "2026-11-23"
+    },
+    "shakenfist-spice-renderer/src/channels/display.rs": {
+      "sha": "6edd7fee4c2ac5250d2aab2d08892e1f6685dc95",
+      "date": "2026-11-23"
+    },
+    "shakenfist-spice-renderer/src/channels/inputs.rs": {
+      "sha": "c04dec6af016ebf70ab1fed067fa2c4cbde511b9",
+      "date": "2026-11-23"
+    },
+    "shakenfist-spice-renderer/src/channels/main_channel.rs": {
+      "sha": "fade00f437c7cf09cd8061f6639cbc5816ddf42e",
+      "date": "2026-11-23"
+    },
+    "shakenfist-spice-renderer/src/channels/mod.rs": {
+      "sha": "a60a987735c5ac343df677eb3d3dcb3074b421f3",
+      "date": "2026-11-23"
+    },
+    "shakenfist-spice-renderer/src/channels/playback.rs": {
+      "sha": "9db512df80e6122926b1509c1289bf52bd7d8995",
+      "date": "2026-11-23"
+    },
     "shakenfist-spice-renderer/src/channels/test_support.rs": {
       "sha": "be4d5a1a4dd9a7a0e6245ee72c76c1ba5669841b",
       "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/src/channels/usbredir.rs": {
+      "sha": "39937bcb30ce46d26350d084eca74c47f9bde0d2",
+      "date": "2026-11-23"
     },
     "shakenfist-spice-renderer/src/channels/volume.rs": {
       "sha": "c4d93576f940ad4089e4791164bbd114e3f1ffb4",
@@ -677,6 +797,14 @@
       "sha": "b807d6af9a8855f39a31d2e25e0f89e17c11f84e",
       "date": "2026-11-07"
     },
+    "shakenfist-spice-renderer/src/control/protocol.rs": {
+      "sha": "5eac8b98a8cf01e4d74a273eb52281d04891802e",
+      "date": "2026-11-23"
+    },
+    "shakenfist-spice-renderer/src/control/server.rs": {
+      "sha": "397a365f38051ba51e6a90335d3500d4695e48ed",
+      "date": "2026-11-23"
+    },
     "shakenfist-spice-renderer/src/device_config.rs": {
       "sha": "908c55fe61f547a541546bf450d3835820e76370",
       "date": "2026-07-21"
@@ -692,6 +820,14 @@
     "shakenfist-spice-renderer/src/display/damage.rs": {
       "sha": "e42b201bf9c53fa10cef048519ab31d218a00f1f",
       "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/src/display/mod.rs": {
+      "sha": "29e0cf9ddc4cac700a7f112ebe4320221f562236",
+      "date": "2026-11-23"
+    },
+    "shakenfist-spice-renderer/src/display/surface.rs": {
+      "sha": "35a85653745432abb9800008cf9cc9d18f31fb1c",
+      "date": "2026-11-23"
     },
     "shakenfist-spice-renderer/src/encoder/frame_source.rs": {
       "sha": "793e763c867f67031b21226d94b9784cd848584e",
@@ -713,9 +849,17 @@
       "sha": "1983ac9f5a058874e3894f188050bce525a6ad62",
       "date": "2026-11-07"
     },
+    "shakenfist-spice-renderer/src/event_bus.rs": {
+      "sha": "156c496198cbd9f4063715801615583d8bce5c74",
+      "date": "2026-11-23"
+    },
     "shakenfist-spice-renderer/src/image_cache.rs": {
       "sha": "96afd58b68815692f90d4c7fed1ae6b98d52063c",
       "date": "2026-09-19"
+    },
+    "shakenfist-spice-renderer/src/lib.rs": {
+      "sha": "e58afb1d1a8981b0a3c51643bb8b87a8fad26074",
+      "date": "2026-11-23"
     },
     "shakenfist-spice-renderer/src/log_config.rs": {
       "sha": "7339aea51a0a9ff9efbb09f489e17bae62df7315",
@@ -749,6 +893,22 @@
       "sha": "57850ef107d48b82b58569cc6b3256ef5501d264",
       "date": "2026-11-07"
     },
+    "shakenfist-spice-renderer/src/session.rs": {
+      "sha": "36630afdf1d69e0ef066b2172c1e975915a38cac",
+      "date": "2026-11-23"
+    },
+    "shakenfist-spice-renderer/src/session_state.rs": {
+      "sha": "cf5eb172a1a1a2422cfba88de023c7c3a8ebfdcc",
+      "date": "2026-11-23"
+    },
+    "shakenfist-spice-renderer/src/snapshots.rs": {
+      "sha": "40fc8a14f972859d65b59269a0636a5b3ad0c7a0",
+      "date": "2026-11-23"
+    },
+    "shakenfist-spice-renderer/src/surface_mirror.rs": {
+      "sha": "95695dab0d2d0447cf9cf0e0ca528da84bf3bdc9",
+      "date": "2026-11-23"
+    },
     "shakenfist-spice-renderer/src/traffic.rs": {
       "sha": "ef5d6e5db8499bf3eddb2beaeb0419d18c3e522c",
       "date": "2026-07-21"
@@ -777,6 +937,10 @@
       "sha": "7f87d7fcda4646aef034dbae3ca07aa775d1d483",
       "date": "2026-07-21"
     },
+    "shakenfist-spice-renderer/tests/control_socket.rs": {
+      "sha": "514d495144b8a95adf8425973ff5af8989a2cf7a",
+      "date": "2026-11-23"
+    },
     "shakenfist-spice-renderer/tests/encoder_smoke.rs": {
       "sha": "ddf75a7edc8fef716eaf555e4577a64a65ed4375",
       "date": "2026-08-18"
@@ -804,6 +968,10 @@
     "shakenfist-spice-usbredir/src/lib.rs": {
       "sha": "cad9883642ef2bddad4f2e88c5eb6045bfb6155f",
       "date": "2026-07-22"
+    },
+    "shakenfist-spice-usbredir/src/messages.rs": {
+      "sha": "9d3b07a75223d40d3a9bef28d0efb841bec09a1d",
+      "date": "2026-11-23"
     },
     "shakenfist-spice-usbredir/src/parser.rs": {
       "sha": "70308378d11d123fbed6f75df2e54e2e887382f8",
@@ -884,6 +1052,10 @@
     "tools/build-ryll-wheel.sh": {
       "sha": "8dffe3df5a99e0a3b818bde3bcd13b92d3a5af2b",
       "date": "2026-10-16"
+    },
+    "tools/check-bidi.sh": {
+      "sha": "53cce584e2735cacde250443a60ad3d66fdd93d8",
+      "date": "2026-11-23"
     },
     "tools/check-parity-matrix.py": {
       "sha": "7891e8c9d403ab30df6519b57c53dc6e45269b43",
@@ -1009,6 +1181,10 @@
       "sha": "cc23ebc95fbcdeec23224323fe9bd9c36a85e585",
       "date": "2026-11-08"
     },
+    "tools/source-size-exclude": {
+      "sha": "f85e09343c99de79779cb80caf0c06a320183904",
+      "date": "2026-11-23"
+    },
     "tools/start-desktop-qemu.sh": {
       "sha": "6d18104306851bcd1b1165fa47fa694da06af9f2",
       "date": "2026-09-23"
@@ -1045,13 +1221,25 @@
       "sha": "6291194d54fb64259540757263974c4afc7c89e0",
       "date": "2026-07-26"
     },
+    "tools/test-wave0-scan.sh": {
+      "sha": "32ba80d27d6494478645d9ef1d7288e1e3ece89b",
+      "date": "2026-11-23"
+    },
     "tools/test_click.py": {
       "sha": "d7d0c9274bc1b9bc0d90a35c574bcd6960f904f0",
       "date": "2026-07-26"
     },
+    "tools/wave0-scan.sh": {
+      "sha": "77f48249f5b004e0d84cfd123b863ef311784d0a",
+      "date": "2026-11-23"
+    },
     "tools/web-smoke.sh": {
       "sha": "2c7ed8d71edd16d30c2311c7e275fab8f4763232",
       "date": "2026-11-08"
+    },
+    "tools/web-soak.sh": {
+      "sha": "bf75f82ac16c0921446cd5ebdc16d9a5cc68e8de",
+      "date": "2026-11-23"
     }
   }
 }
