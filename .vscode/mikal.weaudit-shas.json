@@ -257,10 +257,6 @@
       "sha": "44eaba1530d7a3a352a82dde065d9159530e63a9",
       "date": "2026-11-23"
     },
-    "ryll/Cargo.toml": {
-      "sha": "6e77411f25e9bb28b23bb146644cd9f05bd680fb",
-      "date": "2026-11-07"
-    },
     "ryll/build.rs": {
       "sha": "b0803d125978073b943df8c6a6207879c41f5157",
       "date": "2026-07-26"

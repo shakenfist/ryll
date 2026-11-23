@@ -704,10 +704,6 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/Cargo.toml",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-rdp/Cargo.toml",
       "author": "mikal"
     },
