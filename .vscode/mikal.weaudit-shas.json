@@ -65,6 +65,10 @@
       "sha": "c42f54754a55943a43daa3ddad2c9188db547984",
       "date": "2026-09-29"
     },
+    ".github/workflows/prune-reviews.yml": {
+      "sha": "e26503ce741b47a1e1fa6edceae8ab710619ac54",
+      "date": "2026-11-24"
+    },
     ".github/workflows/rdp-smoke.yml": {
       "sha": "9379254e5fb85125db0a79711e5cabcbee1a16c5",
       "date": "2026-11-18"
@@ -256,6 +260,10 @@
     "renovate.json": {
       "sha": "44eaba1530d7a3a352a82dde065d9159530e63a9",
       "date": "2026-11-23"
+    },
+    "ryll/Cargo.toml": {
+      "sha": "b343ab8c1e88ed3a89feb2c5214b52f5a2151a86",
+      "date": "2026-11-24"
     },
     "ryll/build.rs": {
       "sha": "b0803d125978073b943df8c6a6207879c41f5157",
