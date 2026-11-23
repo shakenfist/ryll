@@ -65,10 +65,6 @@
       "sha": "c42f54754a55943a43daa3ddad2c9188db547984",
       "date": "2026-09-29"
     },
-    ".github/workflows/prune-reviews.yml": {
-      "sha": "0c0cfe362b24e6bc67ccf1ddd09dacc722a0524f",
-      "date": "2026-11-03"
-    },
     ".github/workflows/rdp-smoke.yml": {
       "sha": "9379254e5fb85125db0a79711e5cabcbee1a16c5",
       "date": "2026-11-18"

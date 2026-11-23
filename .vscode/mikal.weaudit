@@ -448,10 +448,6 @@
       "author": "mikal"
     },
     {
-      "path": ".github/workflows/prune-reviews.yml",
-      "author": "mikal"
-    },
-    {
       "path": "tools/build-ryll-wheel-in-container.sh",
       "author": "mikal"
     },
@@ -1409,10 +1405,6 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "author": "mikal"
-    },
-    {
-      "path": ".github/workflows",
       "author": "mikal"
     },
     {
