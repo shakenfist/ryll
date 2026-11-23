@@ -137,7 +137,7 @@ shakenfist-visual-digest = { version = "0.1.1", features = ["qr", "serde"], opti
 
 # WebDAV server (RFC 4918 handler with LocalFs backend), for the
 # `webdav` feature.
-dav-server = { version = "0.11", default-features = false, features = ["localfs"], optional = true }
+dav-server = { version = "0.12", default-features = false, features = ["localfs"], optional = true }
 
 # HTTP framing for WebDAV byte-stream transport, for the `webdav`
 # feature.
