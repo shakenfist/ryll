@@ -385,3 +385,73 @@ codepoints. The clipboard is read via `arboard::Clipboard` (lazily
 initialised in `RyllApp::clipboard()`, separate from the
 `MainChannel` instance).
 
+
+### Why paste-as-keystrokes is shaped this way
+
+Paste-as-keystrokes exists for guests that cannot run a vdagent at all:
+the uncalibrated-sextant UEFI test binary (a `no_std` program with no
+kernel, userspace or filesystem, which needs a bootloader password
+typed into it), BIOS dialogs and very early boot screens.
+`remote-viewer` has no equivalent fallback of its own; its clipboard
+menu relies on vdagent end to end. It is not a replacement for the
+vdagent clipboard path, which is faster, preserves Unicode and
+round-trips. The rest of the design follows from that.
+
+- **Opt-in, never automatic.** Nothing is rendered or bound unless
+  `--enable-paste-as-keystrokes` (or `--paste-text`, which implies it)
+  was passed, and the menu entry and shortcut are inert while a vdagent
+  is connected, so an operator cannot bypass the faster path by
+  mistake. Ryll does not route `Ctrl+V` through paste-as-keystrokes when
+  no agent is present: that would need hysteresis for an agent that
+  drops mid-session or announces its capabilities late, and a quietly
+  re-routed `Ctrl+V` is a footgun in guests where `Ctrl+V` already
+  means something.
+- **Hard-coded US-QWERTY.** AT scancodes are physical, not semantic:
+  "paste `Z`" means shift plus the key in the QWERTY `Z` position, not
+  Unicode `U+005A`, so a guest with another kernel keymap sees other
+  characters. This is the same constraint as `xdotool --key`, accepted
+  because the guests this serves are under our control, and the
+  translator reuses the input path's scancode table rather than keeping
+  a second layout table. There is no `--paste-layout`; adding one means
+  per-layout tables.
+- **All or nothing validation.** The whole string is validated before
+  any key is sent, and one unmappable character refuses the paste. The
+  load-bearing use is a password at a bootloader prompt, where skipping
+  a character silently would burn retries with no diagnostic. Hence
+  `translate_paste()` returns an error rather than a partial result,
+  and the GUI shows a dialog, headless exits non-zero, and nothing is
+  sent. The GUI validates and the channel validates again: the channel
+  must stay safe whatever a caller hands it, and the second pass is
+  free.
+- **Cap with no override.** A paste is truncated, with a `warn!` naming
+  the requested and typed counts, at 4096 characters, about a minute at
+  the default delay. This is a way to paste a password or a command
+  line, not a text-input method, and no flag raises it.
+- **Pacing.** The default of 16 ms between characters (about 60
+  characters a second) is well inside any keyboard buffer. Each
+  character holds its key down for half of that, rather than sending
+  press and release together, because a BIOS or bootloader that polls
+  key state once per frame can miss a pair that arrives in one TCP
+  segment. Pacing runs as a timer arm in the `select!` loop (design
+  decision 15) so a minute-long paste does not stop the channel
+  serving the server or live input.
+- **Modifiers are released, then restored.** The trigger gesture is
+  usually `Ctrl+Alt+V`, and typing with Ctrl or Alt down produces
+  control sequences, so the channel lifts held modifiers before the
+  first character and re-presses them afterwards to keep the guest's
+  view of them in step with the host's.
+- **`Ctrl+Alt+V`, on every platform.** `Ctrl+Shift+V` is the paste
+  binding of xterm, gnome-terminal, alacritty and VS Code's terminal,
+  while `Ctrl+Alt+V` is unbound in the common editors and terminals.
+  The Windows convention that Ctrl+Alt is AltGr does not apply,
+  because egui reports the modifier flags directly. Ryll uses the same
+  chord on macOS even though `Cmd+Shift+V` would be more native;
+  Linux is the primary platform and there is no macOS-specific
+  binding.
+- **Completion reports elapsed time, not a skip count.** Because
+  validation is all or nothing, a successful paste typed every
+  character, so `PasteCompleted` carries the character count and the
+  elapsed milliseconds, which tell an operator whether the sequence
+  took about what the configured delay predicts.
+
+The original design is in [PLAN-paste-as-keystrokes.md](https://github.com/shakenfist/ryll/blob/e38dfdd2619fc0917310a2c94fc0fcc33e6be044/docs/plans/PLAN-paste-as-keystrokes.md).
