@@ -539,7 +539,8 @@ host USB permissions.
 
 ### GUI Panel
 
-Click "Folders" in the status bar to open the Folders panel. It shows:
+Tick **Folders** in the panel menu (☰) in the status bar to open the
+Folders panel. It shows:
 
 - **Channel status** — whether the SPICE WebDAV channel is connected.
 - **Active share** — the shared directory path, read-only status, and

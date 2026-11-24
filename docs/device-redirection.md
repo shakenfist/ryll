@@ -273,6 +273,67 @@ channel status indicator, active
 share display with elapsed timer, error display with auto-clear, read-only
 checkbox, and native directory picker via `rfd::FileDialog::pick_folder`.
 
+### Why folder sharing is shaped this way
+
+These are the constraints and rejected alternatives behind the feature;
+the [plan that built it](https://github.com/shakenfist/ryll/blob/8634fe4e378c7b2b33aca59b3ae907f8a97d2798/docs/plans/PLAN-webdav.md)
+(retired) holds the phase-by-phase history.
+
+- **WebDAV through the SPICE channel, not a hypervisor share.** The shared
+  files live on the client machine, which is usually not the one hosting
+  the VM, so virtio-fs, virtio-9p and NFS exports (all of which need
+  host-side access to the files) cannot do it. Tunnelling WebDAV through
+  the SPICE session works across proxies and network hops. Compared with
+  usbredir's mass-storage disk it gives file-level access, with no
+  guest-side formatting or block-device mount; the guest needs only
+  `spice-webdavd` and `davfs2`.
+- **Channel type 11, over the SpiceVMC transport.** QEMU's SPICE server
+  recognises the port name `org.spice-space.webdav.0` and presents it as
+  channel type 11 (`Webdav`), carrying the same `SPICEVMC_DATA` and
+  `SPICEVMC_COMPRESSED_DATA` messages as usbredir. The generic Port
+  channel (type 10) is not opened; the session links it as "not
+  supported". Like usbredir, only the first WebDAV channel is opened.
+- **`dav-server` plus `hyper`, not `httparse` and hand-written replies.**
+  `spice-webdavd` uses the whole WebDAV method set (OPTIONS, PROPFIND,
+  GET, PUT, DELETE, MKCOL, MOVE, COPY, PROPPATCH, LOCK, UNLOCK) and
+  HTTP/1.1 framing (chunked transfer, content length, keep-alive); doing
+  that by hand is substantial and easy to get subtly wrong. `dav-server`
+  works on plain `http` request and response types, so it does not care
+  that there is no socket; `hyper` is used only to frame HTTP over a
+  `tokio::io::DuplexStream`. No phodav or libsoup, so no C dependency.
+- **Read-only is enforced by the server's method set.** `--share-dir-ro`
+  and the panel's checkbox build the handler with `DavMethodSet::WEBDAV_RO`,
+  so write methods never reach the filesystem backend (the tests accept
+  either 403 or 405). The default is read-write, as in spice-gtk; the
+  checkbox and flag exist because a read-write share lets the guest
+  modify the user's local files.
+- **One shared directory.** As in spice-gtk. Several could be offered as
+  subdirectories of a virtual root; that was deferred, not rejected.
+- **The mux stream has no message boundaries.** A frame may span several
+  VMC messages and several frames may arrive in one, so `MuxDemuxer`
+  accumulates bytes and extracts complete frames rather than assuming one
+  message per frame. A zero-length frame closes a client, and one for an
+  unknown client is ignored as a stale close.
+- **One bad client does not take the channel down.** Each mux client has
+  its own server task and reader task; an error in one is logged and that
+  client is closed with a mux close frame. Responses reach the main loop
+  over a bounded channel (the same shape as usbredir's interrupt polling),
+  so a slow SPICE write applies backpressure instead of buffering without
+  limit. Stopping the share, or the channel closing, aborts every client.
+- **The Folders panel is its own side panel** with its own state, beside
+  the USB and Traffic panels rather than exclusive with them.
+- **The kerbside proxy** needed changes to pass the port and WebDAV
+  channels through; those live in the kerbside repository (its issue 570,
+  closed).
+- **Known gaps.** `send_compressed_data` in the WebDAV channel is dead
+  code and, if called, would build a payload the receiver could not read
+  ([#777](https://github.com/shakenfist/ryll/issues/777)). No test drives mux frames
+  through the channel to a served file; the server and the mux framing
+  are tested separately ([#776](https://github.com/shakenfist/ryll/issues/776)).
+  There is no automated test with a real guest mounting the share through
+  `spice-webdavd` and `davfs2`; `make test-qemu-webdav` is for doing it by
+  hand.
+
 
 ## Paste-as-Keystrokes
 
