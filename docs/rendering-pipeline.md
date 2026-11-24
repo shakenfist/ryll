@@ -110,6 +110,42 @@ holds the rectangles written since the consumer last called
   does not restore the missed pixels: those recover only as the guest
   redraws.
 
+## Cursor
+
+The GUI draws the guest's cursor itself, as an overlay on the
+surface (`draw_cursor_overlay` in `ryll/src/app/ui/cursor.rs`). The
+cursor channel decodes each shape to RGBA, caches it by `unique_id`
+(bounded; see [the SPICE protocol notes](spice-protocol.md)) and
+emits `ChannelEvent::CursorShape`; position and visibility arrive as
+`CursorPosition` events. The decoder and the formats it accepts are
+in [features](features.md).
+
+- **A foreground painter layer, not a widget.** The overlay is
+  painted on its own layer so it takes no input: clicks reach the
+  surface beneath it. Its texture uses nearest-neighbour filtering,
+  because cursors are a few dozen pixels and linear filtering
+  blurs the edges.
+- **Placement** is the surface's top-left plus the cursor position
+  minus the shape's hot spot, so the point a click lands on is the
+  hot spot. The surface is drawn at native size, so no scaling is
+  applied.
+- **Who owns the position depends on the mouse mode.** In server
+  mode (1) the guest is the authority and the overlay follows the
+  position the cursor channel reports. In client mode (2) the host
+  pointer drives it, from the last pointer position, because waiting
+  for the guest to echo each move would make the cursor lag. The
+  guest's shape is drawn in both modes: in client mode the guest
+  may still ask for a custom shape.
+- **The host cursor is hidden over the surface** (`hide_host_cursor`),
+  as virt-viewer does, so there is one cursor rather than two. It
+  is not hidden during region selection, where the crosshair
+  shows. The test must be whether the surface contains the pointer:
+  egui's `wants_pointer_input()` is always true over the central
+  panel, and using it left two cursors showing
+  ([#526](https://github.com/shakenfist/ryll/issues/526)).
+- **Until the guest sends a shape, a built-in arrow is drawn,** so
+  a connected session never has an invisible pointer.
+
 ## Multi-Monitor Support
 
 Ryll supports multiple monitors via the `--monitors N` CLI option.
