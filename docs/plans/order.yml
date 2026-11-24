@@ -19,7 +19,6 @@
 - PLAN-android-apk.md: Android APK port
 - PLAN-bugreport-trigger-snapshot.md: Bug-report trigger snapshot
 - PLAN-macbook-bugreport-fixes.md: Macbook bug-report fixes
-- PLAN-notifications.md: Notifications system
 - PLAN-connection-properties.md: Connection properties
 - PLAN-display-window-sizing.md: Display window sizing
 - PLAN-web-frontend.md: Web frontend

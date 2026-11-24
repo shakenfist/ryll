@@ -243,8 +243,9 @@ produced.
 
 22. **Notifications go through the unified store, not direct UI
     calls** - The notification store at `ryll/src/notifications.rs`
-    is the single producer boundary. Channel handlers, the bug-report
-    writer, the screenshot dialog, and the gap observer all push
+    is the single producer boundary. Channel handlers emit
+    `ChannelEvent::Notification` for the host's event drain to push; the
+    bug-report writer, the screenshot dialog, and the gap observer push
     `NotificationEntry` values via `Arc<Mutex<NotificationStore>>`; the
     GUI side panel and the status-bar bell read from the same store.
     Adding a new notification producer means: build a

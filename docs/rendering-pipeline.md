@@ -407,3 +407,82 @@ Operators handing zips to third parties should be aware that
 notification messages can include server-side text such as
 hostnames, paths, and error strings.
 
+
+### Why notifications are shaped this way
+
+The store replaced three unrelated surfaces: a `Gaps: N` badge with a
+popup, a five-second status string beside the Report button that left
+no scrollback, and `SPICE_MSG_NOTIFY` messages, which fell through to
+the per-channel unknown-message log and were then lost. virt-viewer does
+not surface server notifications either, so QEMU's "channel is
+insecure" warnings are something ryll shows that it does not.
+
+- **One producer boundary.** Every status the old status string
+  carried (bug-report success and failure, screenshot success, failure
+  and "no display surface yet", paste completion) became a store push,
+  because deleting the string would otherwise have silenced them. Each
+  push sits beside the `info!`, `warn!` or `error!` line it always had,
+  so `--verbose` and headless output lost nothing when the surface
+  moved. Producers ignore a poisoned store lock rather than panic: a
+  poisoned lock means the GUI thread already died holding it, and a
+  producer must not amplify that. The bug-report writer likewise writes
+  an empty `notifications.json` rather than fail the report.
+- **Channels emit, the host stores.** The store lives in `ryll`, so the
+  renderer crate cannot push into it. Each channel emits
+  `ChannelEvent::Notification` and the host's event drain pushes the
+  entry; `NotificationEntry` and `NotificationSource` live in the
+  renderer crate, and the serde derives that `bugreport.rs` relies on
+  sit on the protocol crate's `ChannelType`, `NotifySeverity` and
+  `SpiceVisibility` rather than on shims in `ryll` that would duplicate
+  the channel-name table.
+- **`NOTIFY` is handled on every channel.** The opcode is common to
+  all channels, but QEMU sends them on the main channel only: against
+  `make test-qemu` (`disable-ticketing=on,plaintext-channel=all`,
+  checked 2026-04-26) one notification arrives per affected channel,
+  all on main, with the affected channel named in the message text
+  ("keyboard channel is insecure"). The other channels' arms cost one
+  duplicated block each and are there for servers that do notify on
+  them, such as the Kerbside proxy. The arms are deliberately copies,
+  as `SET_ACK` and `PING` are, not a shared helper.
+- **The wire decode is forgiving about values and strict about
+  length.** An unknown severity decodes as `Info`, so a misbehaving
+  server's message is shown rather than dropped. An unknown visibility
+  decodes as `None`, and `None` flashes the bell, the conservative
+  reading. A body shorter than its declared length is an error, and
+  non-UTF-8 text is replaced rather than rejected.
+- **Severity is the protocol's, not a parallel enum.** The store uses
+  `NotifySeverity` directly (Info < Warn < Error by declaration order,
+  so "highest wins" is `max`), so there is no conversion at the SPICE
+  boundary and no second enum to drift.
+- **Deduplication keeps the channel.** The fold key is
+  `(source, severity, message, visibility)`, and for a SPICE entry the
+  source includes the channel and the `what` value, so the same warning
+  on two channels stays two entries: the operator needs to know which
+  channels are insecure, and the cost is bounded at one entry per
+  channel type. A fold bumps `count`, refreshes the time and marks the
+  entry unread again. Different visibility does not fold. The time
+  distance is absolute, so an entry stamped earlier than its
+  predecessor (clock skew) still folds, and a zero window disables
+  folding. Entries are stamped with the local clock, not the message's
+  own `time_stamp`, so the window behaves the same whatever the server's
+  clock says.
+- **Ids are never recycled.** They count up from 1 and survive
+  `clear()`, so a control that still holds an id from before *Clear all*
+  gets a clean miss from `mark_read` or `remove` and cannot hit an
+  unrelated new entry.
+- **One shared cap.** Five hundred entries cover any realistic rate:
+  `NOTIFY` messages arrive a handful per session and bug reports are
+  manual. Low-visibility entries count toward it like any other.
+- **The bell tells you what needs attention, the panel what happened.**
+  Low-visibility entries are recorded and shown but never tint the bell
+  (`highest_bell_severity` skips them; `highest_unread_severity` does
+  not), because the protocol means low as informational. The tint is on
+  the bell glyph rather than a separate dot, which would need painter
+  overlay code for little gain. Closing the panel, not opening it, marks
+  everything read, so the operator sees what was unread when they open
+  it and the bell clears when they are done.
+- **Connection events were left out at first** because disconnects
+  already had their own status, and scope was the reason; they became
+  the `Connection` source later, so the exclusion is not a rule.
+
+The original design is in [PLAN-notifications.md](https://github.com/shakenfist/ryll/blob/277fd835a365fe057f291f3b0dbc1c3f39061df1/docs/plans/PLAN-notifications.md).
