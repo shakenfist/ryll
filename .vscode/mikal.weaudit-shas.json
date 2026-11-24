@@ -29,6 +29,10 @@
       "sha": "7a223bb8c7f0875f3ecee14f61b63dee6c1338b2",
       "date": "2026-08-24"
     },
+    ".github/workflows/ci.yml": {
+      "sha": "560dc71f03640664b8cf967d4a139c93362d4c02",
+      "date": "2026-11-25"
+    },
     ".github/workflows/codeql-analysis.yml": {
       "sha": "975f656d8135aefe12ba2f2094d8671460ef1a8a",
       "date": "2026-10-05"
@@ -145,6 +149,10 @@
       "sha": "7599137fd333be94375e64ee9b21dc8d961b3141",
       "date": "2026-11-18"
     },
+    "docs/ci.md": {
+      "sha": "d8e0e765c5af92f94259da180154c4c0963a428d",
+      "date": "2026-11-25"
+    },
     "docs/configuration.md": {
       "sha": "a2653c7bd1f821e3e429b5189bb43daaad22804b",
       "date": "2026-11-18"
@@ -252,6 +260,10 @@
     "renovate.json": {
       "sha": "44eaba1530d7a3a352a82dde065d9159530e63a9",
       "date": "2026-11-23"
+    },
+    "ryll/Cargo.toml": {
+      "sha": "f345a9e739d2d3a9c92e2c85f34dbd30952166d1",
+      "date": "2026-11-25"
     },
     "ryll/build.rs": {
       "sha": "b0803d125978073b943df8c6a6207879c41f5157",
@@ -712,6 +724,10 @@
     "shakenfist-spice-rdp/tests/loopback.rs": {
       "sha": "f72f9661d6d30f71bd234b34b97bfa954f3acfb7",
       "date": "2026-11-07"
+    },
+    "shakenfist-spice-renderer/Cargo.toml": {
+      "sha": "2818e9bc9716c9a3cfe9fd1198500883d9cb6346",
+      "date": "2026-11-25"
     },
     "shakenfist-spice-renderer/README.md": {
       "sha": "e85ae5e7398447de9a1833174114082bcd150647",
