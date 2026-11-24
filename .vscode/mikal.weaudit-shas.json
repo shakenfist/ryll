@@ -261,10 +261,6 @@
       "sha": "44eaba1530d7a3a352a82dde065d9159530e63a9",
       "date": "2026-11-23"
     },
-    "ryll/Cargo.toml": {
-      "sha": "b343ab8c1e88ed3a89feb2c5214b52f5a2151a86",
-      "date": "2026-11-24"
-    },
     "ryll/build.rs": {
       "sha": "b0803d125978073b943df8c6a6207879c41f5157",
       "date": "2026-07-26"
@@ -723,10 +719,6 @@
     },
     "shakenfist-spice-rdp/tests/loopback.rs": {
       "sha": "f72f9661d6d30f71bd234b34b97bfa954f3acfb7",
-      "date": "2026-11-07"
-    },
-    "shakenfist-spice-renderer/Cargo.toml": {
-      "sha": "fba130c7527051b6936fbb4679067e4d0b76a1e3",
       "date": "2026-11-07"
     },
     "shakenfist-spice-renderer/README.md": {

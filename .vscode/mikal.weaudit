@@ -756,10 +756,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/Cargo.toml",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/src/capture_sink.rs",
       "author": "mikal"
     },
@@ -1284,10 +1280,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-usbredir/src/messages.rs",
       "author": "mikal"
     },
@@ -1421,10 +1413,6 @@
     },
     {
       "path": ".github/workflows",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/Cargo.toml",
       "author": "mikal"
     }
   ],
