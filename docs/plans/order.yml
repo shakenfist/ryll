@@ -16,7 +16,6 @@
 - PLAN-supply-chain-scanning.md: Supply-chain scanning
 - PLAN-supply-chain-followups.md: Supply-chain follow-ups
 - PLAN-idle-cpu-and-latency.md: Idle CPU and latency
-- PLAN-display-draw-ops.md: Display draw-op coverage
 - PLAN-android-apk.md: Android APK port
 - PLAN-bugreport-trigger-snapshot.md: Bug-report trigger snapshot
 - PLAN-macbook-bugreport-fixes.md: Macbook bug-report fixes

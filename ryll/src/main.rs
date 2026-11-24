@@ -469,7 +469,7 @@ fn run_headless(
             "pedantic mode in headless: traffic pcap and channel-state are \
              live, but app-level snapshot (surfaces list, bandwidth, latency) \
              is not populated — that field is updated by the GUI loop only. \
-             See docs/plans/PLAN-display-draw-ops.md."
+             See docs/multi-mode-parity.md."
         );
         // `target` here becomes `ReportMetadata::target`
         // (bugreport.rs), which lands in a bug-report zip: pass
