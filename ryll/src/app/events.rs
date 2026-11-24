@@ -107,7 +107,7 @@ impl RyllApp {
 
     // Record mpsc-queue lag from event emit to app pickup for
     // renderer-side latency diagnostics. See
-    // `docs/plans/PLAN-video-keeping-up.md`. Within-batch
+    // `docs/diagnostics.md` ("Diagnosing video not keeping up"). Within-batch
     // correlation noted: events drained in one process_events()
     // call share this read, so several samples from one egui frame
     // will be close in time.

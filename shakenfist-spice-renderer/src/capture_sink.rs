@@ -23,7 +23,7 @@ pub trait CaptureSink: Send + Sync {
     /// queue was full and the packet was dropped. Channels use the
     /// `false` return to count drops in their snapshot's
     /// `writer_dropped_count` field (see
-    /// `docs/plans/PLAN-video-keeping-up.md`).
+    /// `docs/diagnostics.md` ("Diagnosing video not keeping up")).
     fn packet_sent(&self, channel: &str, data: &[u8]) -> bool;
 
     /// Record a packet received from the server on the given
@@ -36,6 +36,6 @@ pub trait CaptureSink: Send + Sync {
     /// if the frame was queued, `false` if the encoder's queue was full
     /// and the frame was dropped. The caller (the egui frame loop) bumps
     /// a drop counter on `false`. See
-    /// `docs/plans/PLAN-video-keeping-up.md`.
+    /// `docs/diagnostics.md` ("Diagnosing video not keeping up").
     fn frame(&self, surface_id: u32, pixels: &[u8], width: u32, height: u32) -> bool;
 }

@@ -848,7 +848,7 @@ pub struct AppSnapshot {
     /// non-zero value implicates encoder CPU (or downstream MP4 write
     /// speed) rather than decode or socket-read when triaging a "video
     /// not keeping up" report. See
-    /// `docs/plans/PLAN-video-keeping-up.md`.
+    /// `docs/diagnostics.md` ("Diagnosing video not keeping up").
     pub video_drop_count: u64,
     /// "Video not keeping up" diagnostic: min / max / mean
     /// microseconds of mpsc-queue lag between the display channel
@@ -858,7 +858,7 @@ pub struct AppSnapshot {
     /// decode and socket-fill metrics look healthy implicates the egui
     /// loop / GUI thread as the bottleneck. Within-batch samples are
     /// correlated; `max` is the most informative single number. See
-    /// `docs/plans/PLAN-video-keeping-up.md`.
+    /// `docs/diagnostics.md` ("Diagnosing video not keeping up").
     pub image_ready_lag_recent_min_us: u32,
     pub image_ready_lag_recent_max_us: u32,
     pub image_ready_lag_recent_mean_us: u32,

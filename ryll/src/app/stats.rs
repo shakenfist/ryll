@@ -17,7 +17,7 @@ pub(super) const FPS_WINDOW_SIZE: usize = 120;
 /// kind for render-side latency diagnostics. Per-event cadence is
 /// typically several Hz to hundreds of Hz; 32 entries cover
 /// seconds of recent activity without bloating session.json. See
-/// `docs/plans/PLAN-video-keeping-up.md`.
+/// `docs/diagnostics.md` ("Diagnosing video not keeping up").
 const RECENT_LAG_RING_CAP: usize = 32;
 
 /// Statistics tracking
@@ -120,7 +120,7 @@ impl LatencyTracker {
 /// Push a lag sample into a bounded ring, evicting the oldest
 /// entry when the cap is exceeded. Factored out of
 /// `process_events` so the cap behaviour is unit-testable. See
-/// `docs/plans/PLAN-video-keeping-up.md`.
+/// `docs/diagnostics.md` ("Diagnosing video not keeping up").
 pub(super) fn push_with_cap(ring: &mut VecDeque<u32>, value: u32) {
     ring.push_back(value);
     if ring.len() > RECENT_LAG_RING_CAP {

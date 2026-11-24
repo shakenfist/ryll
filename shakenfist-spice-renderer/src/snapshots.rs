@@ -225,7 +225,7 @@ pub struct DisplaySnapshot {
     /// Cumulative since session start; zero when `--capture` is not in
     /// use. A non-zero value implicates disk speed rather than decode
     /// or socket-read when triaging a "video not keeping up" report.
-    /// See `docs/plans/PLAN-video-keeping-up.md`.
+    /// See `docs/diagnostics.md` ("Diagnosing video not keeping up").
     pub writer_dropped_count: u64,
     /// Per-opcode receive counts since session start.
     /// Maps server-opcode → number of messages received with

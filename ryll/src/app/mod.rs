@@ -275,13 +275,13 @@ pub struct RyllApp {
     // queue was full at CaptureSession::frame call time. Mirrored
     // into AppSnapshot::video_drop_count by update_app_snapshot().
     // Stays zero unless --capture is active. See
-    // `docs/plans/PLAN-video-keeping-up.md`.
+    // `docs/diagnostics.md` ("Diagnosing video not keeping up").
     video_drop_count: u64,
 
     // Bounded rings of mpsc-queue lag samples (μs) for
     // renderer-to-app events. Mirrored into AppSnapshot by
     // update_app_snapshot() as min/max/mean aggregates. See
-    // `docs/plans/PLAN-video-keeping-up.md`.
+    // `docs/diagnostics.md` ("Diagnosing video not keeping up").
     recent_image_ready_lag_us: VecDeque<u32>,
     recent_display_mark_lag_us: VecDeque<u32>,
 

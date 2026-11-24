@@ -245,6 +245,95 @@ Updates hold the mutex only briefly (copying a handful of scalars
 and small collections), so contention with the UI thread is
 negligible.
 
+### Diagnosing "video not keeping up": how the instrumentation is shaped
+
+A report saying the video stream is not keeping up has to say which of
+server, network, decode, render or ryll's own capture I/O was the
+bottleneck without the session being re-run. How to read the fields is in
+[troubleshooting.md](troubleshooting.md#reading-display-channel-statejson-for-video-not-keeping-up);
+this records why they are the fields they are. The measurement came
+first, deliberately: the cheap signals say whether any threading change
+is worth making, and the capture writers moved off the hot paths only
+where inline I/O could stall the SPICE socket or the GUI.
+
+- **Decode time shares the `recent_decodes` ring.** Per-decode wall time
+  is kept as the last N entries plus min/max/mean computed at
+  snapshot-emit time, rather than as a histogram, which would cost state
+  for no extra diagnostic answer. Microseconds, not milliseconds, because
+  small LZ4 and pixmap decodes finish in well under 1 ms. Cache hits and
+  failures that never reach the decoder record zero and are excluded
+  from the aggregates.
+- **Socket pressure is a fill-rate proxy, not a buffer reading.** A read
+  that returns the full 256 KB chunk means the OS receive buffer had at
+  least that much waiting. Inspecting the buffer directly (`FIONREAD`)
+  was rejected: it needs the raw fd of a tokio stream and a per-platform
+  code path, and the proxy answers the question well enough.
+- **ACK cadence is a bounded ring of intervals** (the last 32), which at
+  a typical ACK window and busy display rates covers the last 10-30
+  seconds: enough to see whether ACKs paused, without bloating the
+  snapshot. A snapshot of `ack_window`/`last_ack` alone cannot tell a
+  healthy cadence from a long pause.
+- **Capture writers drop on overflow rather than block.** The pcap and
+  MP4 writers sit behind bounded queues, and a full queue drops the item
+  and counts it (`writer_dropped_count` per channel, `video_drop_count`
+  in `session.json`). Blocking would reintroduce the very back-pressure
+  the split exists to remove, at the price of gaps in a pcap or video
+  when the disk falls behind, which the counters make visible. Each
+  channel counts its own drops, but `webdav` and `playback` have no
+  pcap writer: their items are accepted by the queue and discarded by
+  the writer, so their counter measures queue pressure only and stays
+  zero in practice.
+- **Timestamps are taken at enqueue, not at dequeue.** A writer that
+  falls behind by hundreds of milliseconds would otherwise compress the
+  delayed packets into a burst at the moment it caught up, and the
+  timeline in the report would mislead. The same applies to MP4
+  presentation timestamps.
+- **The channel name in a queue item is a `&'static str`** matched
+  against the `CHANNELS` list in `capture.rs`, not an owned `String`
+  (an allocation per enqueue, defeating the hot-path gain) and not an
+  enum (couples the `CaptureSink` trait surface to the pcap layer).
+  A name not in the list is dropped before any queue work.
+- **Queue capacities are sized by item weight, not count.** The pcap
+  queue holds 1024 small items, but a display chunk can be 256 KB, so
+  the nominal worst case is hundreds of megabytes that a pathologically
+  slow disk would have to reach. The video queue holds 8 because each
+  item is a whole RGBA surface (about 8 MB at 1080p, 33 MB at 4K): at
+  the 4K worst case that is roughly 264 MB queued before drops begin,
+  which is acceptable for a diagnostic mode. Both are guesses to be
+  revisited only if real reports show high drop rates on a healthy disk.
+- **Only surface 0 is encoded, and the filter is in the encoder thread.**
+  Filtering in `frame()` would still copy the pixels into an `Arc`
+  just to discard them; checking on dequeue keeps the enqueue uniformly
+  cheap.
+- **Per-channel pcap files are independent**, so only within-channel
+  order is preserved (the queue is FIFO). A single unified pcap with
+  strict cross-channel ordering would need one multiplexed writer; nothing
+  has asked for it.
+- **Render-side latency is mpsc-queue lag.** `ImageReady*` and
+  `DisplayMark` carry `produced_at_secs`, stamped just before the send,
+  and the egui event drain subtracts it from the time it picks the event
+  up; both clocks are the one `traffic.elapsed()` epoch. "Inside the egui
+  paint" timing was rejected as disproportionate (it needs eframe or
+  compositor instrumentation), and end-to-end "pixels visible to the
+  user" is unmeasurable without external instrumentation. The diagnostic
+  pattern is high `image_ready_lag_*` while decode and socket-fill look
+  healthy, which points at the GUI thread being held by long synchronous
+  work in `App::update`. Events drained in one `process_events` call
+  share a `consumed_at`, so their samples are correlated: `max` is the
+  informative number and `mean` is biased by batch size. Negative
+  differences from clock granularity saturate at zero, and the first
+  samples after startup include startup lag until the 32-entry ring
+  rotates.
+- **MP4 finalisation is asynchronous, on purpose.** See decision 6 in
+  [design-decisions.md](design-decisions.md): synchronous finalisation
+  would put the caller back to blocking on the encoder draining, which is
+  the stall the encoder thread removes.
+
+Nothing is instrumented on the cursor, playback or main channels for this
+purpose; the data was only wanted for display. The plan that built these
+fields is retired; [the plans index](plans/index.md) links its final
+text.
+
 ## Bug Report Assembly
 
 `BugReport` in `ryll/src/bugreport.rs` assembles a self-contained zip

@@ -308,7 +308,7 @@ pub enum ChannelEvent {
         /// Session-relative seconds at the moment the emitting channel called
         /// `event_tx.send`. Used by the app to compute mpsc-queue lag for
         /// renderer-side latency diagnostics. See
-        /// `docs/plans/PLAN-video-keeping-up.md`.
+        /// `docs/diagnostics.md` ("Diagnosing video not keeping up").
         produced_at_secs: f64,
     },
 

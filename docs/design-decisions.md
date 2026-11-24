@@ -55,9 +55,9 @@ produced.
    seconds for both threads to exit, so the MP4 is complete after a clean
    exit even though a detached GUI connection thread may still hold a
    reference to the session; a wedged writer costs the MP4 rather than
-   hanging exit. See
-   [`PLAN-video-keeping-up.md`](plans/PLAN-video-keeping-up.md) for the
-   trade-off.
+   hanging exit. The reasoning behind the drop-on-overflow policy, queue
+   sizes and timestamps is in
+   [diagnostics.md](diagnostics.md#diagnosing-video-not-keeping-up-how-the-instrumentation-is-shaped).
 
 7. **Display channel capabilities** - Ryll advertises COMPOSITE,
    MONITORS_CONFIG, SIZED_STREAM, A8_SURFACE, plus STREAM_REPORT (4),

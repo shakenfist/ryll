@@ -954,7 +954,7 @@ pub struct DisplayChannel {
     pong_send_count: u32,
     last_ping_recv_ts_secs: Option<f64>,
     /// "Video not keeping up" instrumentation. See
-    /// `docs/plans/PLAN-video-keeping-up.md`.
+    /// `docs/diagnostics.md` ("Diagnosing video not keeping up").
     decode_total_count: u64,
     decode_failed_count: u64,
     decode_from_cache_count: u64,
@@ -1294,7 +1294,7 @@ impl DisplayChannel {
             // Socket-read fill stats. A read that comes back at the full chunk
             // size means the OS recv buffer had at least that much waiting when
             // we read, which is a cheap proxy for "the read loop is behind the
-            // arrival rate". See `docs/plans/PLAN-video-keeping-up.md`.
+            // arrival rate". See `docs/diagnostics.md` ("Diagnosing video not keeping up").
             self.socket_read_count = self.socket_read_count.saturating_add(1);
             if n == chunk.len() {
                 self.socket_reads_at_chunk_cap = self.socket_reads_at_chunk_cap.saturating_add(1);
@@ -3592,7 +3592,7 @@ impl DisplayChannel {
         self.last_ack = self.message_count;
 
         // Record ACK cadence so a bug report can show whether ACK sends
-        // stalled. See `docs/plans/PLAN-video-keeping-up.md`.
+        // stalled. See `docs/diagnostics.md` ("Diagnosing video not keeping up").
         let now = self.traffic.elapsed().as_secs_f64();
         if let Some(prev) = self.last_ack_send_ts_secs {
             push_ack_interval(&mut self.recent_ack_intervals_secs, now - prev);
