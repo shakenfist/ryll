@@ -195,7 +195,7 @@ nusb = "0.2"
 rfd = { version = "0.17", optional = true }
 
 # WebDAV server (RFC 4918 handler with LocalFs backend)
-dav-server = { version = "0.11", default-features = false, features = ["localfs"] }
+dav-server = { version = "0.12", default-features = false, features = ["localfs"] }
 
 # HTTP framing for WebDAV byte-stream transport
 hyper = { version = "1", features = ["http1", "server"] }
