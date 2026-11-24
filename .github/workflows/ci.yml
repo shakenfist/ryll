@@ -246,25 +246,27 @@ jobs:
   # RAM) — these scanners are I/O-bound and do not benefit from a
   # larger runner.
 
-  # cargo-audit needs cargo on PATH. The static runner is minimal
-  # (git only), so we run on debian-13 and install the stable rust
-  # toolchain into $HOME via dtolnay/rust-toolchain (no sudo needed
-  # for the toolchain itself).
+  # cargo-audit needs cargo on PATH. The static runner is minimal (git
+  # only), so this runs on debian-13 and installs the stable toolchain
+  # into $HOME via dtolnay/rust-toolchain, which needs no sudo.
   #
-  # rustsec/audit-check reports its findings by creating a check run,
-  # which needs `checks: write`. The workflow-level permissions above
-  # do not grant it, and job-level permissions replace rather than
-  # extend them, so this job restates the `contents: read` it needs
-  # for the checkout. Without this the action fails with "Resource not
-  # accessible by integration" — but only on runs where it actually
-  # has something to report, so a clean audit hides the problem.
+  # This runs the cargo-audit CLI rather than rustsec/audit-check. The
+  # action reports by creating a "Security audit" check run and then
+  # updating it, and the update intermittently fails with "Not Found"
+  # (rustsec/audit-check#56), which failed the job -- and so "Can
+  # enqueue" -- on pull requests whose audit was clean. The check run
+  # duplicated what the job's own result already says. The CLI reads
+  # .cargo/audit.toml for its ignore list and, like the action, exits
+  # non-zero only for vulnerabilities: unmaintained and unsound
+  # warnings are printed but do not fail the job. It needs no token, so
+  # the job's permissions narrow to the `contents: read` the checkout
+  # needs (job-level permissions replace the workflow-level ones).
   cargo-audit:
     name: cargo audit
     runs-on: [self-hosted, vm, debian-13, s]
     timeout-minutes: 15
     permissions:
       contents: read
-      checks: write
     needs: [check_paths]
     if: >-
       github.event_name != 'merge_group'
@@ -279,9 +281,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: rustsec/audit-check@v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+
+      - name: Run cargo audit
+        run: cargo audit
 
   # cargo-deny-action runs cargo-deny inside a Docker
   # container, so this job needs the debian-13-docker image
