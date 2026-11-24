@@ -246,8 +246,8 @@ The auto-fit can be turned off with the
 (or the `--no-obey-guest-size` CLI flag at launch).
 With the toggle off, the window stays where the user put
 it and the surface renders at native pixel size inside
-it — overflowing or letterboxing as the dimensions
-require. The toggle is a session-level preference and
+it — overflowing it or leaving empty space as the
+dimensions require. The toggle is a session-level preference and
 is **not** reset across a reconnect.
 
 Every primary-surface mode change is also surfaced as an
@@ -287,6 +287,72 @@ is checked at the trigger sites by
 the other pure helpers; rejected sizes log a `warn!`
 and leave the SPICE renderer's own surface bookkeeping
 untouched.
+
+### Why the window follows every guest size
+
+The window used to be fitted once, on the session's first
+surface. A guest that probes display modes while it boots (a
+test guest walks `640x480`, `800x600`, then `1024x768`) left the
+window at the first probe's size around a surface drawn at its
+native size, so it showed 20% too wide or too narrow. A one-shot
+fit is the wrong policy, and not only for boot probes: when a user
+drags the window to a size the guest will not accept, the guest
+reverts, and the window has to follow it back. So the default is
+to honour every primary surface, as virt-viewer does, and the
+`Obey guest size hints` toggle is the escape hatch for a fixed
+window (a fixed-size recording, or a guest that flaps between
+modes on its own), not a replacement for the default.
+
+- **Dedupe against the last size asked for, not the live window.**
+  `compute_auto_resize` compares with `last_auto_resize`, the size
+  of the last `InnerSize` command, because egui's reported inner
+  size can lag a frame behind a command and would refire it. This
+  mirrors `last_sent_resize` on the outgoing side.
+  `last_auto_resize` is cleared on reconnect, so a guest that comes
+  back at another resolution re-fits the window; `obey_guest_size`
+  is not.
+- **A toggled-off session discards the resize, rather than
+  queueing it.** `pending_resize` is consumed whether or not the
+  toggle is on, so turning it on later cannot apply a surface size
+  from minutes before.
+- **The window is exactly the surface in logical pixels.**
+  `InnerSize` takes logical pixels and the surface image is drawn
+  at its native size in the same units, so the mapping is 1:1. On a
+  HiDPI display the window is larger than the surface in physical
+  pixels and the GPU resamples; that is expected.
+- **There is no scaling.** When the window cannot match the surface
+  (toggle off, maximised, fullscreen) the surface is drawn at
+  native size and overflows or leaves empty space, rather than
+  being scaled or letterboxed to fit. That would be a separate
+  feature, tracked as [#778](https://github.com/shakenfist/ryll/issues/778);
+  [ryll#308](https://github.com/shakenfist/ryll/issues/308) is the
+  same question for web mode.
+- **The first surface of a session notifies too.**
+  `last_notified_resolution` starts empty, so the notification
+  doubles as a "connected at WxH" confirmation, which shows the mode
+  a guest came up in before it starts walking through others, and
+  suppressing it would need a hook on connect or another flag. A
+  reconnect clears it, so a new session announces itself again.
+- **Debounce on top of dedup, and re-armed by every event.**
+  The notification store's 30-second dedup folds repeats of one
+  message, but `Display resolution: 1024x768` and
+  `Display resolution: 800x600` are different messages, so a burst
+  of distinct modes needs the 500 ms debounce as well. Each primary
+  surface event re-arms it, so a `1024 -> 800 -> 1024` burst emits
+  the last value rather than the first, and the check against the
+  last value announced runs when the debounce expires, so a guest
+  re-confirming the mode it is already in stays silent. The
+  pending value and its timestamp are one `Option`, so the state
+  where only one is set cannot be represented. The message carries
+  only the final resolution; a "from X to Y after N changes" form
+  would need a counter and was left out.
+- **The helpers are pure on purpose.** `compute_auto_resize`,
+  `compute_outgoing_resize` and `resolution_notification_due` take
+  their inputs, including the clock, as arguments, and
+  `round_trip_no_echo` and `round_trip_guest_overrides_request`
+  compose the first two to prove that an auto-fit is not echoed back
+  to the guest, and that the state settles when the guest picks a
+  different size from the one requested.
 
 ## Audio Playback Pipeline
 
