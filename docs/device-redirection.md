@@ -53,6 +53,126 @@ non-object-safe dispatch:
 6. Interrupt endpoints use background tokio polling tasks.
 7. Disconnection aborts polling tasks and sends `device_disconnect`.
 
+### Design notes
+
+Why the USB stack is shaped the way it is. The retired
+[USB redirection plan](https://github.com/shakenfist/ryll/blob/d0938ee6ca7f5f03d1d70952f26d8902a47cf4b1/docs/plans/PLAN-usb-redir.md)
+holds the original step-by-step text, as frozen history.
+
+**The server cannot tell a real device from a virtual one.** The usbredir
+channel is opaque to QEMU: it only sees descriptors, lifecycle messages and
+transfers. That is what lets a RAW image be presented as a USB drive with no
+host hardware, and it is why the channel handler holds no device-type-specific
+logic. Everything device-specific sits behind `UsbDeviceBackend`.
+
+**Layering and where each piece lives.** The usbredir wire format (message
+structs, `UsbredirParser`, capability and status constants) is the
+transport-agnostic `shakenfist-spice-usbredir` crate; it does no I/O.
+SpiceVMC framing, the hello exchange, device lifecycle and transfer dispatch
+are in `shakenfist-spice-renderer/src/channels/usbredir.rs`. SpiceVMC has only
+two channel-specific messages (`SPICEVMC_DATA` 101 and
+`SPICEVMC_COMPRESSED_DATA` 102) and the constants are named for SpiceVMC
+rather than usbredir because the port and WebDAV channels share them. The
+usbredir channel is captured as `usbredir.pcap` on port 10009 (10000 plus the
+channel type).
+
+**Why an enum rather than `Box<dyn UsbDeviceBackend>`.** The trait's async
+methods return `impl Future`, which is not object-safe. `async-trait` or boxed
+futures would have fixed that at the cost of an allocation per call and a
+noisier trait; with exactly two implementations, the `DeviceBackend` enum
+delegating to the active variant is zero-overhead and keeps the trait plain.
+Backends are driven through `&mut self`: the handler owns one backend at a
+time and serialises its calls, so a backend never has to cope with concurrent
+transfers.
+
+**Two kinds of failure, kept apart.** Transfer methods return
+`TransferResult`, carrying a usbredir `Status` (stall, timeout, cancelled,
+and so on), rather than `Result<Vec<u8>>`. A Rust `Err` means the backend
+itself failed (a file I/O error); a `TransferResult` with `Stall` means the
+USB transfer was rejected in the ordinary way and the guest is told so.
+Collapsing the two would turn an ordinary stall into a channel error.
+
+**Capabilities and IDs.** ryll advertises only `connect_device_version`,
+`device_disconnect_ack` and `ep_info_max_packet_size`. It does not advertise
+64-bit IDs, 32-bit bulk lengths, bulk streams, buffered bulk receiving or the
+filter capability, so the header is always the 12-byte, 32-bit-ID form
+QEMU's `usb-redir` defaults to. Bulk length is still computed as
+`(length_high << 16) | length` so a server that sends the high half is not
+misread. Isochronous packets and the bulk-stream message types are not
+implemented; the parser surfaces them as unknown messages. The lifecycle
+messages that carry a server-chosen ID have that ID echoed back; only data
+packets need a correlation ID of their own.
+
+**LZ4 is receive-only.** The usbredir channel advertises
+`SPICEVMC_CAP_DATA_COMPRESS_LZ4` and decompresses
+`SPICEVMC_COMPRESSED_DATA` with `lz4_flex`, but never compresses what it
+sends. The size the server claims for decompression is capped at 64 MiB, and
+a bulk request over 16 MiB is answered with `Inval`, because both lengths are
+attacker-controlled input from the server.
+
+**Endpoint numbering.** usbredir numbers endpoints 0-31 flat, 0-15 as OUT and
+16-31 as IN, where USB addresses use bit 7 for direction (0x00-0x0F OUT,
+0x80-0x8F IN). `usbredir_ep_to_usb` and `usb_ep_to_usbredir` in
+`usb/mod.rs` are the only place the two schemes meet; getting this wrong
+sends an IN request to the OUT endpoint of the same number.
+
+**Real devices (`nusb`).** `nusb` was chosen over `rusb` because it is pure
+Rust and async, fitting the tokio model, and needs no libusb, which would
+add a C build dependency per packaging target. A kernel driver (typically
+`usb-storage` for a flash drive) usually owns the device already, so
+`RealDevice` uses `detach_and_claim_interface`; passthrough would otherwise
+fail with the interface busy. Hot-plug (`nusb::watch_devices`) is not used:
+enumeration happens when the USB panel opens and on its Refresh button, which
+is sufficient for a manually driven session.
+
+**Interrupt transfers are push, not request/response.** The server sends
+`start_interrupt_receiving` once and the client then sends `interrupt_packet`
+messages unsolicited until `stop_interrupt_receiving`, unlike control and
+bulk, where each server request has one reply. Each active endpoint therefore
+runs as a spawned polling task (submit, await completion, forward, resubmit)
+whose handle the channel keeps in `interrupt_handles` and aborts on stop or
+disconnect. The tasks cannot call the send path directly because it needs
+`&mut self`, so they hand data back over an mpsc channel that the channel's
+`select!` loop drains. The virtual mass storage device has no interrupt
+endpoint; the trait default refuses interrupt requests, and a future virtual
+HID device would implement them in its own backend.
+
+**The virtual mass storage device.**
+
+- It reports as a USB 2.0 High Speed device because that works with any
+  controller (EHCI or xHCI), with the Linux Foundation vendor ID `0x1d6b`
+  (the ID used for virtual USB devices) and product ID `0x0104`, and "ryll" in
+  the SCSI vendor and product strings so it is recognisable in a guest.
+- Sectors are 512 bytes and the device is always LUN 0. A RAW image is
+  byte-addressable, so sector N is byte offset N x 512 and no partition table
+  or filesystem is parsed: the guest does that, as for a physical drive.
+- It implements the eight commands Linux and Windows guests need: TEST UNIT
+  READY, REQUEST SENSE, INQUIRY, MODE SENSE(6), PREVENT ALLOW MEDIUM REMOVAL,
+  READ CAPACITY(10), READ(10) and WRITE(10); any other opcode gets CHECK
+  CONDITION with ILLEGAL REQUEST. READ/WRITE(16) and SYNCHRONIZE CACHE are
+  absent; add them only if a guest turns out to need them.
+- There is no caching layer; the host page cache does that work.
+- Read-write is the default; `--usb-disk-ro` makes WRITE(10) fail with a
+  WRITE PROTECTED sense and sets the write-protect bit in MODE SENSE.
+- Only RAW images are supported. qcow2, VMDK and VHD would each need a
+  format-specific I/O layer behind the SCSI handler and are deliberately out.
+- Because the server drives transfers, BOT is simpler than the textbook
+  state machine: a bulk OUT carrying a CBW selects the command, and the
+  following bulk IN requests receive either its data phase or the CSW.
+
+**Auto-connect versus the command channel.** `--usb-disk` images are connected
+by the channel handler itself once the server hello arrives, rather than by
+the app sending a command, because the usbredir channel is spawned inside
+`run_connection()` on a different thread from the GUI and plumbing a sender
+back was avoided for the CLI case. Interactive connect and disconnect use the
+`UsbCommand` channel described under GUI Components below
+(see also design decision 10 in [design-decisions.md](design-decisions.md)).
+
+**Known gaps.** `cancel_data_packet` is acknowledged in the log but not
+acted on ([#781](https://github.com/shakenfist/ryll/issues/781)), so an in-flight transfer
+cannot be cancelled by the server. One device is redirected per usbredir channel and no filter or auto-connect
+policy exists.
+
 ### CLI usage
 
 ```bash
