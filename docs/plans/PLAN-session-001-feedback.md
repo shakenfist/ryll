@@ -70,7 +70,7 @@ description), `D#` (derived from the report data).
 | ID | Title | Sources | Tracked at |
 |----|-------|---------|------------|
 | **U1** | "Video stream appears to not be keeping up" | B4 (10:39:47Z) | `PLAN-video-keeping-up.md` — closes the observability gap first (per-decode wall-time, socket-buffer high-water, ACK-window exhaustion) before attempting a fix, then moves bug-report I/O off the channel read path if instrumentation confirms it's a contributor. |
-| **G1** | macOS runtime-metrics not implemented | Every report's `runtime-metrics.json` | `PLAN-macos-runtime-metrics.md` — adds a `MacOS` variant to `RuntimeMetrics` using the Mach `task_info` / `task_threads` / `thread_info` APIs already exposed by `libc` on Apple targets. Independent of session-001 work. |
+| **G1** | macOS runtime-metrics not implemented | Every report's `runtime-metrics.json` | [`PLAN-macos-runtime-metrics.md`](https://github.com/shakenfist/ryll/blob/8634fe4e378c7b2b33aca59b3ae907f8a97d2798/docs/plans/PLAN-macos-runtime-metrics.md) — adds a `MacOS` variant to `RuntimeMetrics` using the Mach `task_info` / `task_threads` / `thread_info` APIs already exposed by `libc` on Apple targets. Independent of session-001 work. |
 
 ## Open questions
 
@@ -245,7 +245,7 @@ Revisit only if real-world reports show display-channel
 retention is still too short to be useful after Phase 06.
 
 Out of scope for this plan (tracked elsewhere):
-G1 → `PLAN-macos-runtime-metrics.md`;
+G1 → [`PLAN-macos-runtime-metrics.md`](https://github.com/shakenfist/ryll/blob/8634fe4e378c7b2b33aca59b3ae907f8a97d2798/docs/plans/PLAN-macos-runtime-metrics.md);
 U1 → `PLAN-video-keeping-up.md`.
 
 ## Deferred side-quests from the K1 investigation

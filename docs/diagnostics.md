@@ -59,6 +59,62 @@ Ryll tracks:
 This instrumentation is the primary purpose of ryll -- measuring kerbside proxy
 performance.
 
+### Runtime metrics on macOS: why it is built this way
+
+The macOS sampler in `shakenfist-spice-renderer/src/metrics.rs` mirrors
+the Linux one (snapshot, sleep for the window, snapshot, delta), with the
+delta math factored into `macos_math` so it is unit-tested on every
+platform even though the Mach calls compile only on a Mac. The choices
+that are not obvious from the code:
+
+- **Process CPU comes from one `task_info(MACH_TASK_BASIC_INFO)` call**,
+  not from summing the per-thread `THREAD_BASIC_INFO` values. That is
+  one syscall per snapshot and parity with Linux's single
+  `/proc/self/stat` read. The cost is that `process.cpu_percent` does
+  not exactly equal the sum of `threads[].cpu_percent`, through
+  sampling skew; Linux behaves the same way.
+- **Threads are matched between the two snapshots by
+  `thread_identifier_info.thread_id`**, never by Mach port. The port
+  numbers `task_threads` returns for the same OS thread differ from one
+  call to the next, so matching on them would attribute CPU to the wrong
+  thread. This costs two `thread_info` calls per thread per snapshot,
+  which is negligible at a typical 20-40 threads.
+- **A thread that appears mid-window is reported at 0% CPU, and one
+  that vanishes mid-window is omitted**, which is what the Linux
+  sampler does; the Mach path also drops a thread whose `thread_info`
+  fails because it died between `task_threads` and the per-thread call.
+  Output is sorted by `tid` so the JSON is deterministic.
+- **`mach_port_deallocate` and `mach_task_self_` are declared in a local
+  `extern "C"` block** because the `libc` crate does not expose
+  the first on Apple targets and deprecates the `mach_task_self()`
+  wrapper in favour of the `mach2` crate. Both are stable Mach ABI; a
+  dependency for two items was judged the larger cost.
+- **`task_threads` hands back a port right per thread plus the array
+  itself**, and ignoring either leaks a reference per thread per sample.
+  `MachThreadList` releases both in `Drop`, and its only constructor is
+  the struct literal filled directly by the `task_threads` call, so no
+  fallible operation sits between allocation and ownership. The
+  `Drop` ignores the return codes of the two deallocations: a failure
+  there means a corrupt port table, which is outside this module.
+  A leak cannot be unit-tested, because observing the port table from
+  inside the process needs fragile `mach_port_kobject`-style
+  introspection; the soak in
+  [macos-metrics-verification.md](macos-metrics-verification.md) is the
+  empirical check.
+- **Uptime is baselined by `init_at_startup()`**, called first in
+  `main()`. The `LazyLock<Instant>` behind it otherwise initialises at
+  the first `sample()`, so a report filed shortly after startup would
+  read an uptime near zero. A `sample()` made before `init_at_startup()`
+  silently defeats the baseline, so keep it ahead of any sampling.
+- **A failing Mach call degrades to `Unavailable`** with the call
+  named in `reason`, so `sample()` never panics.
+- iOS is out of scope: its sandbox restrictions on the Mach APIs would
+  need their own design. Per-thread memory and GPU metrics are not
+  collected on either platform because neither OS exposes them cheaply.
+
+The plan that built this is retired; [the plans index](plans/index.md)
+links its final text.
+
 ## Traffic Ring Buffer
 
 Every SPICE message (sent and received) is recorded in a per-channel

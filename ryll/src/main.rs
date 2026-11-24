@@ -106,7 +106,7 @@ fn main() -> Result<()> {
     // call. On Linux this is a no-op; on macOS it forces the
     // LazyLock<Instant> that backs `process.uptime_secs` so the
     // field measures from here rather than the first bug-report
-    // trigger. See `docs/plans/PLAN-macos-runtime-metrics.md`.
+    // trigger. See "Runtime metrics on macOS" in `docs/diagnostics.md`.
     shakenfist_spice_renderer::metrics::init_at_startup();
 
     // Install the shutdown handler so graceful shutdown works on all
