@@ -421,7 +421,7 @@ and triage status, is in
   runtime on the UI thread to spawn onto.  The pattern for
   this side is a named `std::thread::Builder` writing into
   a slot the UI polls, which
-  `PLAN-bugreport-trigger-snapshot-phase-02-snapshot.md:422`
+  [`PLAN-bugreport-trigger-snapshot-phase-02-snapshot.md:422`](https://github.com/shakenfist/ryll/blob/71ef2db6446f69fd18d43d73bf09434aaf5964ed/docs/plans/PLAN-bugreport-trigger-snapshot-phase-02-snapshot.md#L422)
   already spells out — "not `tokio::spawn_blocking`".
 
   Two things the finding did not mention turned up in the
