@@ -219,7 +219,7 @@ with web mode).
 | 3. Events and bug-report flow | [PLAN-app-split-phase-03-events.md](PLAN-app-split-phase-03-events.md) | Complete | 79fc466 (#714), cdecf94 (#717) |
 | 4. Split `ui` into per-panel files | [PLAN-app-split-phase-04-panels.md](PLAN-app-split-phase-04-panels.md) | Complete | ecf54b5 (#726) |
 | 5. Panel state sub-structs | PLAN-app-split-phase-05-substructs.md | Not started | |
-| 6. Function-length lint | shakenfist/development `PLAN-size-ratchet.md`, phase 3 | Complete | (#746) |
+| 6. Function-length lint | shakenfist/development `PLAN-size-ratchet.md`, phase 3 | Complete | debf8b1 (#746) |
 | 7. Push audit | This file, below | Not started | |
 
 Phase plans are written at the start of each phase (see the
