@@ -401,7 +401,7 @@ lane in CI today: add one to the merge tier of `ci.yml`, pinning
 --workspace --exclude shakenfist-spice-rdp`, plus a second check
 of `shakenfist-spice-rdp` alone at its own floor. The merge tier
 rather than the smoke tier because it is a second toolchain
-download; `PLAN-two-stage-ci.md` has the tiering rules. If a
+download; [`PLAN-two-stage-ci.md`](https://github.com/shakenfist/ryll/blob/87f50f87483a5f93dc9e18d484b3cc00efd6cf39/docs/plans/PLAN-two-stage-ci.md) (retired) has the tiering rules. If a
 member turns out not to build at 1.88, the finding is the result:
 record the true floor and declare that instead of raising the
 declaration quietly to whatever stable happens to be.

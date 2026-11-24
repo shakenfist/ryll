@@ -47,7 +47,7 @@ commit, master-plan table updated as work lands).
 ### Since this plan was written: the two-tier restructure
 
 The description above is CI as of 2026-05-08. On 2026-08-10
-[PLAN-two-stage-ci.md](PLAN-two-stage-ci.md) split `ci.yml`
+[PLAN-two-stage-ci.md](https://github.com/shakenfist/ryll/blob/87f50f87483a5f93dc9e18d484b3cc00efd6cf39/docs/plans/PLAN-two-stage-ci.md) split `ci.yml`
 into a smoke tier on `pull_request` and a merge tier on
 `merge_group`, and put `develop` behind a merge queue. The job
 inventory is unchanged in substance, but where a job runs now
