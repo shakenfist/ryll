@@ -391,7 +391,7 @@ last phase's diff alone, because the `#[cfg]` gating from
 phase 2 is threaded through everything the later phases add.
 Findings land as their own PR against `develop`, recorded
 here under an *Items deferred from the push audit* heading —
-the shape `PLAN-web-frontend.md` uses for its *Items deferred
+the shape [`PLAN-web-frontend.md`](https://github.com/shakenfist/ryll/blob/d21844d8392d178d7d39c35a0107ed9319674740/docs/plans/PLAN-web-frontend.md) uses for its *Items deferred
 from the post-Phase-N pre-push audit* sections, minus the
 phase number, because this phase audits the whole plan rather
 than a range of it. This plan is not complete until each one

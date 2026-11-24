@@ -9,6 +9,193 @@ This is the developer-facing companion to the
 [`--web` operator guide](web-frontend.md), which covers running the thing.
 See [Architecture](https://github.com/shakenfist/ryll/blob/develop/ARCHITECTURE.md) for where these crates sit overall.
 
+## Why it is shaped this way
+
+The reasons below were settled when the mode was planned (May 2026)
+and each still constrains the code. The plan that recorded them is
+retired; [the plans index](plans/index.md) links its final text.
+
+### Why a WebRTC transcoder rather than a browser SPICE client
+
+The mode exists so a desktop can be reached from any browser without
+a third-party stack in the way (the operator ran Kasm Workspaces,
+which transcodes RDP through Apache Guacamole). Four ways to get
+there were weighed:
+
+- **Guacamole.** It speaks RDP, VNC, SSH, telnet and Kubernetes
+  consoles but not SPICE, and had no upstream interest in adding it
+  when this was assessed. Adding SPICE means a new protocol module in
+  Java for the `guacd` daemon: roughly the scope of this mode, in a
+  stack the operator did not otherwise run.
+- **spice-html5.** The existing JavaScript SPICE client implemented
+  only a subset of the protocol when assessed: no audio or Opus, LZ4,
+  QUIC or modern draw operations such as `DRAW_COMPOSITE`, marginal
+  cursor handling, no USB redirection. Bringing it to parity would
+  reimplement in JavaScript what the renderer already does in Rust,
+  and still run the heavy decode inside a browser tab.
+- **VNC.** noVNC is mature, but VNC has no audio, USB redirection or
+  shared folders, and the desktops already speak SPICE.
+- **RDP via xrdp.** This was the path being replaced. Using SPICE end
+  to end, so ryll's own stack drives the whole session, was the
+  point.
+
+So the renderer decodes once, in Rust, and the browser is sent a
+video stream. WebRTC carries it because it is the one primitive that
+gives low-latency video, low-latency audio and a low-latency return
+path for input (the control datachannel) together. The deployment
+assumed was a trusted LAN or VPN, where host candidates suffice;
+`--web-ice-server` takes STUN or TURN URLs for anything else.
+
+### Why H.264 through openh264, and what was checked first
+
+openh264 was already in the tree for `--capture`, so the encoder
+reused a known lifecycle rather than adding a codec. The choice was
+tested *before* the transport was built on it, because a codec the
+RTP payloader cannot packetise would have invalidated the encoder:
+`shakenfist-spice-renderer/tests/webrtc_h264_smoke.rs` feeds the
+encoder's Annex-B output through webrtc-rs's `H264Payloader` and
+asserts it is accepted, with SPS and PPS bundled into a STAP-A packet
+ahead of the IDR slice (RFC 6184). VP8 through `vpx-encode` was the
+fallback had that failed; it did not, and no VP8 path exists. A
+browser that negotiates no H.264 is
+[#311](https://github.com/shakenfist/ryll/issues/311).
+
+### Encode in the same process, on a dirty-driven clock
+
+Encoder and transport share one process, so the encoder reads the
+framebuffer from the session's `SurfaceMirror` directly instead of
+across a socket. Multi-tenancy (one encoder feeding many transports)
+was not a goal, and nothing in the code assumes it.
+
+Frame pacing is a 30 fps cap with encode-on-dirty: a tick with no
+dirty surface produces no frame, a keyframe is forced on first attach
+and on reconnect, and a tick that overruns its budget skips the next
+one rather than catching up. "Dirty" is the whole-surface flag; the
+encoder re-encodes the primary surface rather than a damaged region.
+The renderer now tracks damage per rectangle (`DamageRegion`, which
+the RDP frontend consumes), but nothing measured a gain from feeding
+it to openh264, which already codes unchanged areas cheaply as
+P-frames.
+
+The planning estimate was that a 1080p30 openh264 encode costs about
+half a core under load, with hardware encoders (NVENC, QSV, VAAPI) the
+answer if that proved too much rather than a cleverer software
+encoder. That figure was an estimate, not a measurement; no hardware
+encoder exists.
+
+### One encoder and one bridge per viewer
+
+`POST /offer` replaces the existing bridge, stops the encoder and
+starts a new one (`EncoderInfra::restart`), so a viewer always gets a
+fresh SPS/PPS and an IDR with no encoder state carried across. The
+alternative was one long-lived encoder writing to a
+`tokio::sync::broadcast` channel with each bridge subscribing, which
+would avoid the restart on reconnect but needs a broadcast stage and
+a harder-to-test state machine; it was rejected for a single-viewer
+mode and is the shape to reach for first if multi-viewer ever lands.
+
+The order inside `post_offer` is part of the design: close the old
+bridge *before* restarting the encoder. The old bridge's video pump
+holds the receiving end of the frame channel, and the encoder task
+exits when that receiver is dropped, so restarting first would wait
+on a task the old bridge is keeping alive. `restart` reads the
+primary surface's size first and fails with a 503 if there is none
+yet, so a browser that arrives before SPICE session-init finishes
+retries instead of disturbing a working pipeline. The primary
+surface is `(channel 0, surface 0)` where present, else the
+lowest-keyed surface; the browser gets one video track, and
+multi-monitor means one track per surface.
+
+### The signalling server
+
+The server is plain axum, embedded: the shell is `include_str!`-ed
+into the binary so there is no directory to ship beside it.
+
+- **Token.** A random 32-byte token, hex-encoded, is generated at
+  launch and required as `?token=` on every route, compared in
+  constant time. It is printed to stdout, so a service's journal is
+  where the operator finds it; structured logs carry only an
+  eight-character prefix, so the token does not reach a log
+  pipeline. `index.html` substitutes it into the subresource URLs,
+  since a browser does not carry a page's query string to the
+  script and stylesheet it loads. It is stable for the process's
+  life and does not rotate on reconnect.
+- **Rate limit.** At most one accepted offer per second, answered
+  with 429. Every offer builds a peer connection and a UDP socket per
+  interface address, so the token alone is not enough to bound what a
+  client can make the host allocate. An offer that fails after its
+  bridge exists closes that bridge before returning, because on
+  webrtc-rs 0.20 dropping one detaches the driver rather than
+  stopping it, and a client posting malformed SDP in a loop would
+  otherwise accumulate sockets and tasks.
+- **Plain HTTP by default.** The browser only *receives* media, and
+  `RTCPeerConnection`, keyboard and pointer events all work in
+  non-secure contexts, so the default needs no certificate. The cost
+  is features that demand a secure context: the async clipboard API,
+  and Pointer Lock on Chrome (Firefox did not require one when this
+  was planned; that was not re-verified). Pointer Lock is what would
+  end server-mode pointer drift (see the web frontend guide's
+  troubleshooting). Neither is implemented; native TLS (below)
+  removes the obstacle without making either mandatory.
+
+### The browser owns its keyboard table
+
+The browser maps `KeyboardEvent.code` to an AT scancode itself and
+sends the scancode over the control datachannel; the Rust side relays
+it. This is deliberately *not* an extension of the renderer's
+`char_to_scancode()`, which maps characters for paste-as-keystrokes
+and answers a different question. `app.js`'s table is a hand-written
+port of `scancode_for_logical_key` in the renderer's `inputs.rs`,
+kept in the same order so changes replay, and nothing generates it or
+checks it against the Rust table
+([#792](https://github.com/shakenfist/ryll/issues/792)). Extended keys are
+written in logical form with the `0xE0` prefix in the high byte (Up
+arrow is `0xE048`) and converted to wire form by `make_scancode()`; a
+page that encoded wire values itself once left every extended key
+dead.
+
+The pointer travels as coordinates normalised to the video's rendered
+area, corrected for letterboxing from `videoWidth`/`videoHeight`
+rather than the element's bounding rect, and denormalised against the
+primary surface on the Rust side. The cursor is a datachannel-driven
+`<img>` overlay rather than part of the video, so its latency is the
+datachannel's round trip and not the encoder pipeline's.
+
+### The substrate is a library and each frontend adapts to it
+
+Web mode could only exist because the SPICE substrate was extracted
+from the `ryll` binary into `shakenfist-spice-renderer`, so that the
+web frontend is a third consumer of one library rather than a second
+copy of the channel handlers. Four choices made that extraction
+work, and each is a constraint on code that touches it now:
+
+- **Pixels and textures are split, with no trait between them.**
+  `DisplaySurface` exposes pixels and a dirty flag, and each frontend
+  builds its own representation: the GUI's `TextureCache`
+  (`ryll/src/display_gui.rs`) for egui, the H.264 encoder's input for
+  web. A `TextureSink` trait the renderer calls was weighed and
+  rejected as indirection over three concrete consumers that each
+  want something different.
+- **Keys pivot through a neutral type.** `LogicalKey` and
+  `scancode_for_logical_key` are the renderer's; the egui frontend
+  adapts `egui::Key` to them in `ryll/src/input_egui.rs`. The point
+  was a typed midpoint for every frontend, not only the removal of an
+  `egui` import.
+- **Host-side concerns are injected, not reached for.** Channel
+  handlers had coupled to seven ryll-side modules (the byte counter,
+  the bug-report traffic buffers, capture, the notification store,
+  the verbose-logging flag, and the USB and WebDAV backends). The
+  renderer is meant to be published for a SPICE client that wants
+  none of the bug-report writer, capture pipeline or notification
+  store, so each became a trait the host supplies (the table in
+  [Architecture](https://github.com/shakenfist/ryll/blob/develop/ARCHITECTURE.md))
+  or plain plumbing the renderer owns. Dynamic dispatch on the
+  per-byte path was accepted without profiling; a generic parameter
+  is the fallback if it ever shows up.
+- **A second delivery mechanism gets a second crate.**
+  `shakenfist-spice-webrtc` is separate from the renderer for the
+  reasons given under the WebRTC bridge below.
+
 ## Encoder module
 
 `shakenfist-spice-renderer/src/encoder/` is the live H.264 encoder
@@ -403,9 +590,9 @@ no RTCP PLI (Picture Loss Indication) handler requesting a
 keyframe on a viewer-initiated refresh: `bridge.rs` registers no
 `on_rtcp_packet`-equivalent handling, so a browser that loses the
 IDR has no way to ask for another one and must reconnect. The
-WebRTC bring-up explicitly allowed stubbing this, and it is
-carried as future work in
-[`PLAN-web-frontend.md`](plans/PLAN-web-frontend.md).
+WebRTC bring-up explicitly allowed stubbing this. Routing an
+incoming PLI to `EncoderControl::RequestKeyframe` would close the
+gap, and is tracked as [#789](https://github.com/shakenfist/ryll/issues/789).
 
 ### webrtc-rs convention: handler methods must never block
 
@@ -706,6 +893,14 @@ went away", not "the bridge is finished" — anything that needs
 the latter must observe it another way. The reaper below is the
 consumer this matters to.
 
+`Disconnected` counts as terminal, although WebRTC lets a
+disconnected peer connection recover. The mode serves one viewer, so
+reaping at once and letting the browser's auto-reconnect build a
+fresh peer connection is simpler than a wait-and-see timer, and the
+price of a spurious reap is an encoder restart. If brief network
+hiccups ever force full reconnects for an operator, the policy to try
+is requiring the state to persist for a few seconds before reaping.
+
 Public API:
 
 - `wait_for_dead(&self) -> impl Future` — resolves when the
@@ -910,6 +1105,18 @@ URL line prints `https://` and the server uses
 keeping the graceful-shutdown semantics above intact. A
 reference systemd unit at `examples/ryll-web.service` shows the
 TLS-enabled invocation with an `EnvironmentFile` pattern.
+
+Native TLS rather than a documented reverse proxy is the baseline
+because the alternative serves the page, and the per-launch URL
+token in it, in cleartext whenever an operator forgets the proxy.
+ryll's SPICE sessions surface the server's "channel is insecure"
+warnings in the notifications panel, and a web frontend that needed
+an external proxy for HTTPS would be quieter about the equivalent
+exposure than the protocol it fronts. Out of scope, on
+purpose: ACME inside ryll (operators bring a certificate pair from
+mkcert, certbot or an internal CA), more than one certificate or SNI,
+mTLS for browser authentication (the URL token stays the only
+boundary), and reloading a certificate without a restart.
 
 Operator-facing TLS setup, cert recipes and the reverse-proxy
 fallback are in the [`--web` operator guide](web-frontend.md).

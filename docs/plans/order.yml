@@ -20,7 +20,6 @@
 - PLAN-bugreport-trigger-snapshot.md: Bug-report trigger snapshot
 - PLAN-macbook-bugreport-fixes.md: Macbook bug-report fixes
 - PLAN-connection-properties.md: Connection properties
-- PLAN-web-frontend.md: Web frontend
 - PLAN-opus-decoder.md: Opus decoder
 - PLAN-crate-release.md: Crate release
 - PLAN-session-001-feedback.md: Session 001 feedback

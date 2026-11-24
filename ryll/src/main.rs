@@ -600,8 +600,8 @@ fn run_web(
     pedantic_config: Option<PedanticConfig>,
     // Web mode never opens a host window, so the GUI's
     // "obey guest size" toggle is accepted for CLI symmetry
-    // and ignored. The browser-driven viewport flow that
-    // resolves to `VDAgentMonitorsConfig` lands in 5c.
+    // and ignored. The browser's viewport message drives the
+    // guest size instead, through `VDAgentMonitorsConfig`.
     _obey_guest_size: bool,
 ) -> Result<()> {
     info!("Running in web mode");
@@ -724,9 +724,9 @@ fn run_web(
         // `run_connection` takes mpsc receivers for inputs / usb
         // / webdav / resize and an mpsc sender for the channel-
         // event stream. Web mode keeps the senders for the input
-        // and resize channels so 5c can drive them from browser
-        // messages; usb and webdav stay closed (web mode does
-        // not implement these in MVP).
+        // and resize channels so the input relay can drive them
+        // from browser messages; usb and webdav stay closed (web
+        // mode does not implement them).
         let (event_tx_mpsc, event_rx_mpsc) =
             tokio::sync::mpsc::channel::<shakenfist_spice_renderer::ChannelEvent>(
                 shakenfist_spice_renderer::session::EVENT_CHANNEL_SIZE,
@@ -777,7 +777,7 @@ fn run_web(
         drop(usb_tx);
         drop(webdav_tx);
 
-        // Event bus the 5b/5d/5e relays subscribe to. Its forwarder
+        // Event bus the surface mirror and relays subscribe to. Its forwarder
         // pulls from the renderer's mpsc and re-broadcasts so multiple
         // consumers can observe each event, and its mirror task turns
         // those events into surface mutations on the live pixel store

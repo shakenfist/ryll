@@ -261,7 +261,7 @@ async fn loopback_video_audio_datachannel() {
     // does not expose the DC's ready-state through its API. Poll
     // by retrying `send_control` until it succeeds (or we time
     // out). Each retry sleeps 50 ms; 5 s total is plenty on
-    // loopback (the 3e unit test settled in ~200 ms).
+    // loopback (the datachannel unit test settled in ~200 ms).
     let mut server_rx = server.control_rx().expect("server control_rx");
     let send_deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {

@@ -20,7 +20,8 @@ produced.
    stack without GUI overhead. Headless is also the first evidence of the
    project's broader **multi-modal client** stance: the SPICE stack is
    frontend-agnostic, and additional frontends (`--web` browser mode shipped
-   end-to-end via the [web frontend plan](plans/PLAN-web-frontend.md)) are
+   end-to-end; [why it is a WebRTC transcoder](web-mode-internals.md#why-a-webrtc-transcoder-rather-than-a-browser-spice-client)
+   is in its internals guide) are
    first-class peers of the GUI rather than retrofits. When you add or modify a feature, ask which
    modes it should be reachable from; if a mode physically cannot host the
    feature, say so in the docs rather than leaving the gap unstated.

@@ -231,7 +231,7 @@ they author it, extract that crate alone, with
 
 Both modes are load-bearing for ryll's own identity and testing:
 `--web` exists to dogfood ryll in place of Kasm plus Apache
-Guacamole (`PLAN-web-frontend.md`), and `--rdp` is a reachability
+Guacamole ([`PLAN-web-frontend.md`](https://github.com/shakenfist/ryll/blob/d21844d8392d178d7d39c35a0107ed9319674740/docs/plans/PLAN-web-frontend.md)), and `--rdp` is a reachability
 fallback for users who can install nothing (`PLAN-rdp-frontend.md`).
 Neither depends on Kerbside being in the path, and a developer
 debugging a transcode wants it in a single process with the

@@ -3,9 +3,8 @@
 //!
 //! The server binds an ephemeral TCP port, generates a
 //! per-launch random 32-byte token, and serves a token-gated
-//! axum app. Subsequent steps fill in the static-asset
-//! serving (4b), the POST /offer SDP exchange handler (4c),
-//! and the browser-shell wiring (4d).
+//! axum app: the embedded browser shell's static assets and
+//! the POST /offer SDP exchange handler.
 
 pub(crate) mod assets;
 pub(crate) mod audio;
