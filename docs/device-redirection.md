@@ -111,6 +111,72 @@ channel's pcap traffic. Generic channel errors (displayed in the central
 panel) also offer a bug report button pre-populated with
 `BugReportType::Connection`.
 
+### Why the USB panel is shaped this way
+
+These are constraints and rejected alternatives behind the panel; the
+[plan that built it](https://github.com/shakenfist/ryll/blob/8cf54b550713b2f65c6397b3ab4bde7b31817f84/docs/plans/PLAN-usb-ui.md)
+(retired) holds the phase-by-phase history.
+
+- **One device, one usbredir channel.** SPICE carries one redirected
+  device per usbredir channel. A server may advertise several channels,
+  but the session opens only the first and skips the rest (the command
+  receiver is `take()`n once), so the panel manages one device at a time
+  and disables Connect while the channel is not ready. Supporting
+  several simultaneous redirections would need a command sender per
+  channel and per-channel panel state; it was deferred, not rejected.
+- **A panel, not a modal dialog.** It stays open while the user works in
+  the guest and shows live status, as the Traffic viewer does. The status
+  bar's `USB: ...` label is kept as a glance indicator; the panel adds
+  the management detail. Both are driven by `usb_device_description`.
+- **Enumeration is on demand, never per frame.** `enumerate_devices()`
+  calls `nusb::list_devices()`, which is synchronous (under about 100 ms
+  in practice), so the panel enumerates on first open and on Refresh. It
+  deliberately does not clear the list when the panel closes: re-listing
+  on every open would stall the render loop more often than slightly
+  stale data with a Refresh button costs. A timer or the `nusb` hotplug
+  watcher was weighed and deferred as added complexity; Refresh is the
+  contract.
+- **The GUI sends identity, the channel opens the device.** `nusb`
+  device handles cannot cross the command channel, and opening is async
+  while the render loop is not. `ConnectPhysical { bus, address }`
+  therefore makes the handler re-enumerate and find the device again. A
+  device unplugged between listing and clicking Connect produces a
+  `UsbConnectFailed("Device not found ... may have been unplugged")`
+  rather than a silent mismatch. This is why `enumerate_physical()` must
+  report `busnum()` in `bus`: it originally stored `device_address()` in
+  both fields, which would have made the re-lookup match the wrong device
+  or none. `bus` stays a `u8` rather than the string `bus_id()` because
+  physical pass-through is Linux only; revisit the type if another
+  platform gains it.
+- **Failure must always have a way out.** `UsbConnectFailed` exists so the
+  panel can never sit in "Connecting..." with no event to clear it, and a
+  `Disconnected` event for the usbredir channel resets all panel state
+  (ready flag, connected device, in-progress flags) so a dropped channel
+  does not leave a stale "Ready". A connect while a device is attached
+  (for example after a `--usb-disk` auto-connect) disconnects the old
+  device first.
+- **No double-queued commands.** The in-progress flags disable every
+  button until the matching event arrives, so at most one command is in
+  flight; a full command channel is reported as an error rather than
+  waited on.
+- **A native file picker, not a typed path.** The panel is GUI only
+  (headless users have `--usb-disk`), so a typed path would be a poor
+  experience for the only people who see it. `rfd` is used without its
+  `gtk3` feature (the build container has no GTK3 headers), so on Linux
+  the dialog depends on a desktop portal service at run time; without
+  one it does not open and the CLI flags remain. The blocking
+  `FileDialog` runs on its own thread and the result is polled with
+  `try_recv()` each frame.
+- **Host permissions are not diagnosed.** An empty or failed enumeration
+  is shown as it is; the panel does not guess at udev rules or container
+  pass-through.
+- **Known gap.** The connected row is matched by comparing the backend's
+  `description()` with the device's `label()`. They are equal for virtual
+  disks but not for physical devices (`vid:pid` against the full label),
+  so a connected physical device is not highlighted and offers no
+  Disconnect button in the list. Tracked in
+  [#775](https://github.com/shakenfist/ryll/issues/775).
+
 ## WebDAV Folder Sharing
 
 WebDAV folder sharing uses the SPICE WebDAV channel (type 11) to export a
