@@ -1402,6 +1402,30 @@
     {
       "path": ".github/workflows/prune-reviews.yml",
       "author": "mikal"
+    },
+    {
+      "path": "docs/ci.md",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
