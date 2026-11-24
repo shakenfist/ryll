@@ -146,6 +146,41 @@ in [features](features.md).
 - **Until the guest sends a shape, a built-in arrow is drawn,** so
   a connected session never has an invisible pointer.
 
+## Screenshots and the stats-bar sparklines
+
+F8 and Menu → Screenshot save the display surfaces as PNGs
+(`ryll/src/app/screenshots.rs`), reusing the bug report's PNG
+encoder.
+
+- **One PNG per surface, not the largest or the one under the
+  pointer.** A bug report wants a single image and picks the largest
+  surface; a screenshot keeps every head, and the dialog still
+  returns a single path to derive the names from. With one surface
+  the file is written to the chosen path as it is. With several,
+  only the last extension is stripped and `-1.png`, `-2.png` are
+  appended, ordered by the `(channel_id, surface_id)` key so the
+  numbering is stable between runs.
+- **The dialog is the whole interface.** The default name is
+  `ryll-screenshot-<timestamp>.png` from `bugreport::filename_timestamp`
+  (already filename-safe, and the project avoids the `chrono`
+  crate). Cancelling does nothing, and neither an empty session nor
+  a write failure panics: both raise a notification.
+- **Headless has no F8, and no `--screenshot-on-exit` flag.** The
+  control socket's `screenshot` verb returns PNG or raw RGBA for any
+  live surface, one call per surface, and `--capture` records the
+  session as `display.mp4`, so a flag writing one PNG at exit would
+  be a third way to do the same thing.
+
+The sparklines in the stats bar (`ui/stats_bar.rs`) draw 80x12 pixel
+bars from a 60-sample history. Bandwidth is sampled once a second;
+`LatencyTracker` (`app/stats.rs`) is event-driven, recording a
+sample in milliseconds when its event arrives, and draws nothing
+until it has two. Both scale to the largest sample in the visible
+window rather than to a fixed bound, which keeps one code shape
+for every sparkline at the cost that a quiet stretch looks as
+dramatic as a busy one; read the number beside the graph for the
+value.
+
 ## Multi-Monitor Support
 
 Ryll supports multiple monitors via the `--monitors N` CLI option.
