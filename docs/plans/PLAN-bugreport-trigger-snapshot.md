@@ -159,7 +159,7 @@ channels. The thread ends when encoding returns and its
 3. Where does the `Arc<Mutex<Option<Vec<u8>>>>` live on
    `struct App`? Natural home is next to the other
    bug-report UI fields at `ryll/src/app.rs:251-260`.
-4. Does the traffic viewer (`PLAN-bug-reports-phase-06-traffic-viewer.md`)
+4. Does the traffic viewer ([`PLAN-bug-reports-phase-06-traffic-viewer.md`](https://github.com/shakenfist/ryll/blob/3fd35e220ebf59ff0604c0b25b6f86d5edef0cf7/docs/plans/PLAN-bug-reports-phase-06-traffic-viewer.md))
    need to know about the new fields? Probably just for a
    "trigger" marker on the timeline — nice-to-have, not in
    scope here.

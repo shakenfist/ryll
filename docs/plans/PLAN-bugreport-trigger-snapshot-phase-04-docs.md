@@ -28,7 +28,7 @@ In scope:
   summary reflects the "catch transient artefacts" angle,
   not just "captures a zip".
 - Leave a breadcrumb in the original
-  `docs/plans/PLAN-bug-reports.md` pointing at the
+  [`docs/plans/PLAN-bug-reports.md`](https://github.com/shakenfist/ryll/blob/d8bb55cab70839742956b474b1ea0615b34d6d2f/docs/plans/PLAN-bug-reports.md) pointing at the
   trigger-snapshot plan so a future reader looking at the
   zip-layout diagram there knows the schema has moved on.
 - Mark every phase of `PLAN-bugreport-trigger-snapshot.md`
@@ -93,7 +93,7 @@ Phrasing is accurate but buries the substantive phase 2–3
 win: the zip now catches artefacts that fade before the user
 submits.
 
-### `docs/plans/PLAN-bug-reports.md` line 280-289
+### [`docs/plans/PLAN-bug-reports.md`](https://github.com/shakenfist/ryll/blob/d8bb55cab70839742956b474b1ea0615b34d6d2f/docs/plans/PLAN-bug-reports.md) line 280-289
 
 Historical plan. Has a zip-layout diagram listing
 `screenshot.png` only. The plan is marked Complete — don't
@@ -220,7 +220,7 @@ leads on what makes phase 2–3 worth documenting:
 Wrap at 120 cols; the existing bullets in the list hit
 ~150 on the widest lines so matching that is fine.
 
-### `docs/plans/PLAN-bug-reports.md`
+### [`docs/plans/PLAN-bug-reports.md`](https://github.com/shakenfist/ryll/blob/d8bb55cab70839742956b474b1ea0615b34d6d2f/docs/plans/PLAN-bug-reports.md)
 
 Minimal breadcrumb — add one paragraph above the zip-layout
 fence:
@@ -263,7 +263,7 @@ Single step, single commit.
 
 | Step | Effort | Model  | Isolation | Brief for sub-agent |
 |------|--------|--------|-----------|---------------------|
-| 4a   | low    | haiku  | none      | Apply the doc changes in the *Design* section verbatim: update `docs/troubleshooting.md`'s "Bug Reports" section with the new zip layout, the timestamps paragraph, and the two-image paragraph; update `ARCHITECTURE.md`'s "Bug Report Assembly" and "Bug Report Dialog" sections; tighten the `README.md` bug-reports feature bullet; add the breadcrumb paragraph to `docs/plans/PLAN-bug-reports.md`; flip phase 4's status to Complete in `PLAN-bugreport-trigger-snapshot.md`; flip the trigger-snapshot master-plan row to Complete in `docs/plans/index.md`. Single commit with message `Document trigger-time snapshot in bug reports.`. Run `pre-commit run --all-files` (shellcheck and gitleaks still run on doc PRs). No `make test` needed — no Rust changed. |
+| 4a   | low    | haiku  | none      | Apply the doc changes in the *Design* section verbatim: update `docs/troubleshooting.md`'s "Bug Reports" section with the new zip layout, the timestamps paragraph, and the two-image paragraph; update `ARCHITECTURE.md`'s "Bug Report Assembly" and "Bug Report Dialog" sections; tighten the `README.md` bug-reports feature bullet; add the breadcrumb paragraph to [`docs/plans/PLAN-bug-reports.md`](https://github.com/shakenfist/ryll/blob/d8bb55cab70839742956b474b1ea0615b34d6d2f/docs/plans/PLAN-bug-reports.md); flip phase 4's status to Complete in `PLAN-bugreport-trigger-snapshot.md`; flip the trigger-snapshot master-plan row to Complete in `docs/plans/index.md`. Single commit with message `Document trigger-time snapshot in bug reports.`. Run `pre-commit run --all-files` (shellcheck and gitleaks still run on doc PRs). No `make test` needed — no Rust changed. |
 
 Low effort, haiku is sufficient — the prose is prescribed
 and the edits are mechanical. If haiku struggles with the
@@ -300,7 +300,7 @@ Doc-only phase. Existing tests stay green by construction
       paragraph on the encoder thread added under "Bug
       Report Dialog".
 - [ ] `README.md` bullet tightened.
-- [ ] `docs/plans/PLAN-bug-reports.md` breadcrumb present.
+- [ ] [`docs/plans/PLAN-bug-reports.md`](https://github.com/shakenfist/ryll/blob/d8bb55cab70839742956b474b1ea0615b34d6d2f/docs/plans/PLAN-bug-reports.md) breadcrumb present.
 - [ ] `PLAN-bugreport-trigger-snapshot.md` phase table
       shows Complete for all four phases.
 - [ ] `docs/plans/index.md` master-plan row shows

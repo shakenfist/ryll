@@ -366,7 +366,7 @@ Existing tests stay as-is — none of them exercise
 ## Follow-up
 
 Phase 4 updates `README.md`, `ARCHITECTURE.md`, and
-`docs/plans/PLAN-bug-reports.md` (or whichever user-facing
+[`docs/plans/PLAN-bug-reports.md`](https://github.com/shakenfist/ryll/blob/d8bb55cab70839742956b474b1ea0615b34d6d2f/docs/plans/PLAN-bug-reports.md) (or whichever user-facing
 docs describe the zip contents) to explain the two-image
 layout and the "region applies to submit-time surface
 coordinates" convention.

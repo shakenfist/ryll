@@ -396,6 +396,87 @@ what becomes garbage.
 Keyboard and mouse input is not forwarded to the SPICE server
 during selection.  Coordinates are clamped to the surface bounds.
 
+### Why a report is built this way
+
+The choices behind the bug report path, kept so that a change to it
+does not re-propose something already weighed.
+
+- **One zip, not a directory of loose files.** A report exists to be
+  attached to an issue or an email, so it is a single file. Entries
+  are stored rather than deflated: the pcap payloads and the PNGs are
+  already compressed.
+- **The ring buffer is always on and has no flag.** A report taken
+  after the fact is only useful if the traffic was already being kept,
+  and 50 MB is small beside what the client otherwise uses, so
+  `--capture` is for recording a whole session and not a precondition
+  for reporting. Entries hold already-built pcap frames, built by the
+  `capture` module's frame code, so a report writes them out without
+  re-deriving anything. Each channel has its own buffer and mutex, so
+  a busy display channel cannot evict a quiet channel's history (the
+  split is weighted, above). A lock-free structure was judged
+  premature: a lock is held for one push, or for the traffic viewer's
+  250 ms refresh.
+- **Channels publish their snapshots; the UI never asks for them.** A
+  channel handler runs on a different thread from the UI, and a
+  request/response round trip through the event channel would need
+  cross-thread coordination. Each handler instead updates its
+  `Arc<Mutex<T>>` in place and the report reads the latest copy.
+- **The PNG is the whole surface and the region is metadata.** The
+  developer can crop locally. This is why the dialog warns that a
+  report contains screen contents. `screenshot-region.png` was added
+  later as a second image, not a replacement. The region is picked by
+  dragging a rectangle rather than clicking a point.
+- **F11 and F12 never reach the guest.** A guest rarely needs either,
+  and the report shortcut is worth more than the keystroke.
+
+The trigger-time snapshot has constraints of its own:
+
+- **Capture on open, whatever type is selected.** The artefact may be
+  gone by the time the user has chosen a type and typed a description;
+  that delay is the whole reason the snapshot exists. Do not guard
+  the capture on the selected type: a dialog opened as Input and
+  switched to Display would then have missed the moment. The PNG is
+  *included* only for a Display submission, so Input, Cursor and the
+  other types are no larger than before. The wasted encode on a
+  non-Display submission is accepted, since dialogs open rarely and
+  the encode is off the UI thread.
+- **A plain `std::thread`, not `tokio::task::spawn_blocking`.** PNG
+  encoding is CPU-bound with nothing async in it, and belongs outside
+  the tokio runtime that drives the SPICE channels.
+- **The surface is cloned, with no temporary file.** A 1024x768 RGBA
+  surface is about 3 MB and a 2560x1600 one about 16 MB, held only
+  from the trigger until the encode finishes (well under a second on a
+  modern CPU, while the user types), after which only the compressed
+  bytes remain. If profiling ever shows the clone matters, revisit it;
+  it was weighed with the operator on 2026-04-23 and judged not worth
+  a temp file.
+- **The submit path never blocks on the encoder.** `try_lock` with a
+  live-encode fallback means a user who clicks Capture before the
+  worker is done gets a slightly later image, not a frozen window. The
+  fallback also covers a failed thread spawn and a report triggered
+  before any surface existed (which then has no PNG either, but still
+  has its timestamps). Cancelling needs no primitive: dropping the
+  `Arc` leaves the worker to finish into garbage.
+- **`screenshot-region.png` crops the submit-time surface, never the
+  trigger-time PNG.** The region's coordinates are in the surface
+  space of the moment the user drew it, and the guest may have resized
+  in between, so re-cropping the trigger-time image would need a
+  decode, a coordinate mapping and a re-encode, and would be wrong
+  whenever the size changed. `region` in `metadata.json` therefore
+  indexes `screenshot-region.png` as a whole file, and indexes
+  `screenshot.png` only if the surface had the same geometry at both
+  moments. The crop is clamped to the surface (right and bottom are
+  exclusive), and a rectangle that is empty after clamping produces no
+  image rather than an error.
+- **The new metadata fields were added, not substituted.**
+  `session_uptime_secs` keeps meaning uptime at submit, and
+  `triggered_at` / `triggered_uptime_secs` sit beside it, so a reader
+  of an older report still finds the keys it knew. The two are always
+  present, never `null`: a report with no dialog behind it takes the
+  submit values, so tooling need not special-case them. `--pedantic`
+  reports are the example, since the observer firing is itself the
+  moment of interest and gets no trigger-time image or region.
+
 ## Live Traffic Viewer
 
 Pressing **F11** or using **Menu → Traffic** toggles a
