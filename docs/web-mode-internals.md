@@ -635,6 +635,380 @@ never gets redelivered. Applying "never block" to
 caught, so check where a function is actually *called from*
 before applying the rule to it.
 
+### Decisions behind the webrtc-rs 0.20 port
+
+The bridge moved from webrtc-rs 0.17 to 0.20, a re-homing of the
+crate onto the sans-io `rtc` core, and the shape above is the
+result. These are the choices that are not obvious from the code,
+and what was checked before making them. The upstream citations are
+into the published `webrtc` and `rtc` sources, so they can be
+re-checked against whichever release the lockfile now holds.
+
+#### Dependencies and tooling
+
+- **The floor is a release that behaves.** The port targeted a
+  declared floor rather than `=`, so patch updates still flow. The
+  first 0.20 release had a driver hot loop on a non-advancing
+  timeout; the next fixed it, and the one after stopped scheduling
+  ICE checks in terminal states, which is the path the reaper and
+  `tests/lifecycle.rs` walk. A soak against a release with a known
+  CPU-burn bug would have measured the bug. The alpha of the next
+  line carried a fix worth having, but its headline was a
+  deliberate reshaping of the public API, and porting onto that
+  during a port was the wrong trade. The floor and the reason for it
+  live in `shakenfist-spice-webrtc/Cargo.toml`.
+- **`rtc` is a direct dependency, not an aliased `rtc-rtp`.**
+  `write_rtp` takes an `rtc::rtp::Packet`, so the packet type has to
+  be the one `webrtc` expects. `webrtc` pins `rtc` to an exact
+  patch, so naming `rtc` at the same version guarantees that by
+  construction; aliasing the RTP crate would keep the old `rtp::`
+  prefixes at the price of a second version to keep aligned by hand,
+  which is the class of mistake behind issue #215. The standalone
+  `rtp` crate is a dead line: its last release predates `rtc`, and a
+  `Packet` from it is a different type, not an older one.
+- **No webrtc rule in `renovate.json`.** The patch-disable rule
+  existed because sibling crates could resolve to inconsistent
+  patches (#215). On 0.20 `webrtc` requires `rtc` at an exact patch
+  and `rtc` requires each of its sibling crates at that same patch,
+  so cargo cannot resolve the inconsistent set. Both the version
+  ceiling and the patch rule went with the port.
+- **No rustls provider install in the webrtc crate.** `rtc-dtls`
+  selects its crypto provider from its own cargo features and passes
+  it explicitly, never reading the process default, so the old
+  coupling of our rustls version to webrtc's, and the
+  `install_default()` call in every test, are gone. ryll's own
+  rustls dependency and its two installs stay: they serve SPICE TLS
+  and `axum-server`, and `aws-lc-rs` still reaches ryll's graph via
+  `reqwest`. A rustls advisory is now a lockfile bump rather than a
+  forced port.
+- **The renderer's H.264 smoke test still uses the dead `rtp`
+  crate.** It is a dev-dependency with no type coupling to
+  `shakenfist-spice-webrtc`, so it did not have to move with the
+  port, and moving it would have widened an already atomic diff. The
+  cost is that it exercises a payloader the bridge no longer ships;
+  its comment in `shakenfist-spice-renderer/Cargo.toml` says so.
+- **The `rtc` stack is an accepted risk.** The port swapped a mature
+  DTLS/SRTP/SCTP/STUN tree for a sans-io reimplementation, parsing
+  untrusted input from every address the host binds. The alternative
+  was strictly worse, since the old line is abandoned and will not be
+  fixed. It is recorded as a watch item for the weekly `cargo audit`
+  in the supply-chain plan.
+
+#### What the test suite cannot see
+
+Two Rust peers on one host agree about any address, so a build that
+advertises `0.0.0.0` or a loopback-only candidate set passes
+`tests/loopback.rs` and `tests/lifecycle.rs` and reaches no browser.
+The same blind spot hid other defects of the port, each found only
+by reading or by a real browser session:
+
+- `write_rtp` validates the RTP header instead of rewriting it (next
+  subsection), which a loopback test with a permissive receiver does
+  not notice.
+- The RTX advertisement (below) is something only a real browser can
+  act on.
+
+So the automated checks are layered, and a change to the bind
+address, the SDP, or the pumps is not done until a browser has
+reached a real guest through `--web`: video, keyboard, mouse, cursor,
+resize, and audio **by ear**, because `playback: MODE: 3` proves only
+that Opus was negotiated. On top of the unit tests, `accept_offer`'s
+answer is asserted to carry at least one candidate and none with an
+unspecified address, and the gathering-count invariant is checked
+over 20 rounds by `RYLL_GATHERING_SOAK=1 make test`. That soak is off
+by default because host interface churn makes it flaky in the
+failing direction; it passed with the variable confirmed to reach the
+devcontainer (the crate's suite runs in about ten seconds with it,
+two without, which is how to tell it did not silently fall back to
+its three-iteration default).
+
+There is one shared client-side peer, `TestPeer`, behind the
+`test-support` feature rather than a separate crate. It replaced four
+hand-written copies of the same setup, which had agreed only by
+convention, so a change to the offer path is made once. The accepted
+cost is that its source ships in the crate's published tarball with
+the feature off. `TestPeer` registers the same codecs as the bridge
+and exposes no H.264 knob, because registering H.264 explicitly on
+top of the defaults is unobservable (the default entry already
+exists and the duplicate is dropped;
+`register_h264_is_redundant_with_default_codecs` asserts the two
+offers are byte-identical). A connection-state accessor does not
+exist on 0.20 at all, so both `TestPeer` and the bridge shadow the
+state in a `Mutex` fed by the state-change handler; the shadow is
+asserted to start at `New` so the tests still genuinely wait.
+
+#### Media: SSRCs, payload types and codecs
+
+- **The bridge chooses both SSRCs and passes them to the pumps.**
+  0.17 overwrote the packet's SSRC from the bind context. 0.20
+  rejects a packet whose SSRC the track does not claim, and one whose
+  payload type is not negotiated on that sender, with only a trace
+  log inside the library; leaving the SSRC unset would have meant
+  nothing knew the value and every packet was dropped, with a
+  connected viewer on a blank screen. The two SSRCs are drawn
+  distinct and non-zero, because the tracks are bundled onto one
+  transport and RFC 8843 section 9.2 requires SSRCs unique across a
+  bundle group. Local tracks are built from a whole `MediaStreamTrack`
+  whose codings carry the SSRC and codec; an empty codings vector
+  yields no codec preference, and a codec not in the `MediaEngine`
+  fails `add_track`.
+- **Payload types are read back from the negotiated senders.** The
+  pumps do not stamp a constant. Negotiation maps each matching
+  offered codec onto *our* payload number, and the media engine holds
+  several H.264 entries at different profile-level-ids. A constant
+  happened to be right for one Chromium release (102) and is wrong
+  for the next (108 was observed in the soak) and for Firefox, which
+  offers only `42e01f`. After `set_remote_description` the bridge
+  resolves the types from the senders' parameters and publishes them
+  to the pumps through an `Arc<AtomicU8>`; the pumps start before
+  `accept_offer`, so the value does not exist when they do, and a
+  sentinel distinguishes "not resolved yet" from "resolved to
+  nothing". The value is read once per access unit, so a store cannot
+  split one frame across two payload types. H.264 selection prefers
+  `packetization-mode=1`, because the payloader emits FU-A
+  fragments, which mode 0 cannot carry, and then prefers the
+  baseline profile the encoder actually emits (openh264 is not given
+  a profile and resolves to baseline). Opus has one entry and would
+  be safe by luck, so it is resolved the same way rather than
+  trusted.
+- **No common video codec is a state, not an error.** Negotiation
+  with no H.264 resolves to nothing; see the development guide for
+  the notice the viewer gets and the encoder being stopped.
+- **The default codec set is kept, and its RTX advertisement is
+  known.** `register_default_codecs` plus the explicit H.264 entry
+  were left exactly as they were, because changing the codec strategy
+  in the same change as the version bump would have made any
+  negotiation difference unattributable. Against 0.17 the answer SDP
+  gained an RTX payload type per video codec with
+  `a=ssrc-group:FID` and a second video SSRC, plus a larger header
+  extension set (`sdes:mid`, `rtp-stream-id`,
+  `repaired-rtp-stream-id`, and transport-cc moved to id 4); lost
+  `a=rtpmap:116 ulpfec` and `a=extmap-allow-mixed`; gained
+  `a=msid-semantic:WMS *`; and its m-line payload order reversed.
+  Everything else (profiles, `rtcp-fb` sets, bundle group,
+  `setup:active`, `rtcp-mux`, `sendonly`) was byte-identical. The
+  one that matters is RTX: the bridge names an RTX stream it never
+  sends on, so a browser that loses a packet and NACKs gets silence,
+  no worse than before in outcome but now entitled to expect more,
+  and it costs an SSRC. Suppressing it means a bare `MediaEngine`
+  registering only H.264 and Opus, and is a change with its own
+  reasoning, not a port detail. The extension headers are
+  advertisement only: the pumps stamp none, and `write_rtp` rejects
+  any that were not negotiated. The default PT 102 entry also
+  carries `profile-level-id=42001f` while the module doc and the
+  explicit entry say `42e01f`; the encoder emits baseline, browsers
+  tolerate the constraint-set difference, and 0.20 degrades a
+  profile mismatch to a mime-type-only match, so it has never been an
+  error.
+- **Gathering completion was verified, not assumed.** On 0.20
+  `local_description()` re-renders from the live ICE agent on every
+  call, each candidate is pushed into the core before the completion
+  sentinel, and the sentinel is what queues the `Complete` event. So
+  awaiting the event and then reading the description gets every
+  candidate (and `a=end-of-candidates`), non-trickle signalling is
+  correct, and gathering only begins at `set_local_description()`,
+  which makes the answer, set-local, await, read order required.
+  `accept_offer` waits for gathering with no timeout. That is
+  inherited unchanged from before the port and left alone, so the
+  baseline comparison stayed attributable; a stalled gather therefore
+  parks the `/offer` request.
+
+#### Teardown on 0.20
+
+Dropping a peer connection detaches its driver task and leaves its
+UDP sockets bound; it does not stop them. Everything below follows.
+
+- **A bridge must be closed, and `Drop` is a backstop.** `post_offer`
+  closes and awaits a bridge it built but failed to install (a
+  malformed offer) before returning the 400, because the offer
+  cooldown bounds the rate of leaks, not their number. `WebrtcBridge`
+  also has a `Drop` that aborts the pumps and spawns a best-effort
+  close, since "forgot to close" is silent everywhere on 0.20; it
+  logs and gives up outside a runtime. `new` closes the peer
+  connection itself when anything after `build()` fails, through one
+  fallible step, `attach_tracks_and_control_dc`.
+- **`close()` aborts the pumps unconditionally, then records that it
+  ran.** It closes the connection first so the pumps exit naturally
+  rather than mid-message, but a close error must not skip the
+  aborts, since those are the point. The `closed` flag that `Drop`
+  checks is stored *after* the aborts: stored first, a `close()`
+  future cancelled between the store and the aborts (an axum handler
+  whose client disconnected, or the reaper aborted at shutdown)
+  would leave `Drop` returning early and the backstop failing on
+  exactly the path it exists for. Both cleanup steps are idempotent,
+  so a cancelled `close()` falls through to `Drop` and a finished one
+  skips it.
+- **Neither of those two guards has a regression test, on purpose.**
+  Failing `pc.close()` needs a fake `dyn PeerConnection` for the
+  whole trait to exercise two lines; the cancellation window needs
+  `pc.close()` to return `Pending` once, and measured in-process it
+  completes on the first poll, so a test passed with the statements
+  in either order. A test that cannot fail reads as coverage without
+  being any, so the ordering is guarded by a comment at the store and
+  by inspection. By the same token,
+  `accept_offer_rejects_malformed_sdp` calls `close()` itself and so
+  could never notice that production did not: a test that cleans up
+  after the code under test cannot see that code failing to.
+- **The reaper's replacement wake once reaped a live bridge.** The
+  design is in the lifecycle section below. The first version of that
+  arm tore a live bridge down moments after it connected, and it
+  survived a green suite, `make web-smoke` and `make web-smoke-tls`;
+  only reading the stored-permit behaviour found it.
+- **A failed `/offer` leaves the encoder and audio pump running until
+  the next offer.** The next successful offer restarts the encoder
+  and replaces the Opus sender, so the cost is CPU until then, not
+  growth. Factoring the reaper's teardown into a helper shared with
+  the failure path is the right fix and has not been done.
+
+#### The UDP bind configuration
+
+The policy and its two kinds of exclusion are described above. What
+was decided about the flags, and why:
+
+- **Flags are validated at startup**, so a malformed address fails at
+  launch and not at the first `POST /offer`. `--web-ice-server` is
+  validated the same way, since an operator reaches for an ICE server
+  precisely when host candidates already fail and a silently useless
+  URL looks like WebRTC being broken.
+- **An explicit address list overrides policy, not mechanism.**
+  `--web-media-addr 127.0.0.1` is honoured, which is the loopback-only
+  opt-in, without a fourth flag. `0.0.0.0` is refused with an error
+  naming the unroutable-candidate consequence, even though an operator
+  typing it means "all interfaces": that is already the default with
+  no flag, and silently reinterpreting an address as a wildcard is how
+  a deployment ends up advertising an interface its operator thought
+  they had excluded. A malformed literal such as `fe80::1%eth0` is
+  rejected rather than treated as an interface name; a single colon
+  (`eth0:0`) is still a name.
+- **A pinned port is fatal on conflict, with no fallback.** An
+  operator pins a port because a firewall rule names it, and a silent
+  fallback to an ephemeral port produces a bridge no browser outside
+  the LAN can reach: the `0.0.0.0` failure again. The `build()` error
+  names the port and the flag that chose it. The port and the address
+  selector are separate flags so one port can bind across several
+  addresses. Resolved addresses are deduplicated (an interface and one
+  of its addresses, or an address on two interfaces), because with a
+  pinned port the second bind of the same address and port would fail
+  the whole peer connection; this also applies with no selectors.
+- **ICE servers take bare URLs.** STUN and open TURN work; a TURN
+  server needing a username and credential cannot be configured,
+  because associating a credential pair with a URL is a flag-syntax
+  question not answered yet.
+- **The `--web-*` flags do not require `--web`**, matching
+  `--web-host` and `--web-port`; tightening only the new ones would
+  make them behave unlike their siblings.
+- **The `WebrtcBridgeConfig` literal is a deliberate exception.**
+  Tests build it through `WebrtcBridgeConfig::new` plus field
+  assignment, so a new field costs one line, not twenty. The one
+  production site, in `ryll/src/web/signalling.rs`, keeps an explicit
+  literal so a reviewer sees every value it chooses.
+
+#### What `--web` costs, measured
+
+`tools/web-soak.sh` reproduces the sampler these numbers came from;
+see the development guide. All runs: 20 minutes, the uefi-latency
+guest at 1280x800, Chromium with a fresh profile, one QMP `sendkey`
+every 30 s (a 5 s cadence is unusable: the guest's mode-set churn
+outruns the stream's recovery, see Q5 in
+[OPEN-QUESTIONS](plans/OPEN-QUESTIONS.md)), RSS and per-thread CPU
+from `/proc` every 30 s, host busy% per sample so contamination from
+a shared machine is in the record. The guest cycles through eight
+colours of which one is black, so about 30 s of black every 4
+minutes is the guest.
+
+| Commit | webrtc | CPU, whole run | RSS start to end | RSS max |
+|---|---|---|---|---|
+| before the port merge | 0.17.1 | 0.96% of one core | 150 to 220 MB | 220 MB |
+| the port merge | 0.20.2 | 0.98% | 145 to 201 MB | 201 MB |
+| three phases later, run 1 | 0.20.3 | 1.83% | 158 to 235 MB | 235 MB |
+| three phases later, run 2 | 0.20.3 | 1.95% | 161 to 221 MB | 225 MB |
+
+The earlier 0.17 baseline, taken nine days before the later runs,
+was 1.4% and 0.9% CPU and 154 to 215 MB and 161 to 197 MB RSS across
+its two runs, with 8.3 to 10.4% mean host busy.
+
+The conclusions that survive: memory climbs and then plateaus (one
+run sat at exactly 235 MB for its last seven samples), so there is no
+leak at this load; across the port itself CPU is unchanged (0.96%
+against 0.98%, far below the 0.5 percentage points the first
+baseline called run-to-run noise) and memory improved; and the later
+rise to about 1.9% happened somewhere in the unrelated development
+between the port and the tip, which the first comparison could not
+tell apart from the port until the runs were bisected either side of
+the merge. A comparison across a long gap of commits is a statement
+about the tree, not about one dependency. The load is deliberately
+near-idle, a floor-shape baseline rather than a stress result, with
+one repaint every 30 s against the 0.2 to 50 Mbit/s seen in real
+sessions. One pre-port run was discarded because host busy averaged
+27.8% with two spikes to roughly 100%; reported runs sit at 8.9 to
+11.7% mean.
+
+Pump drops and reaper events were zero, observed in a separate short
+`--verbose` session. The first baseline's rows for them were *not*
+measurements: it recorded `RUST_LOG`, which ryll did not read at the
+time, so both runs were at `INFO`, where the counters are not
+emitted, and the zeros meant "nothing logged". (ryll honours
+`RUST_LOG` now; the soak section of the development guide says how to
+take the counters without perturbing the run, since `--verbose` at
+`debug` for the whole tree logged about 250 times the rate, 3,620
+lines in two minutes against 147 in twenty.)
+
+#### Firefox and the second-codec question
+
+ryll encodes H.264 only, because the encoder is shared with the GUI
+path, so a browser that offers no H.264 gets no video. Firefox is that
+browser: on Linux its `getCapabilities` lists four H.264 entries
+while the offer it sends carries none (VP8, VP9, AV1, rtx, ulpfec,
+red), identically headless or windowed, recvonly, or with the plugin
+path forced, while Chromium offers H.264 at several payload types.
+The OpenH264 plugin was on disk and its static checks all passed, and
+`MOZ_LOG=GMP:5` showed no GMP process launched, so Firefox concludes
+H.264 is unavailable before reaching the plugin. A later report had
+Firefox on macOS with no video either.
+
+The decision taken during the port was *not to add a second codec
+then*: a second codec is a renderer project, and doing it during a
+port's validation phase would have left a later video regression with
+two candidate causes. The first framing, a plugin-loading problem on
+one host, did not survive the macOS report: two hosts is Firefox not
+offering H.264 for WebRTC in a way ryll can rely on, which makes the
+case for a second codec afterwards materially stronger than that
+framing suggested. The decision is open as
+[#311](https://github.com/shakenfist/ryll/issues/311), which carries
+the evidence; Safari has never been exercised
+([#310](https://github.com/shakenfist/ryll/issues/310)). In the
+meantime the viewer is told in the page, which the development guide
+describes.
+
+#### How the web input bugs got in
+
+The web frontend shipped three input bugs that nothing caught: key
+releases were sent as presses (so the guest auto-repeated forever),
+the bytes of extended scancodes were reversed (nineteen keys dead,
+every arrow among them), and browser auto-repeat was forwarded. (The
+last was later reversed: forwarding repeats is correct, see design
+decision 24.) The first two were one cause, a reimplementation of an
+encoding `make_scancode` already owned, and the unit tests asserted
+the buggy values, because they were written from the implementation
+rather than the contract, one calling `0xE048` "wire-format" in a
+comment. The control socket's `send_key` had the identical pair and
+was fixed in the same way, which is why the control socket protocol
+is at 1.2; the checks before that bump were that no ecosystem
+consumer sent extended scancodes (kerbside's `press_key` and the
+loadtest orchestrator send plain codes, byte-identical across the
+change).
+
+What remains is structural. The existing closed loop (the sextant
+guest, the visual digest read off the screen, the `digest_updated`
+control-socket event) can now reach web mode, but nothing drives a
+browser through it, so the `KeyboardEvent.code` to scancode table in
+`app.js` is the one part of the encoding with no end-to-end check.
+`every_key_reaches_the_wire_the_way_the_gui_would_send_it` pins plain
+and extended keys, press and release, against `make_scancode` itself
+and would have caught both wire-format bugs; a headless browser at
+the web URL asserting through `digest_updated` is the missing tier,
+and it needs a live guest, so it belongs in kerbside.
+
 ## SPICE wire-up
 
 Four connections carry real data between the SPICE session and the

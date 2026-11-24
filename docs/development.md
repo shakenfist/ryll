@@ -531,8 +531,8 @@ protocol-level testing.
 
 `tools/web-soak.sh` samples a running `ryll --web` process while
 driving the guest, and prints a summary in the same shape as the
-0.17 baseline recorded in
-`docs/plans/PLAN-webrtc-0.20-upgrade-phase-01-prework.md`. Reach for
+0.17 baseline recorded in the "What `--web` costs, measured"
+section of [web-mode-internals.md](web-mode-internals.md). Reach for
 it when a change could plausibly affect memory or CPU over minutes
 rather than seconds — the WebRTC write path especially, where the
 integration tests only ever exercise a few seconds.

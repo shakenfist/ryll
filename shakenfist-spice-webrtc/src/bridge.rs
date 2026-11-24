@@ -258,7 +258,7 @@ const LOG_EVERY_N_DROPS: u64 = 100;
 /// dropping input events is worse than back-pressure. Getting this
 /// distinction wrong is how a keystroke goes missing.
 ///
-/// See `docs/plans/PLAN-webrtc-0.20-upgrade.md` for the reasoning
+/// See `docs/web-mode-internals.md` for the reasoning
 /// behind both the handler split and the `try_send` change.
 struct BridgeEvents {
     /// Ask the encoder for an IDR whenever a viewer attaches.
@@ -818,7 +818,7 @@ impl WebrtcBridge {
         // empty list is not a degraded bridge, it is a bridge that can only ever
         // advertise candidates no browser will use. Fail here rather than hand
         // back something that passes every test we have and reaches nobody. See
-        // `crate::bind_addrs` and `docs/plans/PLAN-webrtc-0.20-upgrade.md`.
+        // `crate::bind_addrs` and `docs/web-mode-internals.md`.
         let udp_addrs = config.udp_bind.resolve();
         if udp_addrs.is_empty() {
             // The two empty cases have different fixes, so they get
@@ -2843,7 +2843,7 @@ mod tests {
             // unspecified address and connect happily, so the loopback
             // and lifecycle tests stay green on a build no browser can
             // reach. See `crate::bind_addrs` and
-            // `docs/plans/PLAN-webrtc-0.20-upgrade.md`.
+            // `docs/web-mode-internals.md`.
             //
             // The address is the fifth space-separated field of an ICE
             // candidate line (RFC 5245 §15.1: foundation, component,

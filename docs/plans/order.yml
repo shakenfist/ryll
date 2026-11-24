@@ -30,7 +30,6 @@
 - PLAN-streaming-test-automation.md: Streaming test automation
 - OPEN-QUESTIONS.md: Open questions watch-list
 - PLAN-self-hosted-runners.md: Self-hosted runner migration
-- PLAN-webrtc-0.20-upgrade.md: webrtc-rs 0.20 upgrade
 - PLAN-main-event-drops.md: Main-channel event drops
 - PLAN-decoder-hardening.md: Image decoder hardening
 - PLAN-app-split.md: Splitting app.rs

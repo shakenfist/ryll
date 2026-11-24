@@ -170,8 +170,7 @@ tokio = { version = "1", features = ["test-util"] }
 # at 0.17.2, kept only because this dev-dependency has no coupling
 # to shakenfist-spice-webrtc's types. Used only by
 # tests/webrtc_h264_smoke.rs; should move onto `rtc::rtp` (or be
-# retired) eventually — see the webrtc-0.20-upgrade master plan's
-# Future work.
+# retired) eventually; tracked as https://github.com/shakenfist/ryll/issues/797.
 rtp = "0.17"
 
 # Both drive the H.264 encoder, so they only build with `encoder`.

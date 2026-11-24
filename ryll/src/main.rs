@@ -128,7 +128,7 @@ fn main() -> Result<()> {
     // macOS resolves with both enabled and panics. Installing a default
     // explicitly at startup covers every entry path.
     // `shakenfist-spice-webrtc` no longer has a rustls dependency of its
-    // own (see docs/plans/PLAN-webrtc-0.20-upgrade.md), so this call is
+    // own (see docs/web-mode-internals.md), so this call is
     // now the only thing installing a provider for the SPICE TLS and
     // axum-server paths.
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -656,7 +656,7 @@ fn run_web(
     let result = runtime.block_on(async move {
         // Idempotent rustls CryptoProvider install, matching the one in
         // `main()` above. `shakenfist-spice-webrtc` has no rustls dependency
-        // of its own (see docs/plans/PLAN-webrtc-0.20-upgrade.md), so this
+        // of its own (see docs/web-mode-internals.md), so this
         // call is what installs a provider for the SPICE TLS and axum-server
         // paths in the `--web` entry point.
         let _ = rustls::crypto::ring::default_provider().install_default();
