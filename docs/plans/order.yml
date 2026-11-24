@@ -6,7 +6,6 @@
 # master plan's execution table.
 
 - index.md: Plans index
-- PLAN-capture.md: Capture mode
 - PLAN-packaging.md: Packaging
 - PLAN-usb-redir.md: USB redirection
 - PLAN-cursor-rendering.md: Cursor rendering

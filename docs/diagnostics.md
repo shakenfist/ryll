@@ -521,6 +521,51 @@ within milliseconds of close may see an unfinalised MP4. The
 [troubleshooting guide](troubleshooting.md) records the
 trade-off rationale.
 
+### Why capture records what it does
+
+These choices were weighed when capture was written, and each
+rules out an obvious-looking alternative:
+
+- **Decrypted payloads, not TLS bytes.** The pcaps hold the SPICE
+  mini-header messages after TLS is removed. The encrypted stream
+  is no use for protocol debugging, and the channel handlers only
+  ever see decrypted data anyway.
+- **Fake TCP/IP framing, not a raw link type.** Wireshark's TCP
+  dissector, and with it stream reassembly and Follow TCP Stream,
+  only engage on TCP, and the headers are cheap to build. Each
+  channel is its own connection (a distinct client port, 10000 plus
+  the channel type, to server port 5900), sent and received packets
+  use the two directions, and sequence numbers advance by the
+  payload length.
+- **One pcap per channel,** so a reader debugging the display
+  channel opens one file rather than filtering a merged one.
+- **One video, of surface 0 only.** If the guest creates further
+  surfaces the capture skips them rather than compositing them or
+  writing a video each. A mid-session change of the primary
+  surface's dimensions stops recording with a warning: the H.264
+  encoder and the MP4 track are fixed at the first frame's size.
+- **A video frame per MARK, not per draw.** MARK is the display
+  channel's frame boundary, and it was confirmed to arrive from
+  both a local QEMU and real servers through kerbside, so a frame
+  is emitted when the picture is coherent and idle periods cost
+  nothing. Frames carry real timestamps, so playback runs at
+  session speed. A frame for every draw_copy, to show intermediate
+  tile states, was left out until something needs it.
+- **H.264 in MP4 via `openh264` and the `mp4` crate,** both of which
+  build inside the Docker devcontainer with no system dependency
+  (`openh264` bundles Cisco's library, `mp4` is pure Rust).
+  Rejected: `minimp4`, because its bindgen needs `libclang`, which
+  the devcontainer lacks; raw `y4m`, because the files are huge and
+  the frame rate fixed; and `rav1e`, because AV1 encoding is too
+  slow. `pcap-file` and `etherparse` are pure Rust too.
+- **The frame comes from the egui frame loop,** on `DisplayMark`,
+  because the composited surface lives in the app and not in the
+  display channel. That is why headless mode records no video.
+
+The retired
+[capture plan](https://github.com/shakenfist/ryll/blob/6626d4c560b8e672ae913f3e21a16e83fd7fa596/docs/plans/PLAN-capture.md)
+holds the original design text.
+
 
 ### Auto-snapshot on channel disconnect
 
