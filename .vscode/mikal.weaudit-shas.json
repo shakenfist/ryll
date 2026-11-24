@@ -29,10 +29,6 @@
       "sha": "7a223bb8c7f0875f3ecee14f61b63dee6c1338b2",
       "date": "2026-08-24"
     },
-    ".github/workflows/ci.yml": {
-      "sha": "27e414233eae770f0e9b1bfa8cc546b6bf9c9345",
-      "date": "2026-11-23"
-    },
     ".github/workflows/codeql-analysis.yml": {
       "sha": "975f656d8135aefe12ba2f2094d8671460ef1a8a",
       "date": "2026-10-05"
@@ -148,10 +144,6 @@
     "docs/channel-diagnostics-audit.md": {
       "sha": "7599137fd333be94375e64ee9b21dc8d961b3141",
       "date": "2026-11-18"
-    },
-    "docs/ci.md": {
-      "sha": "ca118214a53feffe289a2f59ca6ece30a2914739",
-      "date": "2026-11-23"
     },
     "docs/configuration.md": {
       "sha": "a2653c7bd1f821e3e429b5189bb43daaad22804b",
