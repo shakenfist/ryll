@@ -18,7 +18,6 @@
 - PLAN-connection-properties.md: Connection properties
 - PLAN-opus-decoder.md: Opus decoder
 - PLAN-crate-release.md: Crate release
-- PLAN-session-001-feedback.md: Session 001 feedback
 - PLAN-video-keeping-up.md: Video keeping up
 - PLAN-ci-platform-matrix.md: CI platform matrix
 - PLAN-stream-caps-and-flap.md: Stream caps and flap diagnostics

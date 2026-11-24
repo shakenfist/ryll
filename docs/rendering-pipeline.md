@@ -110,6 +110,21 @@ holds the rectangles written since the consumer last called
   does not restore the missed pixels: those recover only as the guest
   redraws.
 
+## Stream teardown
+
+The display channel keeps its video streams in one map keyed by stream
+id. `STREAM_DESTROY` removes one entry; `STREAM_DESTROY_ALL` (opcode
+126, empty body, sent by the server typically just before a resolution
+change or surface reconfiguration) clears the map, as spice-gtk's
+`clear_streams` does, retiring each stream so its final counters
+survive in the diagnostics. It deliberately stops there. Surfaces are
+owned by the `SURFACE_DESTROY` family and the image and GLZ caches by
+their own invalidation messages, and the protocol does not promise that
+a stream teardown implies either, so folding them in would invent
+semantics. Until the opcode was handled it was counted as the protocol
+gap `display:hexdump:126`, which dominated `--pedantic` reports, and
+stale stream entries lingered across every resolution change.
+
 ## Cursor
 
 The GUI draws the guest's cursor itself, as an overlay on the
@@ -430,7 +445,7 @@ silently.
 
 ## Notifications
 
-Ryll surfaces three categories of operator-relevant events through a
+Ryll surfaces four categories of operator-relevant events through a
 unified in-memory store and a single GUI surface:
 
 1. **Protocol gaps** — distinct `warn_once!` keys registered in
@@ -444,6 +459,23 @@ unified in-memory store and a single GUI surface:
 
 3. **Internal status** — bug-report writer success/failure,
    screenshot Ok/Err/no-surface, paste-completed.
+
+4. **Connection events** — `NotificationSource::Connection`, pushed
+   through `RyllApp::push_connection_event`: connected, connection
+   lost, each reconnect attempt and its failure, the auto-reconnect
+   giving up (one entry per modal variant), a manual reconnect, a
+   channel error, a secondary channel dropping, and the guest agent
+   coming and going. Before this a bug report's `notifications.json`
+   showed nothing of the transitions around a failure. The events
+   share the store's 30 s dedup window rather than a fold rule of
+   their own, so a flapping link collapses to one entry with a count,
+   while per-attempt messages carry the attempt number so they stay
+   distinct. A critical-channel disconnect is one entry, not two: the
+   text the modal shows is the entry. The giving-up entry is pushed
+   in addition to the modal, because a modal is easily dismissed
+   without being read and the bell keeps the record. A secondary
+   channel dropping is Info, since only its own feature is lost. The
+   panel has no per-source filter.
 
 The store (`ryll/src/notifications.rs`) is a 500-entry
 `VecDeque<NotificationEntry>` behind `Arc<Mutex<NotificationStore>>`.

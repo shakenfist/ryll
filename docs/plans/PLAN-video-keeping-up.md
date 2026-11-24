@@ -11,7 +11,7 @@ I/O (pcap, screenshot encoding) was applying backpressure to the
 SPICE socket.
 
 This master plan was spun out of the session-001 dogfooding
-triage (`PLAN-session-001-feedback.md`), which logged a
+triage ([`PLAN-session-001-feedback.md`](https://github.com/shakenfist/ryll/blob/8634fe4e378c7b2b33aca59b3ae907f8a97d2798/docs/plans/PLAN-session-001-feedback.md)), which logged a
 `U1: video stream appears to not be keeping up` report
 (`ryll-bugreport-2026-05-05T10-39-47Z.zip`) without enough data
 to act on. Rather than guess at a fix, we're closing the

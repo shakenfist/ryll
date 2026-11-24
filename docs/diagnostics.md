@@ -153,8 +153,42 @@ shared via `Arc<TrafficBuffers>` between all channel handler tasks
 and the UI thread. This supports both bug-report export, the live
 traffic viewer, and the snapshot-on-notification path. (The webdav
 channel is intentionally absent — its handler does not call
-`traffic.record_*` today; tracked as a follow-up in the
-[dogfooding feedback plan](plans/PLAN-session-001-feedback.md).)
+`traffic.record_*` today; [#784](https://github.com/shakenfist/ryll/issues/784).)
+
+Three choices in the sizing are deliberate:
+
+- **Static weights, not memory-scaled.** The 50 MB total is fixed
+  rather than sized from system memory, and the weights are not
+  exposed as flags: the rebalance buys most of the retention without
+  the cost of growing and shrinking rings at run time, and a retune is
+  a one-line constant edit. The weights come from session-001's
+  display rate (2 MB/s typical, 6 MB/s peak). A bigger display ring
+  would also be wasted on reports, since the pcap in a report is held
+  to a 24 MB budget (see [Report size](#report-size)).
+- **usbredir cannot be rescued by size.** An active USB transfer can
+  reach 50 MB/s, so no realistic cap holds more than a fraction of a
+  second of one. Its 4 MB covers the idle and control traffic and the
+  start of a transfer, which is where the protocol state changes.
+- **A message over 64 KB stays one entry.** The extra segments hang
+  off the entry rather than becoming entries of their own, so the
+  traffic viewer still shows one row per SPICE message and byte-cap
+  eviction removes a message whole, never leaving the tail of a
+  half-evicted one in the ring. A message's segments share its
+  timestamp, as the live `--capture` writer's do. The limit that
+  forced segmentation is the IPv4 16-bit length field, not the
+  network MTU: before the fix `build_tcp_frame` refused such a
+  payload and the ring silently dropped the message from every
+  report. The first diagnosis, jumbo frames, was a coincidence.
+  `capture::segment_payload` is shared with the live writer so the two
+  cannot drift.
+
+`TrafficEntry::pcap_frame` and each additional segment are
+`Arc<[u8]>` rather than `Vec<u8>`; wrapping the whole `TrafficEntry`
+in an `Arc` instead would also make clones cheap but would force every
+consumer through the pointer and break the by-value APIs.
+`build_frame` still returns a plain `Vec<u8>` and the entry is sealed
+at the two `record_*` call sites, so a future caller that needs a
+mutable buffer is not made to copy out of an `Arc`.
 
 ## Channel State Snapshots
 
@@ -407,6 +441,15 @@ closes and the app enters **region selection mode**:
    coordinates in the metadata. A click without a drag stays in
    region selection and says so in a notification.
 5. Pressing Escape skips selection and generates without a region.
+
+A region must have strictly positive area, so a deliberate one-pixel
+drag is accepted and no jitter threshold is applied, since no data
+shows jitter-made regions. The check is in the GUI (`validate_region`)
+rather than in `ReportRegion`, because the drag handler is its only
+producer, and `encode_region_png` still refuses a zero-area rectangle
+behind it. A zero-width region used to be written into `report.json`
+with no PNG to match, leaving a reader with a region of interest they
+could not find.
 
 The dialog says, while Display is selected, that Capture will ask
 for a region, and entering region selection also posts a
@@ -788,6 +831,24 @@ When the user clicks the button:
   report uses the current `TrafficBuffers` and tags
   `PostEventOnly` / `postevent`. Useful, but without the
   run-up to the event.
+
+The button is always present, and filing from a stale notification
+still produces a report, because the ring buffer decides how much of
+the run-up survives. It is byte-capped, not time-capped, so at 2 to
+6 MB/s the display ring held only 1.5 to 4 s before it was
+rebalanced, while the low-rate channels keep the whole session. The
+dimmed button and the `PostEventOnly` marker tell the reader which
+case they have, so a missing run-up is never mistaken for a quiet
+one. A notification that folds into an existing one inside the 30 s
+dedup window returns the same id, and its snapshot is replaced with
+the newer one, matching the folded entry's refreshed timestamp. The
+5-entry, 60 s policy applies to every severity and source, is not
+configurable, and does not filter which notifications get a button. A
+notification report's channel state is the main channel's, as for any
+report that names no channel; the disconnect report's per-channel map
+is the richer form. The display surface is not snapshotted at fire
+time, because that would copy the whole RGBA surface on every
+notification.
 
 ### Auto-snapshot mode (`--auto-snapshot-interval`)
 
