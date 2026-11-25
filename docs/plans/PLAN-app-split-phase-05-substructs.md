@@ -223,7 +223,7 @@ which is where it lands.
   window, so the call sequence this phase edits is the short
   dispatcher phase 4 promised.
 * `RyllApp::new` is 303 lines with a 133-field struct literal,
-  and carries `#[expect(clippy::too_many_lines)]` (`mod.rs:486`)
+  and carries `#[expect(clippy::too_many_lines)]` (`mod.rs:467`)
   against a threshold of 200. Moving 37 fields into 3 sub-structs
   takes the literal to about 99 lines and `new` to about 269 —
   still over 200, so the exemption stays fulfilled and the build
@@ -580,11 +580,11 @@ tests` pinning the ten ui-element names `observe_ui_state`
 reports: build the array the same way and assert the names, in
 order, against a literal list. A later field rename must not
 silently change what a bug report contains.
-`docs/diagnostics.md:241-242` publishes these names; this test is
+`docs/diagnostics.md:241-243` publishes these names; this test is
 what makes that page checkable.
 
 Rewrite the `reason` on `RyllApp::new`'s
-`#[expect(clippy::too_many_lines)]` (`mod.rs:486`). It currently
+`#[expect(clippy::too_many_lines)]` (`mod.rs:467`). It currently
 says "one struct literal naming every field", which is no longer
 true: say that it names every field `RyllApp` still owns
 directly, with the panel clusters constructed beside it. Do not
@@ -602,11 +602,16 @@ Documentation:
   lives and rename the fields. The `usb_tx` entry says "created
   in `RyllApp::new()` and threaded through `run_connection()`",
   which stays true, but it is now installed by
-  `UsbPanel::reset_for_session`.
-* `ARCHITECTURE.md:198-200`'s tree lists each `app/ui/*.rs` by
-  what it holds. Add the state to the three entries that now hold
-  it, one line each. Leave `mod.rs`'s entry saying "RyllApp
-  struct and fields" — it still does.
+  `UsbPanel::reset_for_session`. Line 70 of the same file says
+  both panels use `egui::SidePanel::right`; egui 0.35 unified the
+  panel types and the code has said `egui::Panel::right` since
+  phase 4, so correct that too while the paragraph is open.
+* `ARCHITECTURE.md:213-217`'s tree lists each `app/ui/*.rs` by
+  what it draws — "USB redirection side panel" and the like. Add
+  the state to the three entries that now hold it, one line each,
+  because where state lives is what this inventory is for. Leave
+  `mod.rs`'s entry at `:182` saying "RyllApp struct and fields" —
+  it still does.
 * `AGENTS.md`: **no change.** Nothing here is a convention an
   agent cannot infer from the code, and the one that is — items
   in `app/ui/` are `pub(in crate::app)` — is already at line 240.
@@ -848,6 +853,26 @@ it was not taken because decision 4 names `SurfaceOutcome` as the
 model and that type has exactly this shape, a bool whose caller
 reads the description separately. Matching the pattern phase 4
 established is worth more here than the encapsulation.
+
+**2026-11-25 (AEDT), step 5d's premises checked before briefing.**
+`RyllApp::new` is 269 lines after 5a-c, which is what the plan
+predicted and comfortably over the threshold of 200, so its
+`#[expect]` is still fulfilled and `make lint` stays green. Its line
+reference and two documentation references were stale and are
+refreshed above; `docs/device-redirection.md:73-87` was right.
+
+One premise was wrong in substance rather than in line number. The
+plan says the `ARCHITECTURE.md` tree lists each `app/ui/` file "by
+what it holds"; it lists them by what they draw, and it names no
+moved field anywhere, so nothing in it is stale. The instruction to
+add the state to the three panel entries stands on its own merit
+instead: where state lives is what a component inventory records,
+and these three modules now own what they used to borrow.
+
+Nothing constructs a `RyllApp` outside `main.rs`, so the contract
+test cannot call `observe_ui_state`. The names have to be reachable
+from a test without one, which is a design constraint the plan did
+not see; 5d's brief carries it.
 
 ## Back brief
 
