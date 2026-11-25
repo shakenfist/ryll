@@ -19,3 +19,5 @@ mod surface;
 mod traffic_panel;
 mod usb_panel;
 mod webdav_panel;
+
+pub(in crate::app) use traffic_panel::TrafficViewer;

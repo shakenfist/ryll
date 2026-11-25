@@ -2,8 +2,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
-use crate::app::RyllApp;
-use crate::bugreport::{format_size, TrafficDirection};
+use crate::bugreport::{format_size, TrafficBuffers, TrafficDirection, TrafficViewEntry};
 
 /// Maximum entries shown in the traffic viewer.
 const TRAFFIC_VIEWER_MAX_ENTRIES: usize = 200;
@@ -11,23 +10,64 @@ const TRAFFIC_VIEWER_MAX_ENTRIES: usize = 200;
 /// How often the traffic viewer refreshes from the ring buffers.
 const TRAFFIC_VIEWER_REFRESH_MS: u64 = 250;
 
-impl RyllApp {
-    pub(in crate::app) fn refresh_traffic_entries(&mut self) {
-        // Refresh traffic viewer entries periodically
-        if self.show_traffic_viewer
-            && !self.traffic_viewer_paused
-            && self.traffic_viewer_last_refresh.elapsed()
-                >= Duration::from_millis(TRAFFIC_VIEWER_REFRESH_MS)
-        {
-            self.traffic_viewer_entries =
-                self.traffic.recent_view_entries(TRAFFIC_VIEWER_MAX_ENTRIES);
-            self.traffic_viewer_last_refresh = Instant::now();
+/// State of the traffic viewer side panel.
+pub(in crate::app) struct TrafficViewer {
+    open: bool,
+    entries: Vec<TrafficViewEntry>,
+    last_refresh: Instant,
+    paused: bool,
+    filter_main: bool,
+    filter_display: bool,
+    filter_inputs: bool,
+    filter_cursor: bool,
+    filter_usbredir: bool,
+    filter_webdav: bool,
+    filter_playback: bool,
+}
+
+impl TrafficViewer {
+    pub(in crate::app) fn new() -> Self {
+        Self {
+            open: false,
+            entries: Vec::new(),
+            last_refresh: Instant::now(),
+            paused: false,
+            filter_main: true,
+            filter_display: true,
+            filter_inputs: true,
+            filter_cursor: true,
+            filter_usbredir: true,
+            filter_webdav: true,
+            filter_playback: true,
         }
     }
 
-    pub(in crate::app) fn draw_traffic_panel(&mut self, ui: &mut egui::Ui) {
+    pub(in crate::app) fn is_open(&self) -> bool {
+        self.open
+    }
+
+    pub(in crate::app) fn set_open(&mut self, open: bool) {
+        self.open = open;
+    }
+
+    pub(in crate::app) fn toggle(&mut self) {
+        self.open = !self.open;
+    }
+
+    pub(in crate::app) fn refresh(&mut self, traffic: &TrafficBuffers) {
+        // Refresh traffic viewer entries periodically
+        if self.open
+            && !self.paused
+            && self.last_refresh.elapsed() >= Duration::from_millis(TRAFFIC_VIEWER_REFRESH_MS)
+        {
+            self.entries = traffic.recent_view_entries(TRAFFIC_VIEWER_MAX_ENTRIES);
+            self.last_refresh = Instant::now();
+        }
+    }
+
+    pub(in crate::app) fn show(&mut self, ui: &mut egui::Ui, traffic: &TrafficBuffers) {
         // Traffic viewer side panel (conditional)
-        if self.show_traffic_viewer {
+        if self.open {
             egui::Panel::right("traffic_viewer")
                 .default_size(350.0)
                 .show(ui, |ui| {
@@ -35,46 +75,42 @@ impl RyllApp {
                     ui.horizontal(|ui| {
                         ui.heading("Traffic");
                         if ui
-                            .small_button(if self.traffic_viewer_paused {
-                                "Resume"
-                            } else {
-                                "Pause"
-                            })
+                            .small_button(if self.paused { "Resume" } else { "Pause" })
                             .clicked()
                         {
-                            self.traffic_viewer_paused = !self.traffic_viewer_paused;
+                            self.paused = !self.paused;
                         }
-                        ui.label(format!("{} msgs", self.traffic_viewer_entries.len()));
+                        ui.label(format!("{} msgs", self.entries.len()));
                     });
 
                     // Channel filters
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut self.traffic_filter_main, "Main");
-                        ui.checkbox(&mut self.traffic_filter_display, "Display");
-                        ui.checkbox(&mut self.traffic_filter_inputs, "Inputs");
-                        ui.checkbox(&mut self.traffic_filter_cursor, "Cursor");
-                        ui.checkbox(&mut self.traffic_filter_usbredir, "USB");
-                        ui.checkbox(&mut self.traffic_filter_webdav, "WebDAV");
-                        ui.checkbox(&mut self.traffic_filter_playback, "Playback");
+                        ui.checkbox(&mut self.filter_main, "Main");
+                        ui.checkbox(&mut self.filter_display, "Display");
+                        ui.checkbox(&mut self.filter_inputs, "Inputs");
+                        ui.checkbox(&mut self.filter_cursor, "Cursor");
+                        ui.checkbox(&mut self.filter_usbredir, "USB");
+                        ui.checkbox(&mut self.filter_webdav, "WebDAV");
+                        ui.checkbox(&mut self.filter_playback, "Playback");
                     });
                     ui.separator();
 
                     // Scrollable message list
-                    let stick = !self.traffic_viewer_paused;
-                    let now_elapsed = self.traffic.elapsed();
+                    let stick = !self.paused;
+                    let now_elapsed = traffic.elapsed();
                     egui::ScrollArea::vertical()
                         .stick_to_bottom(stick)
                         .show(ui, |ui| {
-                            for entry in &self.traffic_viewer_entries {
+                            for entry in &self.entries {
                                 // Apply channel filter
                                 let visible = match entry.channel {
-                                    "main" => self.traffic_filter_main,
-                                    "display" => self.traffic_filter_display,
-                                    "inputs" => self.traffic_filter_inputs,
-                                    "cursor" => self.traffic_filter_cursor,
-                                    "usbredir" => self.traffic_filter_usbredir,
-                                    "webdav" => self.traffic_filter_webdav,
-                                    "playback" => self.traffic_filter_playback,
+                                    "main" => self.filter_main,
+                                    "display" => self.filter_display,
+                                    "inputs" => self.filter_inputs,
+                                    "cursor" => self.filter_cursor,
+                                    "usbredir" => self.filter_usbredir,
+                                    "webdav" => self.filter_webdav,
+                                    "playback" => self.filter_playback,
                                     _ => true,
                                 };
                                 if !visible {

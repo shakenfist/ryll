@@ -17,7 +17,6 @@ use tracing::{error, info};
 
 use crate::bugreport::{
     AppSnapshot, BugReport, BugReportType, ChannelSnapshots, PedanticConfig, TrafficBuffers,
-    TrafficViewEntry,
 };
 use crate::capture::CaptureSession;
 use crate::config::{Config, ShareDirConfig, VirtualDiskConfig};
@@ -62,6 +61,7 @@ use reconnect::{forbid_retry_modal, ReconnectState};
 use resize::{resolution_notification_due, RESOLUTION_NOTIFY_DEBOUNCE};
 use stats::{BandwidthTracker, LatencyTracker, Statistics};
 use trigger_snapshot::{RegionSelectEnd, TriggerSnapshot, WindowShot};
+use ui::TrafficViewer;
 use ui_state::UiStateTracker;
 
 /// Channel buffer sizes
@@ -341,17 +341,7 @@ pub struct RyllApp {
     webdav_pick_dir_readonly: bool,
 
     // Traffic viewer state
-    show_traffic_viewer: bool,
-    traffic_viewer_entries: Vec<TrafficViewEntry>,
-    traffic_viewer_last_refresh: Instant,
-    traffic_viewer_paused: bool,
-    traffic_filter_main: bool,
-    traffic_filter_display: bool,
-    traffic_filter_inputs: bool,
-    traffic_filter_cursor: bool,
-    traffic_filter_usbredir: bool,
-    traffic_filter_webdav: bool,
-    traffic_filter_playback: bool,
+    traffic_viewer: TrafficViewer,
 
     /// Whether the "Protocol gaps" floating window is currently open.
     gaps_popup_open: bool,
@@ -767,17 +757,7 @@ impl RyllApp {
             webdav_error_time: None,
             webdav_pick_dir_rx: None,
             webdav_pick_dir_readonly: false,
-            show_traffic_viewer: false,
-            traffic_viewer_entries: Vec::new(),
-            traffic_viewer_last_refresh: Instant::now(),
-            traffic_viewer_paused: false,
-            traffic_filter_main: true,
-            traffic_filter_display: true,
-            traffic_filter_inputs: true,
-            traffic_filter_cursor: true,
-            traffic_filter_usbredir: true,
-            traffic_filter_webdav: true,
-            traffic_filter_playback: true,
+            traffic_viewer: TrafficViewer::new(),
             gaps_popup_open: false,
             show_notifications_panel: false,
             notifications_panel_was_open_last_frame: false,
@@ -1151,10 +1131,10 @@ impl eframe::App for RyllApp {
         self.gate_keyboard_focus(ctx);
         self.fit_viewport_to_surface(ctx);
         self.handle_hotkeys(ctx);
-        self.refresh_traffic_entries();
+        self.traffic_viewer.refresh(&self.traffic);
 
         self.draw_stats_bar(ui, ctx);
-        self.draw_traffic_panel(ui);
+        self.traffic_viewer.show(ui, &self.traffic);
         self.draw_notifications_panel(ui);
         self.draw_usb_panel(ui, ctx);
         self.draw_webdav_panel(ui, ctx);

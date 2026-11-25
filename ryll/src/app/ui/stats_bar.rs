@@ -356,7 +356,10 @@ impl RyllApp {
         ui.menu_button("☰", |ui| {
             ui.checkbox(&mut self.obey_guest_size, "Obey guest size hints");
             ui.separator();
-            ui.checkbox(&mut self.show_traffic_viewer, "Traffic");
+            let mut traffic_open = self.traffic_viewer.is_open();
+            if ui.checkbox(&mut traffic_open, "Traffic").changed() {
+                self.traffic_viewer.set_open(traffic_open);
+            }
             ui.checkbox(&mut self.show_usb_panel, "USB");
             ui.checkbox(&mut self.show_webdav_panel, "Folders");
             // Disabled during region selection, as

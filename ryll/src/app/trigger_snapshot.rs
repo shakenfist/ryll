@@ -273,7 +273,7 @@ impl RyllApp {
                 "menu_or_popup",
                 ctx.any_popup_open() || egui::Popup::is_any_open(ctx),
             ),
-            ("traffic_viewer", self.show_traffic_viewer),
+            ("traffic_viewer", self.traffic_viewer.is_open()),
             ("usb_panel", self.show_usb_panel),
             ("folders_panel", self.show_webdav_panel),
             ("protocol_gaps", self.gaps_popup_open),

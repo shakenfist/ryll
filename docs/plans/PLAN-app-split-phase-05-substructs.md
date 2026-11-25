@@ -365,6 +365,13 @@ Items in `app/ui/` are `pub(in crate::app)`, never `pub(super)`:
 and the callers are in `app` itself. This is `AGENTS.md:240` and
 phase 4 learned it the hard way. It applies to every step below.
 
+Each panel module stays private and re-exports its struct at the
+`ui` boundary, so `app/ui/mod.rs` gains one
+`pub(in crate::app) use <module>::<Struct>;` per step and
+`app/mod.rs` names the type as `ui::<Struct>`. Step 5a settled
+this; 5b and 5c follow it rather than making the panel modules
+public.
+
 ### Step 5a: `TrafficViewer`
 
 The template for 5b and 5c, and the shape gate (decision 6). Do
