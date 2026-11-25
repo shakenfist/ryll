@@ -498,12 +498,14 @@ pub struct StreamStats {
 /// (`SpiceVideoCodecType` in spice-protocol's `enums.h`), or
 /// `"unknown"`.
 pub fn video_codec_name(codec_type: u8) -> &'static str {
+    use shakenfist_spice_protocol::video_codec_type as codec;
+
     match codec_type {
-        1 => "mjpeg",
-        2 => "vp8",
-        3 => "h264",
-        4 => "vp9",
-        5 => "h265",
+        codec::MJPEG => "mjpeg",
+        codec::VP8 => "vp8",
+        codec::H264 => "h264",
+        codec::VP9 => "vp9",
+        codec::H265 => "h265",
         _ => "unknown",
     }
 }
