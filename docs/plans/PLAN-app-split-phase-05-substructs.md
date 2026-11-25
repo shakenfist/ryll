@@ -104,7 +104,9 @@ master plan does not mention it.
 
 The panels do not drive their own state. Channel events do.
 `self.usb_*` and `self.webdav_*` are written **41 times** from
-outside `app/ui/`:
+outside `app/ui/`. "Outside `app/ui/`" is the count's definition and
+it matters: three further writers live *inside* `app/ui/`, in other
+panels' modules, and finding 3 covers them.
 
 | Writer | USB | WebDAV |
 |--------|-----|--------|
@@ -150,10 +152,36 @@ of unrelated fields, not one cluster. WebDAV's eleven are
 contiguous.
 
 So the step order inverts: the traffic viewer goes first, because
-it is the only one of the three that is a pure field move and
-therefore the cheapest place to settle the shape. WebDAV follows
-as the template for the event API, and USB — three blocks, 20
-writers, and the two out-params — goes last.
+it is the one with the least outside it and therefore the cheapest
+place to settle the shape. WebDAV follows as the template for the
+event API, and USB — three blocks, 20 writers, and the two
+out-params — goes last.
+
+**Correction, 2026-11-25.** This finding first said the traffic
+viewer had no external writer at all, and that step 5a was "a pure
+field move the compiler can prove". Both were wrong, and step 5a's
+sub-agent stopped and said so before changing anything. The error
+was in the survey's method: its grep excluded the whole of
+`app/ui/`, which is where two of the writers live, so the result
+supported only the narrower claim that nothing outside `app/ui/`
+touches the fields.
+
+Ten of the traffic viewer's eleven fields are genuinely local to
+`ui/traffic_panel.rs`. The eleventh, the open flag, has four users
+and only one is the panel:
+
+* `ui/stats_bar.rs:359-361` — the hamburger panel menu, one
+  `ui.checkbox(&mut self.show_*, …)` per panel. This needs a
+  `&mut bool`, so a read-only accessor is not enough. It drives
+  **all three** panels' flags, so 5b and 5c are affected too.
+* `ui/keys.rs:48` — F11 toggles the traffic viewer. A read and a
+  write.
+* `trigger_snapshot.rs:276-278` — the bug-report snapshot reads
+  all three.
+* The panel itself, gating its own draw.
+
+Decision 3 says how the flag is exposed. No step in this phase is
+a pure field move.
 
 ### Finding 4 — `ui_state.rs` is a consumer the plan never saw
 
@@ -261,17 +289,40 @@ added to the struct is added in front of the code that must clear
 it. That is strictly better than today, where the reset is
 seventeen lines in another file.
 
-**3. `observe_ui_state` reads through `is_open()`, and the names
-are pinned by a test.** Each moved sub-struct gets
-`pub(in crate::app) fn is_open(&self) -> bool`. The array in
+**3. The open flag stays private behind `is_open`, `set_open` and
+`toggle`, and the element names are pinned by a test.** Each moved
+sub-struct gets all three as `pub(in crate::app)`:
+`is_open(&self) -> bool`, `set_open(&mut self, bool)` and
+`toggle(&mut self)`. The panel menu reads, offers and writes back —
+
+```rust
+let mut open = self.traffic_viewer.is_open();
+if ui.checkbox(&mut open, "Traffic").changed() {
+    self.traffic_viewer.set_open(open);
+}
+```
+
+— which costs three lines per checkbox and keeps `ui.checkbox`'s
+`&mut bool` requirement from forcing either a public field or an
+`open_mut() -> &mut bool` getter. F11 calls `toggle()`.
+
+Two alternatives were rejected. Making `open`
+`pub(in crate::app)` is the smaller diff, but the first field of
+the new struct being public is what the next field will cite.
+Leaving the three flags on `RyllApp` and moving only the other
+fields is defensible — three of the flag's four users are outside
+the panel — but it puts a conditional per panel back into
+`eframe::App::ui`, which phase 4 worked to make a flat sequence.
+
+The array in
 `observe_ui_state` keeps one line per element and its ten string
 literals unchanged; only the right-hand side changes, from
 `self.show_usb_panel` to `self.usb.is_open()`. A test asserts the
 ten names in order, so a later field rename cannot silently
-change what a bug report contains. The alternative — passing the
-sub-structs into `observe_ui_state` — was rejected because it
-makes a bug-report function's signature grow with every panel
-that moves.
+change what a bug report contains. Passing the sub-structs into
+`observe_ui_state` instead was rejected because it makes a
+bug-report function's signature grow with every panel that
+moves.
 
 **4. `UsbPanel::show` returns `UsbPanelOutcome`, not out-params.**
 One field, `open_bug_report: bool`, mirroring `SurfaceOutcome`
@@ -335,9 +386,23 @@ The seven filters are **not** to become a nested
 read once each, and a further level of field access buys no
 reader anything.
 
-Nothing outside `ui/traffic_panel.rs` touches any of these
-eleven fields — that is finding 3, and it is what makes this step
-a pure move the compiler can prove. Replace lines 770-780 of the
+Ten of these eleven fields are local to `ui/traffic_panel.rs`.
+The eleventh, `open`, has three users outside it — see finding 3
+and decision 3 — and they are all in this step:
+
+* `ui/stats_bar.rs:359`
+  (`ui.checkbox(&mut self.show_traffic_viewer, "Traffic")`, inside
+  `draw_panel_menu`) becomes the three-line read-offer-write of
+  decision 3. Leave the `obey_guest_size` checkbox above it and
+  the USB and Folders checkboxes below it alone — those two are
+  steps 5c and 5b.
+* `ui/keys.rs:48`, the F11 handler, today
+  `self.show_traffic_viewer = !self.show_traffic_viewer`, becomes
+  `self.traffic_viewer.toggle();`. Leave
+  the `region_select_active` guard around it as it is.
+* `trigger_snapshot.rs:276`, below.
+
+Replace lines 770-780 of the
 struct literal in `RyllApp::new` with
 `traffic_viewer: TrafficViewer::new(),` and give the struct a
 `new()` that reproduces exactly those initialisers (note
@@ -365,7 +430,8 @@ before the panels: it is the refresh gate phase 4 moved out of
 the old `ui` body, and the draw order in `ui` is a contract egui
 enforces that no test in the tree can see.
 
-Add `pub(in crate::app) fn is_open(&self) -> bool` and change
+Add `is_open`, `set_open` and `toggle`, all
+`pub(in crate::app)`, per decision 3, and change
 `trigger_snapshot.rs:276` to
 `("traffic_viewer", self.traffic_viewer.is_open())`. The string
 literal does not change.
@@ -412,9 +478,13 @@ Each `events.rs` handler should end up as a one-line delegation.
 Where a handler also touches non-WebDAV state (check each —
 several push notifications), that part stays in `events.rs`.
 
-Add `is_open()`, and change `trigger_snapshot.rs:278` to
+Add `is_open`, `set_open` and `toggle` per decision 3, convert
+the "Folders" checkbox at `ui/stats_bar.rs:361` to the
+read-offer-write form step 5a established, and change
+`trigger_snapshot.rs:278` to
 `("folders_panel", self.webdav.is_open())` — the literal
-`folders_panel` does not change.
+`folders_panel` does not change. WebDAV has no hotkey, so there
+is no `keys.rs` site for this panel.
 
 Give the struct a doc comment saying which of its fields
 `reset_for_session` clears and which survive a reconnect
@@ -480,10 +550,12 @@ Two things change beyond the move and the API:
   `SurfaceOutcome::open_channel_bug_report`, including where it
   sits relative to the other draw calls.
 
-The `show` call site is `mod.rs:1159`. Add `is_open()` and change
-`trigger_snapshot.rs:277` to
-`("usb_panel", self.usb.is_open())`. Add the reconnect doc
-comment risk 3 asks for.
+The `show` call site is `mod.rs:1159`. Add `is_open`, `set_open`
+and `toggle` per decision 3, convert the "USB" checkbox at
+`ui/stats_bar.rs:360`, and change `trigger_snapshot.rs:277` to
+`("usb_panel", self.usb.is_open())`. USB has no hotkey, so there
+is no `keys.rs` site. Add the reconnect doc comment risk 3 asks
+for.
 
 ### Step 5d: the contract test, the exemption, and the docs
 
@@ -674,6 +746,28 @@ the reviewer's after: back brief point 1.
       -exec wc -l {} + \
       | awk '$1 > 800 && $2 != "total" { print; bad=1 } END { exit bad }'
   ```
+
+## Execution notes
+
+**2026-11-25 (AEDT), back brief.** Decision 2 confirmed as
+written: each panel owns its channel sender, installed and reset
+by one `reset_for_session(tx)`. Decision 6's shape gate confirmed:
+step 5a is reviewed before 5b and 5c are written. Back brief point
+1 was answered when the plan was committed — full size, 37 fields
+and 41 transitions.
+
+**2026-11-25 (AEDT), finding 3 corrected before any code moved.**
+Step 5a's sub-agent stopped without changing a file, because the
+brief asserted that nothing outside `ui/traffic_panel.rs` touches
+the eleven fields and that is false: the panel menu
+(`ui/stats_bar.rs:359-361`) and F11 (`ui/keys.rs:48`) drive the
+open flags, the menu for all three panels. The survey's grep had
+excluded the whole of `app/ui/`, so it never saw two writers that
+live in sibling panel modules, and the plan then over-stated what
+the grep supported. Finding 3, decision 3 and the briefs for steps
+5a, 5b and 5c are corrected above; no step in this phase is a pure
+field move. The gate in decision 6 is what caught this, one step
+before it would have been copied three times.
 
 ## Back brief
 
