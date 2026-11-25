@@ -32,33 +32,32 @@ All four were removed from `deny.toml` and
 `.cargo/audit.toml` in September 2026, after `cargo deny`
 reported them as `advisory-not-detected`.
 
-The remaining items have been added to the
-`[advisories].ignore` list in `deny.toml` with inline
-rationale so that `cargo deny check` passes against
-`develop`. This plan tracks the debt so we can pay it down.
+In November 2026 eight more ignores were removed although
+nothing they covered had been fixed: items 1 and 4-8 below.
+Run with no ignores at all, neither scanner failed on any of
+them. All are unmaintained-status advisories against
+transitive dependencies, and cargo-deny 0.22 checks
+unmaintained and unsound advisories only for the workspace's
+direct dependencies by default, so it never reported them and
+flagged each ignore as `advisory-not-detected`; cargo audit
+reports them as warnings, which do not fail the job. The
+ignores suppressed nothing, and their presence implied a gate
+that did not exist. The debt itself is still real, so those
+items stay below under *Tracked warnings*.
 
-Each ignore entry in `deny.toml` has a matching section
-below. When an ignore is resolved, delete both the
-`deny.toml` entry and the section here in the same PR.
+The remaining items are on the `[advisories].ignore` lists
+with inline rationale so that the scanners pass against
+`develop`: both in `deny.toml`, and RUSTSEC-2023-0071 alone in
+`.cargo/audit.toml`, because cargo audit does not fail on
+RUSTSEC-2025-0134. Each list holds only what its own scanner
+fails on. This plan tracks the debt so we can pay it down.
 
-## Tracked debt
+Each ignore entry has a matching section below. When an
+ignore is resolved, delete the entry and the section here in
+the same PR. Before adding an ignore, confirm the scanner
+actually fails without it.
 
-### 1. `paste` 1.0.15 unmaintained (RUSTSEC-2024-0436)
-
-- **Ignore rationale:** the author archived the crate but
-  did not publish a fix or a CVE. A drop-in fork (`pastey`)
-  exists with the same API. `paste` reaches us transitively.
-- **Attack surface:** none direct; it is a proc-macro for
-  identifier pasting used at compile time. The risk is
-  only that it no longer receives bug fixes.
-- **Action plan:**
-  1. `cargo tree -i paste` to find direct dependents.
-  2. For each direct dependent we control, swap to `pastey`
-     if they accept the patch, or vendor-patch.
-  3. For upstream dependents we don't control, wait for
-     their migration. Re-check every 6 months.
-- **Remove ignore when:** `paste` no longer appears in
-  `cargo tree`, or the RustSec advisory is withdrawn.
+## Tracked debt: ignored advisories
 
 ### 2. `rsa` 0.9.10 Marvin timing attack (RUSTSEC-2023-0071)
 
@@ -104,9 +103,36 @@ below. When an ignore is resolved, delete both the
 - **Remove ignore when:** `rustls-pemfile` no longer
   appears in `cargo tree`.
 
+## Tracked warnings: unmaintained transitive dependencies
+
+These advisories fail neither scanner, so they carry no
+ignore: cargo audit lists them as warnings on every run, and
+cargo-deny does not check them at all. They are tracked here
+because each is still debt worth paying down. If one turns
+into a vulnerability advisory, or the crate becomes a direct
+dependency, the scanners will fail and it moves back up to
+the ignored list (or, better, gets fixed).
+
+### 1. `paste` 1.0.15 unmaintained (RUSTSEC-2024-0436)
+
+- **Rationale:** the author archived the crate but
+  did not publish a fix or a CVE. A drop-in fork (`pastey`)
+  exists with the same API. `paste` reaches us transitively.
+- **Attack surface:** none direct; it is a proc-macro for
+  identifier pasting used at compile time. The risk is
+  only that it no longer receives bug fixes.
+- **Action plan:**
+  1. `cargo tree -i paste` to find direct dependents.
+  2. For each direct dependent we control, swap to `pastey`
+     if they accept the patch, or vendor-patch.
+  3. For upstream dependents we don't control, wait for
+     their migration. Re-check every 6 months.
+- **Resolved when:** `paste` no longer appears in
+  `cargo tree`, or the RustSec advisory is withdrawn.
+
 ### 4. `ttf-parser` 0.25.1 unmaintained (RUSTSEC-2026-0192)
 
-- **Ignore rationale:** the author has declared the crate
+- **Rationale:** the author has declared the crate
   unmaintained and recommends `skrifa`. It reaches us via
   egui's font stack (`ab_glyph` -> `owned_ttf_parser` ->
   `ttf-parser`), so there is nothing to change on our side
@@ -120,12 +146,12 @@ below. When an ignore is resolved, delete both the
      another maintained parser.
   2. Re-check on each eframe upgrade (we already take these
      via renovate).
-- **Remove ignore when:** `ttf-parser` no longer appears in
+- **Resolved when:** `ttf-parser` no longer appears in
   `cargo tree`, or maintenance resumes upstream.
 
 ### 5. `zvariant` / `zbus_names` / `zvariant_derive` unmaintained (RUSTSEC-2026-0370, -0371, -0372)
 
-- **Ignore rationale:** upstream folded all three crates
+- **Rationale:** upstream folded all three crates
   into `zbus` 6.0.0 (as its `zvariant` and `names` modules)
   and stopped maintaining them standalone. They reach us via
   eframe's Linux accessibility stack (`egui-winit` ->
@@ -139,12 +165,12 @@ below. When an ignore is resolved, delete both the
   1. Track accesskit / atspi for a migration to `zbus` 6.
   2. Re-check on each eframe upgrade (we already take these
      via renovate).
-- **Remove ignore when:** `zbus` 5.x (and with it these
+- **Resolved when:** `zbus` 5.x (and with it these
   three crates) no longer appears in `cargo tree`.
 
 ### 6. `pin-utils` 0.1.1 unmaintained (RUSTSEC-2026-0441)
 
-- **Ignore rationale:** the upstream repository was archived
+- **Rationale:** the upstream repository was archived
   on 1 October 2026 after the 0.1.1 release and there is no
   successor crate, so no version bump can clear this one
   (`cargo deny` says so itself: "No safe upgrade is
@@ -153,8 +179,8 @@ below. When an ignore is resolved, delete both the
   `webrtc-util` 0.17.2 -> `nix` 0.26.4, and
   `ironrdp-connector` -> `sspi` -> `async-dnssd`. Both
   scanners read the whole lockfile rather than a feature
-  resolution, so feature-gating a path would not help even
-  where we could.
+  resolution, so feature-gating a path would not silence the
+  warning even where we could.
 - **Attack surface:** none of substance. `pin-utils` is three
   pinning macros with no parsing, I/O or arithmetic; this is
   an unmaintained-status advisory, not a vulnerability. Its
@@ -166,10 +192,8 @@ below. When an ignore is resolved, delete both the
   `tests/webrtc_h264_smoke.rs`, and the second arrives
   through `shakenfist-spice-rdp` behind the default-off `rdp`
   feature, which release builds do not enable. That makes
-  this a weaker-risk acceptance than items 2 and 3, which are
-  in the shipped TLS path; the ignore exists only because
-  both scanners read the lockfile rather than a feature
-  resolution.
+  this a weaker risk than items 2 and 3, which are in the
+  shipped TLS path.
 - **Action plan:**
   1. Move the renderer's `webrtc_h264_smoke` dev-dependency
      from `rtp` 0.17 onto `rtc::rtp`, which the webrtc 0.20
@@ -180,12 +204,12 @@ below. When an ignore is resolved, delete both the
   2. Track ironrdp / sspi for a release that drops
      `async-dnssd`. Re-check on each ironrdp bump; renovate
      opens those for us.
-- **Remove ignore when:** `pin-utils` no longer appears in
+- **Resolved when:** `pin-utils` no longer appears in
   `cargo tree`.
 
 ### 7. `chrono` 0.4.45 unmaintained (RUSTSEC-2026-0543)
 
-- **Ignore rationale:** the advisory (published 18 November
+- **Rationale:** the advisory (published 18 November
   2026, announced in chronotope/chrono#1768) marks every
   `chrono` version unmaintained, and `cargo deny` reports "No
   safe upgrade is available!". ryll does not use `chrono`
@@ -209,12 +233,12 @@ below. When an ignore is resolved, delete both the
      `cargo tree -i chrono` on each.
   2. If upstream does not move, consider offering that
      migration as a patch to `dav-server`.
-- **Remove ignore when:** `chrono` no longer appears in
+- **Resolved when:** `chrono` no longer appears in
   `cargo tree`.
 
 ### 8. `humantime` 2.4.0 unmaintained (RUSTSEC-2026-0542)
 
-- **Ignore rationale:** published with item 7. The advisory
+- **Rationale:** published with item 7. The advisory
   says `humantime` is unmaintained because `chrono` is, and
   covers every version; there is no safe upgrade. It reaches
   us only through `console-subscriber` 0.5.0, the latest
@@ -222,14 +246,14 @@ below. When an ignore is resolved, delete both the
 - **Attack surface:** effectively none. `console-subscriber`
   is enabled only by ryll's diagnostic `tokio-console`
   feature (`make build-tokio-console`), which release builds
-  leave out. The ignore exists because both scanners read
-  the whole lockfile rather than a feature resolution.
+  leave out. The scanners still warn because they read the
+  whole lockfile rather than a feature resolution.
 - **Action plan:** the `tokio-console` feature is due to be
   removed when the K1 hang investigation closes (see the
   comment on the feature in `ryll/Cargo.toml`); that removal
-  retires this ignore. Failing that, a `console-subscriber`
+  retires this item. Failing that, a `console-subscriber`
   release that drops `humantime`.
-- **Remove ignore when:** `humantime` no longer appears in
+- **Resolved when:** `humantime` no longer appears in
   `cargo tree`.
 
 ## Also tracked: duplicate-version warnings
@@ -288,8 +312,8 @@ practice it is the most exposed parser surface we ship.
 
 This plan is complete when:
 
-- All `[advisories].ignore` entries in `deny.toml`
-  have been removed.
+- All `[advisories].ignore` entries in `deny.toml` and
+  `.cargo/audit.toml` have been removed.
 - Each corresponding section above has been deleted from
   this plan file.
 - `cargo deny check` still passes with no ignores in place.
@@ -304,11 +328,13 @@ This plan is complete when:
 - Consider a recurring monthly cron that opens an issue if
   new advisories appear (`cargo audit` in CI produces the
   signal; we need a mechanism to route it).
-- Fail CI on a set difference between the advisory IDs in
-  `deny.toml` and those in `.cargo/audit.toml`. Forgetting
-  `.cargo/audit.toml` already turns the `cargo audit` job
-  red, but the reverse is silent, so a stale entry in either
-  file survives until someone notices by hand -- which is how
-  the September 2026 sweep above found its four. A periodic
-  run with an empty ignore list would surface the same thing
-  from the other side, as IDs reported `advisory-not-detected`.
+- Fail CI on an ignore that suppresses nothing. A stale
+  entry survives until someone notices by hand -- which is
+  how the September 2026 sweep found its four and the
+  November 2026 one its eight. cargo-deny already names them
+  as `advisory-not-detected`; for `.cargo/audit.toml`, a run
+  with the list emptied shows which IDs still fail. The
+  lists deliberately differ (see *Situation*), so a set
+  difference between them is not the right check. A
+  fleet-wide version is being planned in
+  shakenfist/development.

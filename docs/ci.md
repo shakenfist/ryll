@@ -1172,13 +1172,20 @@ The scanner jobs above enforce policy that lives in files at the
 repository root, and changing that policy has rules the files
 themselves do not state:
 
-- **Ignoring a RustSec advisory** requires adding the advisory
-  ID to *both* `deny.toml` and `.cargo/audit.toml`, with an
-  inline comment on each entry giving the rationale. Both
-  scanners run on every pull request and both must pass, so the
-  two ignore lists have to stay in sync — editing only
-  `deny.toml` produces a red `cargo audit` job. Ignores are debt
-  and should not accumulate silently.
+- **Ignoring a RustSec advisory** means adding its ID to the
+  ignore list of each scanner that actually fails on it —
+  `deny.toml` for `cargo deny`, `.cargo/audit.toml` for
+  `cargo audit` — with an inline comment giving the rationale,
+  and a section in the supply-chain follow-ups plan. The two
+  lists are not mirrors. `cargo audit` fails only on
+  vulnerabilities and warns about unmaintained and unsound
+  crates; `cargo deny` also fails on unmaintained and unsound
+  advisories, but by default only for direct dependencies. So
+  confirm a scanner fails without the entry before adding it:
+  an ignore that suppresses nothing implies a gate that does
+  not exist, and `cargo deny` reports one in its own list as
+  `advisory-not-detected`. Ignores are debt and should not
+  accumulate silently.
 - **Allowing a new licence** means adding a permissive SPDX
   identifier to `deny.toml`'s `licenses.allow` array. The
   `licenses.exceptions` array is for a narrower case: a single

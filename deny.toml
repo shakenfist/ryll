@@ -9,6 +9,10 @@
 # The advisories ignore list tracks known issues we have explicitly
 # accepted. Every entry must have a URL, a rationale, and a
 # follow-up tracked in docs/plans/PLAN-supply-chain-followups.md.
+# Only add an entry that cargo-deny actually reports: unmaintained
+# and unsound advisories against transitive dependencies are out of
+# cargo-deny's default scope, and an ignore for one shows up as an
+# `advisory-not-detected` warning instead of suppressing anything.
 
 [graph]
 targets = [
@@ -21,12 +25,6 @@ targets = [
 version = 2
 yanked = "deny"
 ignore = [
-    # RUSTSEC-2024-0436: paste crate unmaintained.
-    # Transitive dependency. Drop-in replacement `pastey` exists.
-    # Tracked in PLAN-supply-chain-followups.md.
-    # https://rustsec.org/advisories/RUSTSEC-2024-0436
-    "RUSTSEC-2024-0436",
-
     # RUSTSEC-2023-0071: rsa Marvin timing attack.
     # No fixed version available in the ecosystem yet. Exploitation
     # requires local timing observation of the SPICE client;
@@ -37,52 +35,12 @@ ignore = [
 
     # RUSTSEC-2025-0134: rustls-pemfile unmaintained.
     # Upstream archived; functionality moved into rustls-pki-types
-    # 1.9.0+. Migration is a code change in our TLS setup.
-    # Tracked in PLAN-supply-chain-followups.md.
+    # 1.9.0+. Migration is a code change in our TLS setup. Needed
+    # here only: cargo-deny checks unmaintained advisories for
+    # direct dependencies, and rustls-pemfile is one; cargo audit
+    # merely warns. Tracked in PLAN-supply-chain-followups.md.
     # https://rustsec.org/advisories/RUSTSEC-2025-0134
     "RUSTSEC-2025-0134",
-
-    # RUSTSEC-2026-0192: ttf-parser unmaintained. Reaches us via
-    # egui's font stack (ab_glyph -> owned_ttf_parser). No upstream
-    # fix until egui migrates (skrifa is the suggested successor).
-    # Tracked in PLAN-supply-chain-followups.md.
-    # https://rustsec.org/advisories/RUSTSEC-2026-0192
-    "RUSTSEC-2026-0192",
-
-    # RUSTSEC-2026-0370, -0371, -0372: zvariant, zbus_names and
-    # zvariant_derive unmaintained; folded into zbus 6.0.0. Reach us
-    # via eframe's Linux accessibility stack (eframe -> accesskit_unix
-    # -> atspi -> zbus 5). No fix until accesskit moves to zbus 6.
-    # Tracked in PLAN-supply-chain-followups.md.
-    # https://rustsec.org/advisories/RUSTSEC-2026-0370
-    # https://rustsec.org/advisories/RUSTSEC-2026-0371
-    # https://rustsec.org/advisories/RUSTSEC-2026-0372
-    "RUSTSEC-2026-0370",
-    "RUSTSEC-2026-0371",
-    "RUSTSEC-2026-0372",
-
-    # RUSTSEC-2026-0441: pin-utils unmaintained. Upstream archived
-    # after 0.1.1 and there is no successor release, so no version
-    # bump can clear it. Reaches us twice transitively:
-    # shakenfist-spice-renderer's `rtp` 0.17 dev-dependency ->
-    # webrtc-util -> nix 0.26, and ironrdp-connector -> sspi ->
-    # async-dnssd. Tracked in PLAN-supply-chain-followups.md.
-    # https://rustsec.org/advisories/RUSTSEC-2026-0441
-    "RUSTSEC-2026-0441",
-
-    # RUSTSEC-2026-0543: chrono unmaintained; no successor release.
-    # Reaches us via dav-server (the WebDAV folder-sharing server,
-    # default-on), which has no chrono-free release yet: 0.12.0
-    # still requires it. Tracked in PLAN-supply-chain-followups.md.
-    # https://rustsec.org/advisories/RUSTSEC-2026-0543
-    "RUSTSEC-2026-0543",
-
-    # RUSTSEC-2026-0542: humantime unmaintained, as a consequence
-    # of chrono. Reaches us only via console-subscriber behind the
-    # diagnostic-only `tokio-console` feature. Tracked in
-    # PLAN-supply-chain-followups.md.
-    # https://rustsec.org/advisories/RUSTSEC-2026-0542
-    "RUSTSEC-2026-0542",
 ]
 
 [licenses]
