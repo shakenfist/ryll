@@ -30,7 +30,7 @@ use shakenfist_spice_renderer::{
 use shakenfist_spice_webrtc::{WebrtcBridge, WebrtcBridgeConfig};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::server::WebState;
 
@@ -212,6 +212,18 @@ impl Default for EncoderInfra {
     }
 }
 
+/// Whether the request that entered `post_offer` at
+/// `generation_at_entry` is still the latest offer, and so still owns
+/// the shared encoder and audio slot.
+///
+/// `bridge_generation` is bumped once per bridge installed, so an
+/// unchanged counter means no later offer has reached step 7. The
+/// reaper reads the same counter for the same reason; see
+/// `crate::web::lifecycle::run_bridge_reaper`.
+fn still_the_current_offer(state: &WebState, generation_at_entry: u64) -> bool {
+    state.bridge_generation.load(Ordering::SeqCst) == generation_at_entry
+}
+
 /// `POST /offer` handler.
 ///
 /// Steps:
@@ -261,6 +273,16 @@ pub async fn post_offer(
         offer.req_type,
         offer.sdp.len()
     );
+
+    // The generation this request starts from. Only the failure path
+    // below reads it, to tell "nothing has happened since" from "a
+    // later offer has installed its own bridge", which decides
+    // whether the shared encoder and audio slot are still ours to
+    // stop. The cooldown makes that interleaving rare, not
+    // impossible: it bounds how often an offer may *start*, and this
+    // request can sit in `accept_offer` for longer than a second
+    // waiting for ICE gathering.
+    let generation_at_entry = state.bridge_generation.load(Ordering::SeqCst);
 
     // Step 1+2: replace any existing bridge.
     let old_bridge = {
@@ -364,22 +386,39 @@ pub async fn post_offer(
 
     // Step 6: SDP exchange.
     //
-    // Close the bridge explicitly on the error path. It is not in
-    // `bridge_slot` yet, so nothing else will ever reap it, and on
-    // 0.20 dropping it detaches the driver task rather than stopping
-    // it — the peer connection, its UDP sockets (one per non-loopback
-    // interface), the control-DC pump, and the input relay spawned
-    // above would all outlive the failed request. A client posting
-    // malformed SDP in a loop would accumulate them for the life of
-    // the process; the offer cooldown bounds the rate, not the total.
-    // `WebrtcBridge`'s `Drop` is a backstop for paths that forget,
-    // but here the close is awaited, so teardown is finished before
-    // the 400 goes back.
+    // Close the bridge explicitly on the error path, and stop the work
+    // started for it. It is not in `bridge_slot` yet, so nothing else
+    // will ever reap it, and on 0.20 dropping it detaches the driver
+    // task rather than stopping it — the peer connection, its UDP
+    // sockets (one per non-loopback interface), the control-DC pump,
+    // and the input relay spawned above would all outlive the failed
+    // request. A client posting malformed SDP in a loop would
+    // accumulate them for the life of the process; the offer cooldown
+    // bounds the rate, not the total. `WebrtcBridge`'s `Drop` is a
+    // backstop for paths that forget, but here the close is awaited,
+    // so teardown is finished before the 400 goes back.
+    //
+    // The encoder restarted at step 3 and the audio sender installed
+    // at step 5 are not the bridge's to drop, and a failed offer
+    // leaves them running for a viewer that does not exist — burning
+    // a core on H.264 nobody receives until the next offer restarts
+    // it. They are stopped here through the same helper the reaper
+    // uses, but only while this request is still the latest one: a
+    // later offer that has already installed its bridge owns the
+    // encoder and the audio slot now, and its session must survive
+    // this one's failure.
     let answer_sdp = match bridge.accept_offer(offer.sdp).await {
         Ok(sdp) => sdp,
         Err(e) => {
             if let Err(ce) = bridge.close().await {
                 warn!("web: closing an abandoned bridge errored: {}", ce);
+            }
+            if still_the_current_offer(&state, generation_at_entry) {
+                crate::web::lifecycle::stop_viewer_pipeline(&state).await;
+            } else {
+                debug!(
+                    "web: a later offer installed its own bridge while this one failed;                      leaving the encoder and audio slot alone"
+                );
             }
             return Err((StatusCode::BAD_REQUEST, format!("accept_offer: {}", e)));
         }
@@ -751,6 +790,97 @@ mod tests {
             "control_tx should be None after stop()"
         );
         assert!(infra.handle.is_none(), "handle should be None after stop()");
+    }
+
+    /// Seed a `WebState`'s surface mirror with a primary surface so
+    /// `EncoderInfra::restart` does not return the no-primary
+    /// sentinel. 1280x720 is arbitrary but realistic.
+    async fn seed_primary_surface(state: &WebState) {
+        let mut m = state.surface_mirror.lock().await;
+        m.apply_event(&shakenfist_spice_renderer::ChannelEvent::SurfaceCreated {
+            display_channel_id: 0,
+            surface_id: 0,
+            width: 1280,
+            height: 720,
+        });
+    }
+
+    /// Install a sender in the audio slot, as a bridge's `/offer`
+    /// does, and return the matching receiver so the channel stays
+    /// open for the assertions.
+    fn install_opus_sender(state: &WebState) -> mpsc::Receiver<(Vec<u8>, u32)> {
+        let (tx, rx) = mpsc::channel::<(Vec<u8>, u32)>(4);
+        *state.active_opus_tx.lock().expect("opus slot") = Some(tx);
+        rx
+    }
+
+    /// An offer that fails `accept_offer` must not leave the encoder
+    /// and the audio pump it started running for a viewer that never
+    /// arrived. Before this was fixed they ran until the next
+    /// successful offer, encoding H.264 for nobody.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_offer_stops_the_work_it_started() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let state = Arc::new(WebState::new());
+        seed_primary_surface(&state).await;
+        let _opus_rx = install_opus_sender(&state);
+
+        // "v=0" alone is a syntactically valid start and a useless
+        // session description: the bridge gets past JSON decoding and
+        // fails in `accept_offer`, which is the path under test.
+        let res = post_offer(
+            State(Arc::clone(&state)),
+            Json(OfferReq {
+                req_type: "offer".to_string(),
+                sdp: "v=0\r\n".to_string(),
+            }),
+        )
+        .await;
+        // `OfferRes` is a response shape and derives no Debug, so the
+        // Ok arm is named rather than unwrapped.
+        match res {
+            Ok(_) => panic!("a malformed offer should be rejected"),
+            Err((status, msg)) => assert_eq!(status, StatusCode::BAD_REQUEST, "{}", msg),
+        }
+
+        assert!(
+            state.encoder.lock().await.control_tx.is_none(),
+            "the encoder restarted for the failed offer should have been stopped"
+        );
+        assert!(
+            state.active_opus_tx.lock().expect("opus slot").is_none(),
+            "the audio pump sender should have been cleared"
+        );
+    }
+
+    /// The teardown above must not reach across a newer viewer. If a
+    /// later offer has installed its bridge — which bumps
+    /// `bridge_generation` — the encoder and the audio slot belong to
+    /// that session, and a failure finishing afterwards must leave
+    /// them alone.
+    ///
+    /// Tested on the predicate rather than through `post_offer`,
+    /// because the interleaving it guards against cannot be staged
+    /// deterministically from outside: the bump has to land after the
+    /// handler has read the counter and before its `accept_offer`
+    /// returns, and a malformed offer fails that fast with no await
+    /// point in between. The predicate is the whole of the decision.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_later_offer_takes_ownership_of_the_shared_pipeline() {
+        let state = WebState::new();
+        let generation_at_entry = state.bridge_generation.load(Ordering::SeqCst);
+        assert!(
+            still_the_current_offer(&state, generation_at_entry),
+            "with no later bridge installed, the failing offer still owns the pipeline"
+        );
+
+        // Step 7 of a later offer: install a bridge, bump the counter.
+        state.bridge_generation.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            !still_the_current_offer(&state, generation_at_entry),
+            "once a later offer has installed its bridge, the pipeline is no longer ours"
+        );
     }
 
     /// Two `POST /offer` requests in rapid succession: the second

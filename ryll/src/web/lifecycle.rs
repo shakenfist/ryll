@@ -198,27 +198,51 @@ pub async fn run_bridge_reaper(state: Arc<WebState>) {
             }
         }
 
-        // Stop the encoder pipeline (sends EncoderControl::Stop,
-        // awaits the task handle with a 2s ceiling).
-        {
-            let mut enc = state.encoder.lock().await;
-            enc.stop().await;
-        }
-
-        // Clear the audio pump sender so the renderer-side
-        // WebPlaybackSink drops packets rather than building up
-        // a backlog while no viewer is attached.
-        {
-            match state.active_opus_tx.lock() {
-                Ok(mut guard) => *guard = None,
-                Err(poisoned) => {
-                    let mut inner = poisoned.into_inner();
-                    *inner = None;
-                }
-            }
-        }
+        stop_viewer_pipeline(&state).await;
 
         tracing::info!("bridge reaper: reaped; awaiting next viewer");
+    }
+}
+
+/// Stop the work a viewer's bridge was driving: the encoder pipeline
+/// and the audio pump's sender.
+///
+/// Both the reaper above and `post_offer`'s failure path need this,
+/// and for the same reason — the encoder restart and the
+/// `active_opus_tx` install happen before the bridge is known to be
+/// good, so whoever concludes that no viewer is attached has to undo
+/// them. The reaper additionally takes the bridge out of
+/// `bridge_slot`; the failure path's bridge was never in it. That is
+/// the whole of the difference, so the bridge close stays with its
+/// owner and this holds the two shared steps.
+///
+/// Lock ordering, continuing `post_offer`'s and the reaper's: this is
+/// called after any `bridge_slot` work is finished, takes `encoder`
+/// first and `active_opus_tx` second, and holds neither across the
+/// other.
+///
+/// Callers decide *whether* to call it. It stops the one encoder and
+/// clears the one audio slot the process has, so a caller that is no
+/// longer the current viewer would stop a healthy newer session's
+/// pipeline; the reaper discriminates with `bridge_generation` and so
+/// does `post_offer`.
+pub(crate) async fn stop_viewer_pipeline(state: &WebState) {
+    // Sends EncoderControl::Stop and awaits the task handle with a
+    // 2 s ceiling.
+    {
+        let mut enc = state.encoder.lock().await;
+        enc.stop().await;
+    }
+
+    // Clear the audio pump sender so the renderer-side
+    // WebPlaybackSink drops packets rather than building up a
+    // backlog while no viewer is attached.
+    match state.active_opus_tx.lock() {
+        Ok(mut guard) => *guard = None,
+        Err(poisoned) => {
+            let mut inner = poisoned.into_inner();
+            *inner = None;
+        }
     }
 }
 
@@ -262,6 +286,86 @@ mod tests {
         assert!(!reaper.is_finished(), "reaper should still be waiting");
 
         // Abort and verify the task exits.
+        reaper.abort();
+        let _ = tokio::time::timeout(Duration::from_millis(200), reaper).await;
+    }
+
+    /// Reaping a dead bridge also stops the work it was driving: the
+    /// encoder pipeline and the audio pump's sender.
+    ///
+    /// Closing the bridge alone would leave the encoder producing
+    /// H.264 for a viewer that has gone, which is the shape of the
+    /// bug `post_offer`'s failure path had. The two paths share
+    /// [`stop_viewer_pipeline`], so this is also what keeps the
+    /// reaper's half of that sharing honest.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reaping_stops_the_encoder_and_the_audio_sender() {
+        use shakenfist_spice_renderer::EncoderControl;
+        use shakenfist_spice_webrtc::{WebrtcBridge, WebrtcBridgeConfig};
+        use tokio::sync::mpsc;
+
+        let state = Arc::new(WebState::new());
+
+        // A primary surface, so the encoder restart below has
+        // dimensions to work from.
+        {
+            let mut m = state.surface_mirror.lock().await;
+            m.apply_event(&shakenfist_spice_renderer::ChannelEvent::SurfaceCreated {
+                display_channel_id: 0,
+                surface_id: 0,
+                width: 640,
+                height: 480,
+            });
+        }
+
+        // A real encoder, as `post_offer` step 3 starts, and an audio
+        // sender in the slot, as its step 5 installs.
+        let (_frame_rx, enc_control) = {
+            let mut enc = state.encoder.lock().await;
+            enc.restart(&state.surface_mirror)
+                .await
+                .expect("encoder restart")
+        };
+        let (opus_tx, _opus_rx) = mpsc::channel::<(Vec<u8>, u32)>(4);
+        *state.active_opus_tx.lock().expect("opus slot") = Some(opus_tx);
+
+        let (enc_tx, _enc_rx) = mpsc::channel::<EncoderControl>(4);
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::for_tests(enc_tx))
+            .await
+            .expect("bridge");
+        let dead = bridge.dead_signal();
+        {
+            let mut slot = state.bridge_slot.lock().await;
+            *slot = Some(bridge);
+        }
+
+        let reaper = tokio::spawn(run_bridge_reaper(Arc::clone(&state)));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        dead.raise();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let reaped = state.bridge_slot.lock().await.is_none()
+                && state.active_opus_tx.lock().expect("opus slot").is_none();
+            if reaped {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "reaper did not take the bridge out of the slot and clear the audio \
+                 sender within 5s"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // The encoder task is stopped, which closes its control
+        // channel — the one observable the reaper's own state does not
+        // expose.
+        assert!(
+            enc_control.is_closed(),
+            "the reaper left the encoder running after the viewer went"
+        );
+
         reaper.abort();
         let _ = tokio::time::timeout(Duration::from_millis(200), reaper).await;
     }
