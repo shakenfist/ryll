@@ -445,11 +445,13 @@ async fn loopback_media_flows_when_client_offers_a_narrow_codec_set() {
 /// Before the fix the pump kept encoding and writing at the frame
 /// rate for output the sender discarded, logging an unthrottled
 /// `ERROR` per packet from inside webrtc-rs; the log became unusable
-/// and the CPU was spent producing nothing. Note the trap this walks
-/// into: VP8 *is* in webrtc-rs's default codec set, so a video codec
-/// negotiates successfully and only ryll's own encoder — H.264 and
-/// nothing else — makes it unusable. "A codec was negotiated" is
-/// therefore not the question; "did *H.264* survive" is.
+/// and the CPU was spent producing nothing. The trap this used to walk
+/// into was that VP8 *is* in webrtc-rs's default codec set, so a video
+/// codec negotiated successfully and only ryll's own encoder — H.264
+/// and nothing else — made it unusable. The bridge no longer registers
+/// the default set, so a VP8-only offer now settles on no video codec
+/// at all; either way the question is "did *H.264* survive", not "was
+/// a codec negotiated".
 ///
 /// The load-bearing assertion is that the *encoder* stops. Counting
 /// received video packets does not discriminate: before the fix the
@@ -514,6 +516,21 @@ async fn loopback_video_stops_when_the_client_offers_no_h264() {
         .accept_offer(final_offer_sdp)
         .await
         .expect("server accept");
+
+    // The answer says there is no video, rather than naming a codec
+    // the bridge cannot produce. The bridge registers H.264 and Opus
+    // only, so this offer leaves its video sender with no codec at
+    // all; `accept_offer` withdraws the track, which is what lets the
+    // media section be rejected with port 0 (RFC 9429 §5.3.1) instead
+    // of failing the answer outright. Getting this wrong is not a
+    // cosmetic SDP difference: it is the whole session, since a
+    // browser with no H.264 would get a 400 from `POST /offer` and no
+    // audio, input or explanation.
+    assert!(
+        answer_sdp.lines().any(|l| l.starts_with("m=video 0 ")),
+        "the answer should reject the video m-line:\n{answer_sdp}"
+    );
+
     client
         .set_remote_answer(answer_sdp)
         .await

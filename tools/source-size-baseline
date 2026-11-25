@@ -29,4 +29,4 @@
 1915 shakenfist-spice-renderer/src/control/server.rs
 1681 shakenfist-spice-renderer/src/session.rs
 2257 shakenfist-spice-renderer/tests/control_socket.rs
-3251 shakenfist-spice-webrtc/src/bridge.rs
+3458 shakenfist-spice-webrtc/src/bridge.rs

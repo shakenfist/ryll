@@ -55,7 +55,7 @@ use webrtc::peer_connection::{
 use webrtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 
 use crate::bind_addrs::bind_addrs_for_tests;
-use crate::bridge::{register_h264, setting_engine, CONTROL_DC_LABEL, CONTROL_DC_STREAM_ID};
+use crate::bridge::{setting_engine, CONTROL_DC_LABEL, CONTROL_DC_STREAM_ID};
 use crate::gathering::{wait_for_gathering, GATHER_TIMEOUT};
 use crate::sticky::StickySignal;
 
@@ -247,23 +247,19 @@ impl TestPeerBuilder {
 
     /// Build the peer connection and add its transceivers.
     pub async fn build(self) -> Result<TestPeer> {
-        // Mirror the bridge's own codec registration exactly, so the
-        // offer/answer converges on the same payload type and both
-        // ends bind tracks to the same codec entry.
+        // The broad default set, which is what a browser offers and
+        // deliberately *not* what the bridge registers: the bridge
+        // answers with H.264 and Opus only (see
+        // `register_sendable_codecs`), and a client that offered the
+        // same narrow set could not tell a correctly narrow answer
+        // from one that simply echoed the offer.
         //
-        // In this build `register_h264` is redundant — webrtc-rs's
-        // default codecs already cover H.264 and the explicit PT 102
-        // registration is dropped as a duplicate payload type. See
-        // `register_h264_is_redundant_with_default_codecs` below,
-        // which exists to tell us if that ever stops being true.
-        // Calling it anyway keeps this peer in lockstep with the
-        // bridge rather than relying on the coincidence.
+        // The defaults cover H.264 at five payload types, including
+        // the two the bridge registers, so an H.264 session still
+        // negotiates.
         let mut media_engine = MediaEngine::default();
         match &self.narrow_codecs {
-            None => {
-                media_engine.register_default_codecs()?;
-                register_h264(&mut media_engine)?;
-            }
+            None => media_engine.register_default_codecs()?,
             Some(narrow) => register_narrow_codecs(&mut media_engine, narrow)?,
         }
 
@@ -722,7 +718,6 @@ mod tests {
         media_engine
             .register_default_codecs()
             .expect("default codecs");
-        register_h264(&mut media_engine).expect("h264");
         let pc = raw_peer(media_engine).await;
         let _dc = pc.create_data_channel("seed", None).await.expect("seed dc");
         for kind in [RtpCodecKind::Video, RtpCodecKind::Audio] {
@@ -855,74 +850,5 @@ mod tests {
         );
 
         peer.close().await.expect("close");
-    }
-
-    /// Codec lines from an SDP, in order.
-    fn codec_lines(sdp: &str) -> Vec<String> {
-        sdp.lines()
-            .filter(|l| l.starts_with("a=rtpmap:") || l.starts_with("a=fmtp:"))
-            .map(|s| s.to_owned())
-            .collect()
-    }
-
-    /// [`register_h264`] currently has no observable effect once
-    /// `register_default_codecs` has run: the defaults already
-    /// register H.264 at PT 102, and webrtc-rs drops the explicit
-    /// re-registration as a duplicate payload type. The bridge and
-    /// this module both call it anyway, on the theory that the
-    /// default codec set is feature-dependent.
-    ///
-    /// This test pins the current reality so a change is noticed.
-    ///
-    /// If it fails, `register_h264` has started to matter, and two
-    /// things need checking: that every `TestPeer` call site still
-    /// wants the bridge's exact H.264 registration (ryll's signalling
-    /// test asserts on the *bridge's* advertised codecs, so a client
-    /// that suddenly advertises different H.264 could mask a
-    /// regression), and that the payload type the video pump stamps
-    /// into RTP headers still matches what the SDP negotiated.
-    ///
-    /// Related, and deliberately not fixed here: the default PT 102
-    /// entry carries `profile-level-id=42001f`, while
-    /// `register_h264` asks for `42e01f`. Since the explicit
-    /// registration is dropped, the bridge negotiates 42001f while
-    /// its encoder emits 42e01f. Browsers tolerate the constraint-set
-    /// difference, and untangling it has not been worth the
-    /// churn.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn register_h264_is_redundant_with_default_codecs() {
-        // What TestPeer builds: defaults plus the explicit H.264.
-        let with = TestPeer::builder().build().await.expect("with h264");
-        let with_sdp = with.create_offer().await.expect("offer with");
-
-        // Defaults only, hand-rolled because the builder deliberately
-        // does not expose the choice.
-        let mut media_engine = MediaEngine::default();
-        media_engine
-            .register_default_codecs()
-            .expect("default codecs");
-        let pc = raw_peer(media_engine).await;
-        for kind in [RtpCodecKind::Video, RtpCodecKind::Audio] {
-            pc.add_transceiver_from_kind(
-                kind,
-                Some(RTCRtpTransceiverInit {
-                    direction: RTCRtpTransceiverDirection::Recvonly,
-                    ..Default::default()
-                }),
-            )
-            .await
-            .expect("transceiver");
-        }
-        let without_sdp = pc.create_offer(None).await.expect("offer without").sdp;
-
-        assert_eq!(
-            codec_lines(&with_sdp),
-            codec_lines(&without_sdp),
-            "register_h264 changed the advertised codecs; read this test's \
-             doc comment before adjusting it",
-        );
-
-        with.close().await.expect("close with");
-        pc.close().await.expect("close without");
     }
 }
