@@ -84,9 +84,9 @@ struct, so not one is removed by splitting it up:
 
 | Site | Why it defers | Sub-struct effect |
 |------|---------------|-------------------|
-| `ui/usb_panel.rs:34` (`usb_action`) | `Panel::show`'s closure holds `&mut self`; executing needs `usb_tx` and writes two error fields | **Becomes local.** Under decision 2 every field it touches is in `UsbPanel`, so the out-param goes; the deferral stays, inside one module |
-| `ui/usb_panel.rs:54` (`open_usb_bug_report`) | Targets the *bug dialog's* state via `open_bug_dialog` | **Becomes explicit.** `UsbPanel` cannot reach the dialog, so it returns `UsbPanelOutcome` — the shape `draw_surface` already uses |
-| `mod.rs:1164` (`outcome.open_channel_bug_report`) | Same cross-panel shape, already a returned outcome | Unchanged; it is the pattern being generalised |
+| `ui/usb_panel.rs:35` (`usb_action`) | `Panel::show`'s closure holds `&mut self`; executing needs `usb_tx` and writes two error fields | **Becomes local.** Under decision 2 every field it touches is in `UsbPanel`, so the out-param goes; the deferral stays, inside one module |
+| `ui/usb_panel.rs:55` (`open_usb_bug_report`) | Targets the *bug dialog's* state via `open_bug_dialog` | **Becomes explicit.** `UsbPanel` cannot reach the dialog, so it returns `UsbPanelOutcome` — the shape `draw_surface` already uses |
+| `mod.rs:1144` (`outcome.open_channel_bug_report`) | Same cross-panel shape, already a returned outcome | Unchanged; it is the pattern being generalised |
 | `ui/dialogs.rs:129` (paste error) | `if let Some(ref msg) = self.paste_error_message` holds `&self` across the closure that wants to clear it | **None.** The same borrow of the same field inside `impl DialogsState`. Fixed by `take()`, not by sub-structing |
 | `ui/region_select.rs:19` | `ctx.input(|i| …)` holds egui's input lock while the completion needs `self.notifications` | **None.** Working under egui's lock is a deadlock risk at any struct shape |
 
@@ -223,7 +223,7 @@ which is where it lands.
   window, so the call sequence this phase edits is the short
   dispatcher phase 4 promised.
 * `RyllApp::new` is 303 lines with a 133-field struct literal,
-  and carries `#[expect(clippy::too_many_lines)]` (`mod.rs:506`)
+  and carries `#[expect(clippy::too_many_lines)]` (`mod.rs:496`)
   against a threshold of 200. Moving 37 fields into 3 sub-structs
   takes the literal to about 99 lines and `new` to about 269 —
   still over 200, so the exemption stays fulfilled and the build
@@ -456,12 +456,12 @@ Same struct treatment as 5a over the eleven contiguous fields at
 `webdav_connected_at`, `webdav_error_message`,
 `webdav_error_time`, `webdav_pick_dir_rx`,
 `webdav_pick_dir_readonly`, each losing the `webdav_` prefix.
-Struct literal lines to replace in `new`: `mod.rs:727`
-(`webdav_tx`) and `:760-769`.
+Struct literal lines to replace in `new`: `mod.rs:717`
+(`webdav_tx`) and `:750-759`.
 
 `draw_webdav_panel(&mut self, ui, ctx)` becomes
 `WebdavPanel::show(&mut self, ui, ctx, …)`, called from
-`mod.rs:1160`.
+`mod.rs:1140`.
 
 Then the part that is not a move. Twenty-one field writes outside
 `ui/` become methods on `WebdavPanel`, each named for the handler
@@ -486,7 +486,7 @@ Where a handler also touches non-WebDAV state (check each —
 several push notifications), that part stays in `events.rs`.
 
 Add `is_open`, `set_open` and `toggle` per decision 3, convert
-the "Folders" checkbox at `ui/stats_bar.rs:361` to the
+the "Folders" checkbox at `ui/stats_bar.rs:363` to the
 read-offer-write form step 5a established, and change
 `trigger_snapshot.rs:278` to
 `("folders_panel", self.webdav.is_open())` — the literal
@@ -516,7 +516,7 @@ structs:
 * `mod.rs:326-328` — `usb_add_disk_rx`, `usb_add_disk_readonly`,
   `usb_add_disk_message`.
 
-Struct literal lines in `new`: `:726` (`usb_tx`) and `:753-759`.
+Struct literal lines in `new`: `:716` (`usb_tx`) and `:743-749`.
 
 The eight private helpers in `usb_panel.rs` (`poll_usb_state`,
 `draw_usb_header`, `draw_usb_channel_status`,
@@ -540,7 +540,7 @@ Event API, following 5b's shape:
 Two things change beyond the move and the API:
 
 * `usb_action` (today `&mut Option<UsbCommand>` threaded into
-  `draw_usb_device_list` and executed at `usb_panel.rs:34-52`)
+  `draw_usb_device_list` and executed at `usb_panel.rs:35-53`)
   becomes a local inside `UsbPanel::show`. Every field its
   execution touches — `error_message`, `error_time`, `connecting`,
   `disconnecting`, `tx` — is now in the same struct, so nothing
@@ -550,16 +550,16 @@ Two things change beyond the move and the API:
 * `open_usb_bug_report` (today `&mut bool`) becomes
   `UsbPanelOutcome { open_bug_report: bool }`, returned from
   `show`. The caller in `eframe::App::ui` does what
-  `usb_panel.rs:54-57` does today: read the panel's error message
+  `usb_panel.rs:55-58` does today: read the panel's error message
   for the description and call
   `self.open_bug_dialog(BugReportType::Usb, description)`. Mirror
-  how `mod.rs:1164-1168` handles
+  how `mod.rs:1144-1148` handles
   `SurfaceOutcome::open_channel_bug_report`, including where it
   sits relative to the other draw calls.
 
-The `show` call site is `mod.rs:1159`. Add `is_open`, `set_open`
+The `show` call site is `mod.rs:1139`. Add `is_open`, `set_open`
 and `toggle` per decision 3, convert the "USB" checkbox at
-`ui/stats_bar.rs:360`, and change `trigger_snapshot.rs:277` to
+`ui/stats_bar.rs:362`, and change `trigger_snapshot.rs:277` to
 `("usb_panel", self.usb.is_open())`. USB has no hotkey, so there
 is no `keys.rs` site. Add the reconnect doc comment risk 3 asks
 for.
@@ -577,7 +577,7 @@ silently change what a bug report contains.
 what makes that page checkable.
 
 Rewrite the `reason` on `RyllApp::new`'s
-`#[expect(clippy::too_many_lines)]` (`mod.rs:506`). It currently
+`#[expect(clippy::too_many_lines)]` (`mod.rs:496`). It currently
 says "one struct literal naming every field", which is no longer
 true: say that it names every field `RyllApp` still owns
 directly, with the panel clusters constructed beside it. Do not
@@ -775,6 +775,21 @@ the grep supported. Finding 3, decision 3 and the briefs for steps
 5a, 5b and 5c are corrected above; no step in this phase is a pure
 field move. The gate in decision 6 is what caught this, one step
 before it would have been copied three times.
+
+**2026-11-25 (AEDT), line references refreshed after 5a.** Every
+`mod.rs` reference in the step briefs was recorded against the
+pre-5a tree and is now stale by a fixed amount, because 5a
+replaced eleven field declarations at `mod.rs:344` with one: the
+struct literal in `new` shifted by ten lines and the draw calls in
+`eframe::App::ui` by twenty. The field blocks 5b and 5c move sit
+above line 344 and did not move. The briefs above now carry the
+refreshed numbers. All fourteen `events.rs` and `connection.rs`
+references were re-checked and hold exactly, as do the two
+`usb_panel.rs` out-param signatures. Expect the same shift again:
+5b removes eleven more field declarations above 5c's targets, so
+5c's `mod.rs` numbers are re-checked against the tree before its
+brief is sent rather than taken from this file. Grep for the
+identifier, not the line.
 
 ## Back brief
 
