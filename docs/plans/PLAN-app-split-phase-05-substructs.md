@@ -289,11 +289,11 @@ added to the struct is added in front of the code that must clear
 it. That is strictly better than today, where the reset is
 seventeen lines in another file.
 
-**3. The open flag stays private behind `is_open`, `set_open` and
-`toggle`, and the element names are pinned by a test.** Each moved
-sub-struct gets all three as `pub(in crate::app)`:
-`is_open(&self) -> bool`, `set_open(&mut self, bool)` and
-`toggle(&mut self)`. The panel menu reads, offers and writes back —
+**3. The open flag stays private behind `is_open` and `set_open`,
+with `toggle` only where a hotkey flips it, and the element names
+are pinned by a test.** Each moved sub-struct gets
+`is_open(&self) -> bool` and `set_open(&mut self, bool)` as
+`pub(in crate::app)`. The panel menu reads, offers and writes back —
 
 ```rust
 let mut open = self.traffic_viewer.is_open();
@@ -304,7 +304,14 @@ if ui.checkbox(&mut open, "Traffic").changed() {
 
 — which costs three lines per checkbox and keeps `ui.checkbox`'s
 `&mut bool` requirement from forcing either a public field or an
-`open_mut() -> &mut bool` getter. F11 calls `toggle()`.
+`open_mut() -> &mut bool` getter.
+
+`toggle(&mut self)` is added only to a panel that something flips
+without reading it first, which in this phase is the traffic
+viewer alone: F11 calls it. WebDAV and USB have no hotkey, so a
+`toggle` on either would be an uncalled `pub(in crate::app)`
+method — dead code, which `make lint` rejects. Writing one and
+silencing the lint would be worse than not writing it.
 
 Two alternatives were rejected. Making `open`
 `pub(in crate::app)` is the smaller diff, but the first field of
@@ -485,7 +492,7 @@ Each `events.rs` handler should end up as a one-line delegation.
 Where a handler also touches non-WebDAV state (check each —
 several push notifications), that part stays in `events.rs`.
 
-Add `is_open`, `set_open` and `toggle` per decision 3, convert
+Add `is_open` and `set_open` per decision 3, convert
 the "Folders" checkbox at `ui/stats_bar.rs:363` to the
 read-offer-write form step 5a established, and change
 `trigger_snapshot.rs:278` to
@@ -557,11 +564,11 @@ Two things change beyond the move and the API:
   `SurfaceOutcome::open_channel_bug_report`, including where it
   sits relative to the other draw calls.
 
-The `show` call site is `mod.rs:1139`. Add `is_open`, `set_open`
-and `toggle` per decision 3, convert the "USB" checkbox at
+The `show` call site is `mod.rs:1139`. Add `is_open` and
+`set_open` per decision 3, convert the "USB" checkbox at
 `ui/stats_bar.rs:362`, and change `trigger_snapshot.rs:277` to
 `("usb_panel", self.usb.is_open())`. USB has no hotkey, so there
-is no `keys.rs` site. Add the reconnect doc comment risk 3 asks
+is no `keys.rs` site and no `toggle`. Add the reconnect doc comment risk 3 asks
 for.
 
 ### Step 5d: the contract test, the exemption, and the docs
@@ -643,7 +650,8 @@ as it stands on `develop`.
 compiler forces a new `pub(in crate::app)` accessor for every
 outside reader, and the easy fix for a reader that should not be
 reading panel state is to add one. Mitigation: any accessor
-beyond `is_open`, `reset_for_session` and the named transitions
+beyond `is_open`, `set_open`, `reset_for_session` and the named
+transitions
 is argued for in the pull request. The done criteria make the
 inventory greppable.
 
@@ -790,6 +798,18 @@ references were re-checked and hold exactly, as do the two
 5c's `mod.rs` numbers are re-checked against the tree before its
 brief is sent rather than taken from this file. Grep for the
 identifier, not the line.
+
+**2026-11-25 (AEDT), decision 3 corrected: no `toggle` without a
+hotkey.** Step 5b found decision 3 asking for `is_open`, `set_open`
+and `toggle` on every moved panel while the same plan said, in both
+the 5b and 5c briefs, that WebDAV and USB have no hotkey. A `toggle`
+on those two is an uncalled `pub(in crate::app)` method, so
+`make lint` fails on dead code. The agent dropped it rather than
+silencing the lint, which is right. Decision 3, risk 4 and the 5b
+and 5c briefs are corrected above; the traffic viewer keeps its
+`toggle` because F11 calls it. 5c would have hit this identically,
+so this is the second thing the decision 6 shape gate caught one
+step before it was repeated.
 
 ## Back brief
 
