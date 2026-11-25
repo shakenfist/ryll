@@ -418,7 +418,14 @@ entry point for the HTTP `/offer` handler. It:
 3. Sets the local description.
 4. Waits for ICE gathering to complete, by awaiting the sticky
    `gathered` signal raised by `BridgeEvents` (webrtc-rs 0.17's
-   `gathering_complete_promise()` does not exist in 0.20).
+   `gathering_complete_promise()` does not exist in 0.20). The wait
+   is bounded by `GATHER_TIMEOUT` (20 s) and fails with a message
+   saying how many candidates the local description had reached,
+   because this wait is on the request path: unbounded, a gathering
+   that never completed parked the `POST /offer` request, and the
+   encoder restarted for it, for the life of the process. The
+   handler answers `504 Gateway Timeout` on this error rather than
+   the `400` an unusable offer gets.
 5. Returns the fully-resolved answer SDP.
 
 ICE gathering completion is awaited so the answer already

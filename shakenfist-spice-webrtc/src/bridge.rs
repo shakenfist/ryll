@@ -20,6 +20,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use bytes::{Bytes, BytesMut};
@@ -29,6 +30,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::task::JoinHandle;
 
 use crate::bind_addrs::UdpBindPolicy;
+use crate::gathering::GATHER_TIMEOUT;
 use crate::sticky::StickySignal;
 
 // The protocol-level types come from `rtc`, the sans-io core, because
@@ -1059,7 +1061,7 @@ impl WebrtcBridge {
         let answer = self.pc.create_answer(None).await?;
         self.pc.set_local_description(answer).await?;
 
-        self.wait_for_gathering().await;
+        self.wait_for_gathering(GATHER_TIMEOUT).await?;
 
         let local_desc = self
             .pc
@@ -1186,7 +1188,7 @@ impl WebrtcBridge {
         self.video_payload_type.load(Ordering::Relaxed) != PAYLOAD_TYPE_NONE
     }
 
-    /// Wait until ICE gathering has completed.
+    /// Wait until ICE gathering has completed, or `timeout` runs out.
     ///
     /// Backed by [`BridgeEvents::on_ice_gathering_state_change`]
     /// rather than `RTCPeerConnection::gathering_complete_promise`,
@@ -1196,8 +1198,14 @@ impl WebrtcBridge {
     /// closes the lost-wakeup window that 0.17's oneshot
     /// `gathering_complete_promise` never had; see its docs for the
     /// reasoning.
-    async fn wait_for_gathering(&self) {
-        self.gathered.wait().await;
+    ///
+    /// The bound is the point: this wait is on the request path, and
+    /// an unbounded one parked `POST /offer` and the encoder restart
+    /// behind it for the life of the process. See
+    /// [`crate::gathering::wait_for_gathering`] for what the error
+    /// reports.
+    async fn wait_for_gathering(&self, timeout: Duration) -> Result<()> {
+        crate::gathering::wait_for_gathering(&self.pc, &self.gathered, timeout).await
     }
 
     /// Spawn the video pump task: consume [`EncodedFrame`]s from
@@ -2031,12 +2039,7 @@ impl WebrtcBridge {
     pub(crate) async fn create_offer_and_gather(&self) -> Result<String> {
         let offer = self.pc.create_offer(None).await?;
         self.pc.set_local_description(offer).await?;
-        crate::test_client::wait_for_gathering(
-            &self.pc,
-            &self.gathered,
-            crate::test_client::GATHER_TIMEOUT,
-        )
-        .await?;
+        self.wait_for_gathering(GATHER_TIMEOUT).await?;
         let local = self
             .pc
             .local_description()
@@ -3056,7 +3059,10 @@ mod tests {
         let answer = bridge.pc.create_answer(None).await.expect("answer");
         bridge.pc.set_local_description(answer).await.expect("sld");
 
-        bridge.wait_for_gathering().await;
+        bridge
+            .wait_for_gathering(GATHER_TIMEOUT)
+            .await
+            .expect("gathering should complete on a loopback bridge");
 
         let local = bridge
             .pc
@@ -3077,11 +3083,57 @@ mod tests {
         // late-subscriber path is covered at all — without it a
         // regression that made `wait_for_gathering` hang for late
         // callers could pass the suite.
-        tokio::time::timeout(Duration::from_millis(100), bridge.wait_for_gathering())
-            .await
-            .expect("a late wait_for_gathering must return via the sticky flag");
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            bridge.wait_for_gathering(GATHER_TIMEOUT),
+        )
+        .await
+        .expect("a late wait_for_gathering must return via the sticky flag")
+        .expect("a late wait_for_gathering must report success");
 
         client.close().await.expect("client close");
+        bridge.close().await.expect("bridge close");
+    }
+
+    /// The gathering wait gives up rather than parking forever.
+    ///
+    /// A fresh bridge has never had a local description set, so
+    /// nothing has kicked ICE gathering and the signal cannot be
+    /// raised: this is the "never completes" case, deterministically.
+    /// Before the bound, `accept_offer` awaited this signal with no
+    /// ceiling, so a wedged driver or a silent STUN server held the
+    /// `POST /offer` request — and the encoder restarted for it — for
+    /// the life of the process.
+    ///
+    /// The error has to carry [`GATHERING_TIMEOUT_ERR`]: ryll's
+    /// handler answers 504 on it rather than blaming the browser's
+    /// offer, and nothing else distinguishes the two.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_gathering_wait_is_bounded_and_says_why() {
+        let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::for_tests(tx))
+            .await
+            .expect("bridge");
+
+        let started = std::time::Instant::now();
+        let err = bridge
+            .wait_for_gathering(Duration::from_millis(200))
+            .await
+            .expect_err("gathering cannot have completed: nothing started it");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the wait should give up at its bound, not run to the test's patience"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains(crate::gathering::GATHERING_TIMEOUT_ERR),
+            "the error must be recognisable as a gathering timeout: {msg}"
+        );
+        assert!(
+            msg.contains("no local description at all"),
+            "the error should say how far gathering got: {msg}"
+        );
+
         bridge.close().await.expect("bridge close");
     }
 

@@ -212,6 +212,26 @@ impl Default for EncoderInfra {
     }
 }
 
+/// HTTP status for an `accept_offer` failure.
+///
+/// Everything `accept_offer` rejects is the browser's offer being
+/// unusable — malformed SDP, no codec in common — except a gathering
+/// timeout, which happened entirely on this side. Reporting that as
+/// `400 Bad Request` tells the operator the browser sent rubbish and
+/// tells the page to stop retrying; `504 Gateway Timeout` says what
+/// happened and reads as worth another go.
+///
+/// Matched by the sentinel the webrtc crate puts in the message, for
+/// the same reason [`RESTART_ERR_NO_PRIMARY`] is a const: the
+/// producer and the consumer have to agree on the string.
+fn accept_offer_status(msg: &str) -> StatusCode {
+    if msg.contains(shakenfist_spice_webrtc::GATHERING_TIMEOUT_ERR) {
+        StatusCode::GATEWAY_TIMEOUT
+    } else {
+        StatusCode::BAD_REQUEST
+    }
+}
+
 /// Whether the request that entered `post_offer` at
 /// `generation_at_entry` is still the latest offer, and so still owns
 /// the shared encoder and audio slot.
@@ -420,7 +440,8 @@ pub async fn post_offer(
                     "web: a later offer installed its own bridge while this one failed;                      leaving the encoder and audio slot alone"
                 );
             }
-            return Err((StatusCode::BAD_REQUEST, format!("accept_offer: {}", e)));
+            let msg = format!("accept_offer: {}", e);
+            return Err((accept_offer_status(&msg), msg));
         }
     };
 
@@ -851,6 +872,27 @@ mod tests {
         assert!(
             state.active_opus_tx.lock().expect("opus slot").is_none(),
             "the audio pump sender should have been cleared"
+        );
+    }
+
+    /// A gathering timeout is this side's failure, not the browser's,
+    /// and the handler has to say so: the page shows the status, and a
+    /// 400 would have the operator looking at the browser.
+    #[test]
+    fn a_gathering_timeout_is_a_gateway_timeout_not_a_bad_request() {
+        let timed_out = format!(
+            "accept_offer: {} within 20s: no local description at all",
+            shakenfist_spice_webrtc::GATHERING_TIMEOUT_ERR
+        );
+        assert_eq!(
+            accept_offer_status(&timed_out),
+            StatusCode::GATEWAY_TIMEOUT,
+            "a gathering timeout must not be reported as a bad offer"
+        );
+        assert_eq!(
+            accept_offer_status("accept_offer: SdpInvalidSyntax"),
+            StatusCode::BAD_REQUEST,
+            "an unusable offer is still the browser's fault"
         );
     }
 

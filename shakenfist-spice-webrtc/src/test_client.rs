@@ -56,70 +56,11 @@ use webrtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit}
 
 use crate::bind_addrs::bind_addrs_for_tests;
 use crate::bridge::{register_h264, setting_engine, CONTROL_DC_LABEL, CONTROL_DC_STREAM_ID};
+use crate::gathering::{wait_for_gathering, GATHER_TIMEOUT};
 use crate::sticky::StickySignal;
 
 /// How often [`TestPeer::wait_until_connected`] re-checks the state.
 const CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(50);
-
-/// How long [`TestPeer::offer_and_gather`] waits for ICE gathering to
-/// complete.
-///
-/// A test peer has no ICE servers, so it gathers host candidates only
-/// and finishes in milliseconds. This is not a performance budget; it
-/// exists so that a gathering which never completes fails the test
-/// with a diagnosis rather than hanging it until CI's job ceiling.
-pub(crate) const GATHER_TIMEOUT: Duration = Duration::from_secs(20);
-
-/// How long [`wait_for_gathering`] spends reading the local
-/// description for its error message. See there for why this needs a
-/// bound of its own.
-const GATHER_DIAGNOSIS_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// Wait for `gathered` to be raised, or fail after `timeout` saying how
-/// far gathering got.
-///
-/// Shared by [`TestPeer::offer_and_gather`] and the bridge's test-only
-/// offerer, which wait on the same kind of signal for the same reason.
-/// The candidate count is the useful part of the error. None at all
-/// means the peer connection's driver never acted on the gathering
-/// kick `set_local_description` sends it; some means host candidates
-/// were added but the end-of-candidates marker that moves the state to
-/// `Complete` never followed.
-///
-/// Reading the local description takes the same lock the driver
-/// holds while it works, so a wedged driver would hang the diagnosis
-/// too. It gets its own short bound, and running out of that is
-/// reported as what it is.
-pub(crate) async fn wait_for_gathering(
-    pc: &Arc<dyn PeerConnection>,
-    gathered: &StickySignal,
-    timeout: Duration,
-) -> Result<()> {
-    // Sticky wait; see `StickySignal` for the lost-wakeup reasoning
-    // this encapsulates.
-    if tokio::time::timeout(timeout, gathered.wait()).await.is_ok() {
-        return Ok(());
-    }
-
-    let progress =
-        match tokio::time::timeout(GATHER_DIAGNOSIS_TIMEOUT, pc.local_description()).await {
-            Ok(Some(desc)) => {
-                let candidates = desc
-                    .sdp
-                    .lines()
-                    .filter(|line| line.starts_with("a=candidate:"))
-                    .count();
-                format!("{candidates} candidate line(s) in the local description so far")
-            }
-            Ok(None) => "no local description at all".to_owned(),
-            Err(_) => "the peer connection did not yield its local description either, so its \
-                   driver is probably wedged holding the lock"
-                .to_owned(),
-        };
-    Err(anyhow!(
-        "ICE gathering did not complete within {timeout:?}: {progress}"
-    ))
-}
 
 /// The type [`TestPeerBuilder::on_track_hook`] accepts.
 ///
