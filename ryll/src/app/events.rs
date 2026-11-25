@@ -346,32 +346,22 @@ impl RyllApp {
 
     /// The WebDAV channel connected.
     fn handle_webdav_channel_ready(&mut self) {
-        info!("app: WebDAV channel connected");
-        self.webdav_channel_ready = true;
+        self.webdav.channel_connected();
     }
 
     /// WebDAV folder sharing started.
     fn handle_webdav_sharing_started(&mut self, path: String, read_only: bool) {
-        info!("app: WebDAV sharing started: {} (ro={})", path, read_only);
-        self.webdav_shared_dir = Some(path);
-        self.webdav_read_only = read_only;
-        self.webdav_sharing_active = true;
-        self.webdav_connected_at = Some(Instant::now());
+        self.webdav.sharing_started(path, read_only);
     }
 
     /// WebDAV folder sharing stopped.
     fn handle_webdav_sharing_stopped(&mut self) {
-        info!("app: WebDAV sharing stopped");
-        self.webdav_shared_dir = None;
-        self.webdav_sharing_active = false;
-        self.webdav_connected_at = None;
+        self.webdav.sharing_stopped();
     }
 
     /// The WebDAV channel reported an error.
     fn handle_webdav_error(&mut self, err: String) {
-        error!("app: WebDAV error: {}", err);
-        self.webdav_error_message = Some(err);
-        self.webdav_error_time = Some(Instant::now());
+        self.webdav.channel_error(err);
     }
 
     /// A paste-as-keystrokes sequence finished typing.
@@ -452,10 +442,7 @@ impl RyllApp {
             self.usb_connected_at = None;
         }
         if channel == ChannelType::Webdav {
-            self.webdav_channel_ready = false;
-            self.webdav_shared_dir = None;
-            self.webdav_sharing_active = false;
-            self.webdav_connected_at = None;
+            self.webdav.channel_disconnected();
         }
 
         // Only the critical channels drive the

@@ -138,7 +138,7 @@ impl RyllApp {
         self.last_notified_resolution = None;
         self.bandwidth = BandwidthTracker::new(byte_counter.clone());
         self.usb_tx = Some(usb_tx);
-        self.webdav_tx = Some(webdav_tx);
+        self.webdav.reset_for_session(webdav_tx);
         self.usb_channel_ready = false;
         self.usb_connecting = false;
         self.usb_disconnecting = false;
@@ -150,12 +150,6 @@ impl RyllApp {
         self.channel_snapshots = channel_snapshots;
         // The new session's drop counter starts at zero.
         self.last_seen_events_dropped = 0;
-        self.webdav_channel_ready = false;
-        self.webdav_shared_dir = None;
-        self.webdav_sharing_active = false;
-        self.webdav_connected_at = None;
-        self.webdav_error_message = None;
-        self.webdav_error_time = None;
 
         let repaint_notify = Arc::new(Notify::new());
         let connection_config: shakenfist_spice_protocol::ConnectionConfig = (&self.config).into();

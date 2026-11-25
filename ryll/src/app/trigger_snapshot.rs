@@ -275,7 +275,7 @@ impl RyllApp {
             ),
             ("traffic_viewer", self.traffic_viewer.is_open()),
             ("usb_panel", self.show_usb_panel),
-            ("folders_panel", self.show_webdav_panel),
+            ("folders_panel", self.webdav.is_open()),
             ("protocol_gaps", self.gaps_popup_open),
             ("bug_report_dialog", self.show_bug_dialog),
             ("region_select", self.region_select_active),

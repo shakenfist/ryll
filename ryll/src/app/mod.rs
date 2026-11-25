@@ -34,7 +34,7 @@ use shakenfist_spice_renderer::channels::{DisplaySize, VolumeControl};
 use shakenfist_spice_renderer::usb::UsbDeviceInfo;
 use shakenfist_spice_renderer::{
     ChannelEvent, ClipboardBackend, CursorImage, InputEvent, PointerTranslator, SessionState,
-    SessionStateRx, SurfaceMirror, UsbCommand, WebdavCommand, MOUSE_MODE_UNKNOWN,
+    SessionStateRx, SurfaceMirror, UsbCommand, MOUSE_MODE_UNKNOWN,
 };
 
 use crate::clipboard_arboard::ArboardClipboard;
@@ -61,7 +61,7 @@ use reconnect::{forbid_retry_modal, ReconnectState};
 use resize::{resolution_notification_due, RESOLUTION_NOTIFY_DEBOUNCE};
 use stats::{BandwidthTracker, LatencyTracker, Statistics};
 use trigger_snapshot::{RegionSelectEnd, TriggerSnapshot, WindowShot};
-use ui::TrafficViewer;
+use ui::{TrafficViewer, WebdavPanel};
 use ui_state::UiStateTracker;
 
 /// Channel buffer sizes
@@ -328,17 +328,7 @@ pub struct RyllApp {
     usb_add_disk_message: Option<String>,
 
     // WebDAV panel state
-    show_webdav_panel: bool,
-    webdav_tx: Option<mpsc::Sender<WebdavCommand>>,
-    webdav_channel_ready: bool,
-    webdav_shared_dir: Option<String>,
-    webdav_read_only: bool,
-    webdav_sharing_active: bool,
-    webdav_connected_at: Option<Instant>,
-    webdav_error_message: Option<String>,
-    webdav_error_time: Option<Instant>,
-    webdav_pick_dir_rx: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
-    webdav_pick_dir_readonly: bool,
+    webdav: WebdavPanel,
 
     // Traffic viewer state
     traffic_viewer: TrafficViewer,
@@ -714,7 +704,6 @@ impl RyllApp {
             channel_ends: BTreeMap::new(),
             pending_disconnect_report: None,
             usb_tx: Some(usb_tx),
-            webdav_tx: Some(webdav_tx),
             usb_channel_ready: false,
             usb_connecting: false,
             usb_disconnecting: false,
@@ -747,16 +736,7 @@ impl RyllApp {
             usb_add_disk_rx: None,
             usb_add_disk_readonly: false,
             usb_add_disk_message: None,
-            show_webdav_panel: false,
-            webdav_channel_ready: false,
-            webdav_shared_dir: None,
-            webdav_read_only: false,
-            webdav_sharing_active: false,
-            webdav_connected_at: None,
-            webdav_error_message: None,
-            webdav_error_time: None,
-            webdav_pick_dir_rx: None,
-            webdav_pick_dir_readonly: false,
+            webdav: WebdavPanel::new(webdav_tx),
             traffic_viewer: TrafficViewer::new(),
             gaps_popup_open: false,
             show_notifications_panel: false,
@@ -1137,7 +1117,7 @@ impl eframe::App for RyllApp {
         self.traffic_viewer.show(ui, &self.traffic);
         self.draw_notifications_panel(ui);
         self.draw_usb_panel(ui, ctx);
-        self.draw_webdav_panel(ui, ctx);
+        self.webdav.show(ui, ctx);
         let outcome = self.draw_surface(ui, ctx);
 
         // Open bug report dialog for channel error (two-pass)
