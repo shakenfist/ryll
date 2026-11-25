@@ -86,7 +86,7 @@ struct, so not one is removed by splitting it up:
 |------|---------------|-------------------|
 | `ui/usb_panel.rs:35` (`usb_action`) | `Panel::show`'s closure holds `&mut self`; executing needs `usb_tx` and writes two error fields | **Becomes local.** Under decision 2 every field it touches is in `UsbPanel`, so the out-param goes; the deferral stays, inside one module |
 | `ui/usb_panel.rs:55` (`open_usb_bug_report`) | Targets the *bug dialog's* state via `open_bug_dialog` | **Becomes explicit.** `UsbPanel` cannot reach the dialog, so it returns `UsbPanelOutcome` — the shape `draw_surface` already uses |
-| `mod.rs:1144` (`outcome.open_channel_bug_report`) | Same cross-panel shape, already a returned outcome | Unchanged; it is the pattern being generalised |
+| `mod.rs:1124` (`outcome.open_channel_bug_report`) | Same cross-panel shape, already a returned outcome | Unchanged; it is the pattern being generalised |
 | `ui/dialogs.rs:129` (paste error) | `if let Some(ref msg) = self.paste_error_message` holds `&self` across the closure that wants to clear it | **None.** The same borrow of the same field inside `impl DialogsState`. Fixed by `take()`, not by sub-structing |
 | `ui/region_select.rs:19` | `ctx.input(|i| …)` holds egui's input lock while the completion needs `self.notifications` | **None.** Working under egui's lock is a deadlock risk at any struct shape |
 
@@ -223,7 +223,7 @@ which is where it lands.
   window, so the call sequence this phase edits is the short
   dispatcher phase 4 promised.
 * `RyllApp::new` is 303 lines with a 133-field struct literal,
-  and carries `#[expect(clippy::too_many_lines)]` (`mod.rs:496`)
+  and carries `#[expect(clippy::too_many_lines)]` (`mod.rs:486`)
   against a threshold of 200. Moving 37 fields into 3 sub-structs
   takes the literal to about 99 lines and `new` to about 269 —
   still over 200, so the exemption stays fulfilled and the build
@@ -523,7 +523,7 @@ structs:
 * `mod.rs:326-328` — `usb_add_disk_rx`, `usb_add_disk_readonly`,
   `usb_add_disk_message`.
 
-Struct literal lines in `new`: `:716` (`usb_tx`) and `:743-749`.
+Struct literal lines in `new`: `:706` (`usb_tx`) and `:732-738`.
 
 The eight private helpers in `usb_panel.rs` (`poll_usb_state`,
 `draw_usb_header`, `draw_usb_channel_status`,
@@ -538,8 +538,8 @@ Event API, following 5b's shape:
   `handle_usb_device_connected(desc)`, `:332`
   `handle_usb_device_disconnected`, `:340`
   `handle_usb_connect_failed(err)` → one method each.
-* `events.rs:449-452`, inside `handle_disconnected` → one method.
-* `events.rs:604` `clear_usb_operation_flags` → one method; it is
+* `events.rs:439-442`, inside `handle_disconnected` → one method.
+* `events.rs:591` `clear_usb_operation_flags` → one method; it is
   already named for the transition.
 * `connection.rs:140` and `:142-148` → one
   `reset_for_session(&mut self, tx: mpsc::Sender<UsbCommand>)`.
@@ -560,13 +560,13 @@ Two things change beyond the move and the API:
   `usb_panel.rs:55-58` does today: read the panel's error message
   for the description and call
   `self.open_bug_dialog(BugReportType::Usb, description)`. Mirror
-  how `mod.rs:1144-1148` handles
+  how `mod.rs:1124-1128` handles
   `SurfaceOutcome::open_channel_bug_report`, including where it
   sits relative to the other draw calls.
 
-The `show` call site is `mod.rs:1139`. Add `is_open` and
+The `show` call site is `mod.rs:1119`. Add `is_open` and
 `set_open` per decision 3, convert the "USB" checkbox at
-`ui/stats_bar.rs:362`, and change `trigger_snapshot.rs:277` to
+`ui/stats_bar.rs:363`, and change `trigger_snapshot.rs:277` to
 `("usb_panel", self.usb.is_open())`. USB has no hotkey, so there
 is no `keys.rs` site and no `toggle`. Add the reconnect doc comment risk 3 asks
 for.
@@ -584,7 +584,7 @@ silently change what a bug report contains.
 what makes that page checkable.
 
 Rewrite the `reason` on `RyllApp::new`'s
-`#[expect(clippy::too_many_lines)]` (`mod.rs:496`). It currently
+`#[expect(clippy::too_many_lines)]` (`mod.rs:486`). It currently
 says "one struct literal naming every field", which is no longer
 true: say that it names every field `RyllApp` still owns
 directly, with the panel clusters constructed beside it. Do not
@@ -810,6 +810,20 @@ and 5c briefs are corrected above; the traffic viewer keeps its
 `toggle` because F11 calls it. 5c would have hit this identically,
 so this is the second thing the decision 6 shape gate caught one
 step before it was repeated.
+
+**2026-11-25 (AEDT), line references refreshed again after 5b.** The
+same ten-line and twenty-line shift as after 5a, for the same reason:
+5b replaced eleven field declarations at `mod.rs:331` with one. Step
+5c's and 5d's `mod.rs` numbers and three `events.rs` numbers are
+refreshed above. Two notes for the record. The first refresh, after
+5a, got the USB checkbox wrong — it reasoned the menu had grown by two
+lines when the read-offer-write form adds three, so the checkbox is at
+`ui/stats_bar.rs:363` and not `:362`. And the `events.rs` numbers that
+held across 5a did not hold across 5b, because 5b edited that file
+while 5a did not. Both say the same thing: a line number in a plan is
+a snapshot, so the step briefs now tell the implementer to grep for
+the identifier and treat the number as a hint. A future phase plan of
+this shape would do better to cite identifiers and not lines.
 
 ## Back brief
 
