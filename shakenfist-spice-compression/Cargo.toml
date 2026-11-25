@@ -14,23 +14,29 @@ workspace = true
 
 [features]
 default = ["quic", "glz", "lz", "lz4", "jpeg", "mozjpeg", "h264-decode"]
-quic = []
-glz = ["dep:tokio"]
-lz = []
-lz4 = ["dep:lz4_flex"]
+quic = ["dep:tracing"]
+glz = ["dep:anyhow", "dep:byteorder", "dep:tokio", "dep:tracing"]
+lz = ["dep:anyhow", "dep:byteorder"]
+lz4 = ["dep:lz4_flex", "dep:tracing"]
 # Image and video encoders, for SPICE servers. Independent of the
 # decoder features above, so `default-features = false, features =
 # ["encode"]` builds. LZ4 and JPEG encode images, H.264 (openh264)
 # video streams.
-encode = ["dep:lz4_flex", "dep:jpeg-encoder", "dep:openh264", "dep:openh264-sys2"]
-jpeg = ["dep:jpeg-decoder"]
+encode = [
+    "dep:anyhow",
+    "dep:lz4_flex",
+    "dep:jpeg-encoder",
+    "dep:openh264",
+    "dep:openh264-sys2",
+]
+jpeg = ["dep:jpeg-decoder", "dep:thiserror", "dep:tracing"]
 # Cross-platform SIMD-accelerated JPEG decode via the `mozjpeg`
 # crate. The `with_simd` feature on `mozjpeg-sys` is enabled by
 # default, which builds a vendored libjpeg-turbo with SIMD —
 # no runtime system dependency on libjpeg. Implies `jpeg` so the
 # `JpegDecoder` trait surface exists; the pure-Rust
 # `jpeg-decoder` crate remains the universal fallback.
-mozjpeg = ["dep:mozjpeg", "jpeg"]
+mozjpeg = ["dep:mozjpeg", "dep:libloading", "jpeg"]
 # H.264 stream decode (`H264VideoDecoder`) via openh264, which builds
 # Cisco's C++ codec from vendored source. Without it `for_stream`
 # refuses H.264 as an unsupported codec, so a consumer that leaves it
@@ -39,10 +45,26 @@ mozjpeg = ["dep:mozjpeg", "jpeg"]
 h264-decode = ["dep:openh264", "jpeg"]
 
 [dependencies]
-anyhow = "1"
-byteorder = "1"
-thiserror = "2"
-tracing = "0.1"
+# Each of these is used by feature-gated modules only, so each is
+# optional and named by the features that compile those modules. A
+# plain dependency here is not harmless: `cargo::unused_dependencies`
+# reports it in a build that leaves those features off -- an
+# encode-only consumer, which is what andris is -- and a declared
+# dependency is fetched and built whether or not anything calls it.
+#
+# `anyhow` is used by `glz.rs`, `lz.rs` and the encoders;
+# `byteorder` is read by `glz.rs` and `lz.rs`; `thiserror` by
+# `video.rs`, which `jpeg` compiles; `tracing` by `log_once.rs` and
+# the four decoders that log through it, which is the same set
+# `log_once`'s own `cfg` names.
+#
+# `anyhow` is not in the issue's list of four. A sweep of every
+# feature combination found it, which is the point of #634: the
+# combination that reveals it is one no lane built.
+anyhow = { version = "1", optional = true }
+byteorder = { version = "1", optional = true }
+thiserror = { version = "2", optional = true }
+tracing = { version = "0.1", optional = true }
 tokio = { version = "1", features = ["sync", "time"], optional = true }
 lz4_flex = { version = "0.14", optional = true }
 # Pure-Rust JPEG encoder, for `encode_spice_jpeg`. Default features
@@ -139,8 +161,12 @@ windows = { version = "0.62", features = [
 # at runtime to whatever libva (if any) is installed. Picked up
 # only on Linux; other Unix-like targets fall through to the
 # mozjpeg / pure-Rust chain.
+# Optional, and reached only through `mozjpeg`: `VaapiDecoder` lives
+# behind `cfg(all(target_os = "linux", feature = "mozjpeg"))`, so a
+# Linux build without that feature declares a dependency it cannot
+# compile a caller for.
 [target.'cfg(target_os = "linux")'.dependencies]
-libloading = "0.9"
+libloading = { version = "0.9", optional = true }
 
 [dev-dependencies]
 # GLZ tests and the manual benchmark need a runtime when this crate is

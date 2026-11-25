@@ -14,6 +14,20 @@ members = [
 unwrap_used = "warn"
 too_many_lines = "warn"
 
+# Cargo's own lints, which `-D warnings` does not reach: it promotes
+# rustc and clippy diagnostics, and these are emitted by cargo before
+# either runs. `unused_dependencies` is warn-by-default, so the lint
+# lane's encode-only build of the compression crate reported four
+# mis-declared dependencies and stayed green for months (#801).
+#
+# Denied rather than warned because the warning is only visible in a
+# feature combination no developer builds by hand; a lint nobody sees
+# is not a lint. A dependency a feature combination cannot use is
+# either optional and named by the features that use it, or it does
+# not belong in the manifest.
+[workspace.lints.cargo]
+unused_dependencies = "deny"
+
 [workspace.package]
 version = "0.3.0"
 edition = "2021"
