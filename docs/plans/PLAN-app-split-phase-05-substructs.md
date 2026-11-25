@@ -825,6 +825,30 @@ a snapshot, so the step briefs now tell the implementer to grep for
 the identifier and treat the number as a hint. A future phase plan of
 this shape would do better to cite identifiers and not lines.
 
+**2026-11-25 (AEDT), two accessors on `UsbPanel`, argued per risk
+4.** Step 5c added `device_description()` and `error_message()`,
+both returning `Option<&str>`, beyond the inventory risk 4 allows
+without argument.
+
+`device_description` exists because `ui/stats_bar.rs` draws
+"USB: {desc}" in the status bar. The survey counted writes outside
+`ui/` and so never saw it: it is a read, from a sibling module
+inside `ui/`, which is the same blind spot that stopped step 5a.
+WebDAV has no equivalent reader, which is why 5b did not surface
+it. The alternatives were leaving the field on `RyllApp`, which
+defeats the phase, or dropping the indicator, which changes what
+the user sees. A read-only accessor is the smallest surface that
+keeps both.
+
+`error_message` exists because decision 4 pins the outcome to one
+bool, so the caller reads the error itself for the bug report's
+description. The tighter alternative is an outcome of
+`Option<String>` carrying the description, needing no accessor;
+it was not taken because decision 4 names `SurfaceOutcome` as the
+model and that type has exactly this shape, a bool whose caller
+reads the description separately. Matching the pattern phase 4
+established is worth more here than the encapsulation.
+
 ## Back brief
 
 Before executing any step, back brief the operator. Three points

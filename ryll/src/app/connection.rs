@@ -137,15 +137,8 @@ impl RyllApp {
         self.pending_resolution_notify = None;
         self.last_notified_resolution = None;
         self.bandwidth = BandwidthTracker::new(byte_counter.clone());
-        self.usb_tx = Some(usb_tx);
+        self.usb.reset_for_session(usb_tx);
         self.webdav.reset_for_session(webdav_tx);
-        self.usb_channel_ready = false;
-        self.usb_connecting = false;
-        self.usb_disconnecting = false;
-        self.usb_error_message = None;
-        self.usb_error_time = None;
-        self.usb_device_description = None;
-        self.usb_connected_at = None;
         self.traffic = traffic.clone();
         self.channel_snapshots = channel_snapshots;
         // The new session's drop counter starts at zero.

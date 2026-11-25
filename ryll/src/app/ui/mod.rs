@@ -21,4 +21,5 @@ mod usb_panel;
 mod webdav_panel;
 
 pub(in crate::app) use traffic_panel::TrafficViewer;
+pub(in crate::app) use usb_panel::UsbPanel;
 pub(in crate::app) use webdav_panel::WebdavPanel;

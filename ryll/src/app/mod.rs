@@ -31,10 +31,9 @@ use crate::settings;
 use shakenfist_spice_protocol::link::H264Offer;
 use shakenfist_spice_protocol::NotifySeverity;
 use shakenfist_spice_renderer::channels::{DisplaySize, VolumeControl};
-use shakenfist_spice_renderer::usb::UsbDeviceInfo;
 use shakenfist_spice_renderer::{
     ChannelEvent, ClipboardBackend, CursorImage, InputEvent, PointerTranslator, SessionState,
-    SessionStateRx, SurfaceMirror, UsbCommand, MOUSE_MODE_UNKNOWN,
+    SessionStateRx, SurfaceMirror, MOUSE_MODE_UNKNOWN,
 };
 
 use crate::clipboard_arboard::ArboardClipboard;
@@ -61,7 +60,7 @@ use reconnect::{forbid_retry_modal, ReconnectState};
 use resize::{resolution_notification_due, RESOLUTION_NOTIFY_DEBOUNCE};
 use stats::{BandwidthTracker, LatencyTracker, Statistics};
 use trigger_snapshot::{RegionSelectEnd, TriggerSnapshot, WindowShot};
-use ui::{TrafficViewer, WebdavPanel};
+use ui::{TrafficViewer, UsbPanel, WebdavPanel};
 use ui_state::UiStateTracker;
 
 /// Channel buffer sizes
@@ -244,15 +243,8 @@ pub struct RyllApp {
     /// that ended in the same frame, not just the first.
     pending_disconnect_report: Option<PendingDisconnectReport>,
 
-    // USB command sender and state
-    usb_tx: Option<mpsc::Sender<UsbCommand>>,
-    usb_channel_ready: bool,
-    usb_connecting: bool,
-    usb_disconnecting: bool,
-    usb_error_message: Option<String>,
-    usb_error_time: Option<Instant>,
-    usb_device_description: Option<String>,
-    usb_connected_at: Option<Instant>,
+    // USB panel state, and the USB command sender it drives
+    usb: UsbPanel,
 
     // Traffic ring buffers (always active, for bug reports and traffic viewer)
     traffic: Arc<TrafficBuffers>,
@@ -315,17 +307,6 @@ pub struct RyllApp {
     region_select_active: bool,
     region_drag_start: Option<(u32, u32)>,
     region_drag_end: Option<(u32, u32)>,
-
-    // USB panel state
-    show_usb_panel: bool,
-    usb_available_devices: Vec<UsbDeviceInfo>,
-    usb_virtual_disks: Vec<(PathBuf, bool)>,
-    usb_devices_enumerated: bool,
-
-    // File picker for adding virtual disks
-    usb_add_disk_rx: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
-    usb_add_disk_readonly: bool,
-    usb_add_disk_message: Option<String>,
 
     // WebDAV panel state
     webdav: WebdavPanel,
@@ -703,14 +684,7 @@ impl RyllApp {
             last_disconnect_report_at: None,
             channel_ends: BTreeMap::new(),
             pending_disconnect_report: None,
-            usb_tx: Some(usb_tx),
-            usb_channel_ready: false,
-            usb_connecting: false,
-            usb_disconnecting: false,
-            usb_error_message: None,
-            usb_error_time: None,
-            usb_device_description: None,
-            usb_connected_at: None,
+            usb: UsbPanel::new(usb_tx, usb_virtual_disks),
             traffic,
             notifications,
             notification_snapshots: std::sync::Mutex::new(NotificationSnapshotStore::new()),
@@ -729,13 +703,6 @@ impl RyllApp {
             region_select_active: false,
             region_drag_start: None,
             region_drag_end: None,
-            show_usb_panel: false,
-            usb_available_devices: Vec::new(),
-            usb_virtual_disks,
-            usb_devices_enumerated: false,
-            usb_add_disk_rx: None,
-            usb_add_disk_readonly: false,
-            usb_add_disk_message: None,
             webdav: WebdavPanel::new(webdav_tx),
             traffic_viewer: TrafficViewer::new(),
             gaps_popup_open: false,
@@ -1116,7 +1083,14 @@ impl eframe::App for RyllApp {
         self.draw_stats_bar(ui, ctx);
         self.traffic_viewer.show(ui, &self.traffic);
         self.draw_notifications_panel(ui);
-        self.draw_usb_panel(ui, ctx);
+        let usb_outcome = self.usb.show(ui, ctx);
+
+        // Open bug report dialog for USB error (two-pass)
+        if usb_outcome.open_bug_report {
+            let description = self.usb.error_message().unwrap_or_default().to_string();
+            self.open_bug_dialog(BugReportType::Usb, description);
+        }
+
         self.webdav.show(ui, ctx);
         let outcome = self.draw_surface(ui, ctx);
 

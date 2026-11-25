@@ -168,7 +168,7 @@ impl RyllApp {
             );
         }
 
-        if let Some(ref desc) = self.usb_device_description {
+        if let Some(desc) = self.usb.device_description() {
             ui.separator();
             ui.label(format!("USB: {}", desc));
         }
@@ -360,7 +360,10 @@ impl RyllApp {
             if ui.checkbox(&mut traffic_open, "Traffic").changed() {
                 self.traffic_viewer.set_open(traffic_open);
             }
-            ui.checkbox(&mut self.show_usb_panel, "USB");
+            let mut usb_open = self.usb.is_open();
+            if ui.checkbox(&mut usb_open, "USB").changed() {
+                self.usb.set_open(usb_open);
+            }
             let mut webdav_open = self.webdav.is_open();
             if ui.checkbox(&mut webdav_open, "Folders").changed() {
                 self.webdav.set_open(webdav_open);
