@@ -267,24 +267,18 @@ impl RyllApp {
     /// and egui's claim on input, for bug reports. Called at the end of
     /// `ui`, so it sees what the frame ended with.
     pub(super) fn observe_ui_state(&mut self, ctx: &egui::Context) {
-        let elements = [
-            ("notifications_panel", self.show_notifications_panel),
-            (
-                "menu_or_popup",
-                ctx.any_popup_open() || egui::Popup::is_any_open(ctx),
-            ),
-            ("traffic_viewer", self.traffic_viewer.is_open()),
-            ("usb_panel", self.usb.is_open()),
-            ("folders_panel", self.webdav.is_open()),
-            ("protocol_gaps", self.gaps_popup_open),
-            ("bug_report_dialog", self.show_bug_dialog),
-            ("region_select", self.region_select_active),
-            ("paste_error_dialog", self.paste_error_message.is_some()),
-            (
-                "connection_modal",
-                matches!(self.reconnect_state, ReconnectState::Modal(_)),
-            ),
-        ];
+        let elements = ui_elements(UiFlags {
+            notifications_panel: self.show_notifications_panel,
+            menu_or_popup: ctx.any_popup_open() || egui::Popup::is_any_open(ctx),
+            traffic_viewer: self.traffic_viewer.is_open(),
+            usb_panel: self.usb.is_open(),
+            folders_panel: self.webdav.is_open(),
+            protocol_gaps: self.gaps_popup_open,
+            bug_report_dialog: self.show_bug_dialog,
+            region_select: self.region_select_active,
+            paste_error_dialog: self.paste_error_message.is_some(),
+            connection_modal: matches!(self.reconnect_state, ReconnectState::Modal(_)),
+        });
         self.ui_state.observe(&elements, EguiInputClaims::read(ctx));
     }
 
@@ -383,6 +377,39 @@ pub(super) fn validate_region(sx: u32, sy: u32, ex: u32, ey: u32) -> Option<Repo
     } else {
         None
     }
+}
+
+/// Whether each of ryll's panels, menus and dialogs was drawn this
+/// frame. Named fields keep each flag next to what it describes.
+struct UiFlags {
+    notifications_panel: bool,
+    menu_or_popup: bool,
+    traffic_viewer: bool,
+    usb_panel: bool,
+    folders_panel: bool,
+    protocol_gaps: bool,
+    bug_report_dialog: bool,
+    region_select: bool,
+    paste_error_dialog: bool,
+    connection_modal: bool,
+}
+
+/// Pair each flag with the name a bug report's `session.json` records
+/// for it. The names and their order are a published contract
+/// (docs/diagnostics.md), so change them only deliberately.
+fn ui_elements(flags: UiFlags) -> [(&'static str, bool); 10] {
+    [
+        ("notifications_panel", flags.notifications_panel),
+        ("menu_or_popup", flags.menu_or_popup),
+        ("traffic_viewer", flags.traffic_viewer),
+        ("usb_panel", flags.usb_panel),
+        ("folders_panel", flags.folders_panel),
+        ("protocol_gaps", flags.protocol_gaps),
+        ("bug_report_dialog", flags.bug_report_dialog),
+        ("region_select", flags.region_select),
+        ("paste_error_dialog", flags.paste_error_dialog),
+        ("connection_modal", flags.connection_modal),
+    ]
 }
 
 #[cfg(test)]
@@ -487,5 +514,59 @@ mod tests {
                 how.describe()
             );
         }
+    }
+
+    #[test]
+    fn ui_element_names_are_the_published_contract() {
+        let elements = ui_elements(UiFlags {
+            notifications_panel: false,
+            menu_or_popup: false,
+            traffic_viewer: false,
+            usb_panel: false,
+            folders_panel: false,
+            protocol_gaps: false,
+            bug_report_dialog: false,
+            region_select: false,
+            paste_error_dialog: false,
+            connection_modal: false,
+        });
+        let names: Vec<&str> = elements.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names,
+            [
+                "notifications_panel",
+                "menu_or_popup",
+                "traffic_viewer",
+                "usb_panel",
+                "folders_panel",
+                "protocol_gaps",
+                "bug_report_dialog",
+                "region_select",
+                "paste_error_dialog",
+                "connection_modal",
+            ]
+        );
+    }
+
+    #[test]
+    fn ui_element_flags_stay_with_their_names() {
+        let elements = ui_elements(UiFlags {
+            notifications_panel: false,
+            menu_or_popup: false,
+            traffic_viewer: false,
+            usb_panel: true,
+            folders_panel: false,
+            protocol_gaps: false,
+            bug_report_dialog: false,
+            region_select: false,
+            paste_error_dialog: false,
+            connection_modal: false,
+        });
+        let open: Vec<&str> = elements
+            .iter()
+            .filter(|(_, o)| *o)
+            .map(|(n, _)| *n)
+            .collect();
+        assert_eq!(open, ["usb_panel"]);
     }
 }

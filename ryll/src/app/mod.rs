@@ -468,9 +468,11 @@ impl RyllApp {
         reason = "the GUI's construction, where every long-lived handle is made \
          and cloned: the event, input, usb, webdav and resize channels, \
          the snapshot and notification stores, the repaint bridge and the \
-         connection task, and then one struct literal naming every field. \
-         The clones have to precede the moves, and splitting the literal \
-         from the setup would mean a builder for a type built once"
+         connection task, and then one struct literal for the fields \
+         RyllApp still owns directly, with the panel state constructed \
+         alongside it. The clones have to precede the moves, and \
+         splitting the literal from the setup would mean a builder for \
+         a type built once"
     )]
     pub fn new(
         cc: &eframe::CreationContext<'_>,
