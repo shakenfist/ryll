@@ -122,6 +122,7 @@ DOCKER_RUN_OFFLINE := docker run --rm --network none $(DOCKER_BASE_ARGS) $(CACHE
 
 .PHONY: all build release propose-release tag-release clean clean-testdata \
 	devcontainer fuzz-devcontainer ensure-cache fetch lock lint lint-fix test help \
+	test-crates \
 	deb rpm kasm-image web-smoke web-smoke-tls fuzz-fmt-check fuzz-fmt package-check publish-crates \
 	test-qemu test-qemu-usb test-qemu-desktop test-qemu-stop test-k1-idle \
 	macos-prereqs macos-build macos-release \
@@ -138,6 +139,7 @@ help:
 	@echo "  make propose-release X.Y.Z  - Branch, bump versions, push for PR review"
 	@echo "  make tag-release X.Y.Z      - After PR merge: tag develop, trigger release"
 	@echo "  make test                   - Run tests"
+	@echo "  make test-crates            - Run each published crate's tests standalone"
 	@echo "  make lint                   - Run rustfmt and clippy checks"
 	@echo "  make lint-fix               - Run rustfmt and clippy with auto-fix"
 	@echo "  make check-windows          - Cross-check the Windows (gnu) target"
@@ -305,6 +307,24 @@ test: fetch
 	$(DOCKER_RUN_OFFLINE) \
 		$(RYLL_IMAGE) \
 		cargo test --frozen --workspace --features shakenfist-spice-compression/encode,ryll/rdp
+
+# Run each published library crate's tests in its own cargo
+# resolution. `test` above is one invocation over the workspace, and
+# cargo unifies features across an invocation, so a library crate's
+# tests run there with whatever its siblings switch on rather than
+# with the features a crates.io consumer gets. The script says which
+# crates and which configurations, and why that difference has already
+# hidden a real failure (#633, #634).
+#
+# Separate from `test` rather than folded into it: each resolution
+# rebuilds the dependencies whose features differ, so this costs build
+# time, and keeping it its own target (and its own CI step) means a
+# failure here names the resolution rather than looking like a flaky
+# workspace test.
+test-crates: fetch
+	$(DOCKER_RUN_OFFLINE) \
+		$(RYLL_IMAGE) \
+		tools/test-crates-standalone.sh
 
 # Run linting checks (rustfmt + clippy). The first clippy turns on
 # ryll's default-off `rdp` feature, as `test` does, so the --rdp mode

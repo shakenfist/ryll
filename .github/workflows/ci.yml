@@ -216,6 +216,12 @@ jobs:
       - name: Run tests
         run: make test
 
+      # Each published library crate in its own cargo resolution, which
+      # is what a crates.io consumer builds and what the workspace
+      # invocation above cannot see. See tools/test-crates-standalone.sh.
+      - name: Run each crate's tests standalone
+        run: make test-crates
+
       - name: Build .deb package
         run: make deb
 

@@ -19,6 +19,14 @@ make release
 # Run tests
 make test
 
+# Run each published library crate's tests in its own cargo
+# resolution, as a crates.io consumer builds it. `make test` is one
+# invocation over the workspace, and cargo unifies features across an
+# invocation, so this is the only lane that sees a crate with the
+# features it has by itself. Slower than `make test`, because each
+# resolution rebuilds the dependencies whose features differ.
+make test-crates
+
 # Run linting (rustfmt + clippy)
 make lint
 
