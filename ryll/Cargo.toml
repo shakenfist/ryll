@@ -78,7 +78,14 @@ eframe = { version = "0.37", features = ["persistence"], optional = true }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
-tokio-rustls = "0.26"
+# `ring` to match the provider `main` installs, and the protocol
+# crate's choice; see the comment there. Without this the binary
+# builds aws-lc-sys as well as ring and uses only ring.
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "logging",
+    "ring",
+    "tls12",
+] }
 rustls-pemfile = "2"
 webpki-roots = "1.0"
 

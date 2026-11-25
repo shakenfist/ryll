@@ -33,7 +33,19 @@ PKG=shakenfist-spice-renderer
 FEATURES=(audio usbredir webdav encoder h264-decode mozjpeg digest-decode)
 
 # Packages that must not appear in the slim build's dependency tree.
-BANNED=(openh264 openh264-sys2 mozjpeg-sys nusb dav-server hyper cpal alsa-sys)
+# aws-lc-sys and aws-lc-rs are not gated by a renderer feature: they
+# arrived through shakenfist-spice-protocol taking tokio-rustls with
+# default features, which selects rustls's aws-lc-rs provider. They are
+# banned here because they were the last C build (and the last cmake
+# requirement) a server-role consumer of the slim renderer could not
+# switch off, and because nothing else would notice them coming back:
+# the provider is chosen by a default feature, so a future dependency
+# that takes tokio-rustls or rustls plainly would reintroduce them
+# silently. See shakenfist/ryll#593.
+BANNED=(
+    openh264 openh264-sys2 mozjpeg-sys nusb dav-server hyper cpal alsa-sys
+    aws-lc-rs aws-lc-sys
+)
 
 echo "==> clippy: ${PKG} --no-default-features"
 cargo clippy --frozen -p "${PKG}" --no-default-features --all-targets -- -D warnings
