@@ -29,10 +29,6 @@
       "sha": "7a223bb8c7f0875f3ecee14f61b63dee6c1338b2",
       "date": "2026-08-24"
     },
-    ".github/workflows/ci.yml": {
-      "sha": "560dc71f03640664b8cf967d4a139c93362d4c02",
-      "date": "2026-11-25"
-    },
     ".github/workflows/codeql-analysis.yml": {
       "sha": "975f656d8135aefe12ba2f2094d8671460ef1a8a",
       "date": "2026-10-05"
@@ -113,10 +109,6 @@
       "sha": "3745059d23bab5792a82857766ddaa4fcb85ceab",
       "date": "2026-11-23"
     },
-    "Makefile": {
-      "sha": "2c05c3fda0d2d3a07cd0fc21f4591757520a3ad4",
-      "date": "2026-11-23"
-    },
     "PLAN-TEMPLATE.md": {
       "sha": "5f63d3a6e67eafc022395259b69fb2024b71bf7d",
       "date": "2026-11-08"
@@ -149,37 +141,13 @@
       "sha": "7599137fd333be94375e64ee9b21dc8d961b3141",
       "date": "2026-11-18"
     },
-    "docs/ci.md": {
-      "sha": "d8e0e765c5af92f94259da180154c4c0963a428d",
-      "date": "2026-11-25"
-    },
-    "docs/configuration.md": {
-      "sha": "a2653c7bd1f821e3e429b5189bb43daaad22804b",
-      "date": "2026-11-18"
-    },
     "docs/control-socket-protocol.md": {
       "sha": "bfc707b33ae610c7e59d2b406be8809c6811b406",
-      "date": "2026-11-18"
-    },
-    "docs/design-decisions.md": {
-      "sha": "16491037251ab1a105b27a29dba0e17d80fa22e4",
       "date": "2026-11-18"
     },
     "docs/development-macos.md": {
       "sha": "9fef25179d5ec56bb52e4a5b5edeecadcff74097",
       "date": "2026-09-17"
-    },
-    "docs/development.md": {
-      "sha": "d40f17ea58a38db2c1db122847d890b321b491c9",
-      "date": "2026-11-23"
-    },
-    "docs/device-redirection.md": {
-      "sha": "818d3b0f56987db3b172ecb462f1ca9d6aaa2332",
-      "date": "2026-11-18"
-    },
-    "docs/diagnostics.md": {
-      "sha": "98ec3ca5b9637553afa52e34c3ed8e6bd42a51dd",
-      "date": "2026-11-18"
     },
     "docs/features.md": {
       "sha": "169359dcd7d5b54e0fd0b3dbcaff58499683e39f",
@@ -188,10 +156,6 @@
     "docs/index.md": {
       "sha": "254f28acd18d9a81b0bf85b81c2c26df83b95040",
       "date": "2026-11-23"
-    },
-    "docs/installation.md": {
-      "sha": "f4c4a9fa60c5274b07a431bc9d7c3e3479c65e5f",
-      "date": "2026-11-20"
     },
     "docs/kasm-workspace.md": {
       "sha": "2f68fd05593d2bd39db194a8f1d1ec33954149a4",
@@ -204,10 +168,6 @@
     "docs/macos-metrics-verification.md": {
       "sha": "518de92ccf3999ad33e5104a4a519d0d1fb24b51",
       "date": "2026-08-18"
-    },
-    "docs/multi-mode-parity.md": {
-      "sha": "1cb00926c8ec99fa60c979b164f5fdb50fe5d2d1",
-      "date": "2026-11-20"
     },
     "docs/portability.md": {
       "sha": "dc06c44e9d9a0e7fe4888d35adb50908ab37fc7d",
@@ -223,30 +183,6 @@
     },
     "docs/releasing.md": {
       "sha": "06471f1a44d3558d41afe8bcd1965d2ce30174ad",
-      "date": "2026-11-20"
-    },
-    "docs/rendering-pipeline.md": {
-      "sha": "dbe1322e23c9a916b31107ce0f8cdae08b97d75d",
-      "date": "2026-11-20"
-    },
-    "docs/session-lifecycle.md": {
-      "sha": "f05c2e88926402e5ed2af32686315245cc692af8",
-      "date": "2026-11-20"
-    },
-    "docs/spice-protocol.md": {
-      "sha": "0c6bf4f55bdd34f80e4e3ce46bc23232bbce986d",
-      "date": "2026-11-23"
-    },
-    "docs/troubleshooting.md": {
-      "sha": "45ffffc1e8f702a59e7171132dfb241f1d61a709",
-      "date": "2026-11-20"
-    },
-    "docs/web-frontend.md": {
-      "sha": "e22ea41a5650583371b86c29361e5b6327f0bf69",
-      "date": "2026-11-20"
-    },
-    "docs/web-mode-internals.md": {
-      "sha": "117df84c3907319d8eace4a0919b4a252716f802",
       "date": "2026-11-20"
     },
     "examples/control-socket-demo.py": {
@@ -285,14 +221,6 @@
       "sha": "965690769456476d5cc02822e4a5c005e623244b",
       "date": "2026-11-22"
     },
-    "ryll/src/app/events.rs": {
-      "sha": "da8f52f04759b46977e9cadacfab4c3b6d58cb17",
-      "date": "2026-11-22"
-    },
-    "ryll/src/app/mod.rs": {
-      "sha": "62f5b666d8d87d7915793451f3ba9d75f9153498",
-      "date": "2026-11-23"
-    },
     "ryll/src/app/notification_snapshots.rs": {
       "sha": "76c732cf34ff7fb901bd042373fd699b8bac1d1f",
       "date": "2026-10-17"
@@ -313,10 +241,6 @@
       "sha": "2bcdae8100211a0be291fc150461d53cc7f402d7",
       "date": "2026-10-17"
     },
-    "ryll/src/app/stats.rs": {
-      "sha": "f96251cdaca0ee7eabaa54b10b3f72cf2f1a2f27",
-      "date": "2026-11-03"
-    },
     "ryll/src/app/trigger_snapshot.rs": {
       "sha": "ce99613780d3e8653b585788e06183319ac587b0",
       "date": "2026-11-22"
@@ -331,10 +255,6 @@
     },
     "ryll/src/app/ui/keys.rs": {
       "sha": "8e5b51066182d0d4600ee5cd23d1fe9aa5e4727e",
-      "date": "2026-11-22"
-    },
-    "ryll/src/app/ui/mod.rs": {
-      "sha": "d381bc6fa2e08605409cbf96953b62c1f3cc7f78",
       "date": "2026-11-22"
     },
     "ryll/src/app/ui/notifications_panel.rs": {
@@ -373,14 +293,6 @@
       "sha": "f4225f528e3870b0e06b0a04238c1d0e89770517",
       "date": "2026-11-03"
     },
-    "ryll/src/bugreport.rs": {
-      "sha": "0592d2318814405563536b8e7553a0c4e5a1e7ab",
-      "date": "2026-11-23"
-    },
-    "ryll/src/capture.rs": {
-      "sha": "5294404af54d8c8782cbce9655e479b9696a356b",
-      "date": "2026-11-22"
-    },
     "ryll/src/clipboard_arboard.rs": {
       "sha": "058ef513df12824921acda54af01c9b1893f4197",
       "date": "2026-10-17"
@@ -396,14 +308,6 @@
     "ryll/src/input_egui.rs": {
       "sha": "44b5e6e108ab73c57fadd40d5e279be56694ff12",
       "date": "2026-11-03"
-    },
-    "ryll/src/main.rs": {
-      "sha": "7c9738b8ca8d1cd2dcc03012f65349c0dbbabc7e",
-      "date": "2026-11-23"
-    },
-    "ryll/src/notifications.rs": {
-      "sha": "cfd7c5df773b57965f15ed83526d46f5d217b747",
-      "date": "2026-09-18"
     },
     "ryll/src/rdp.rs": {
       "sha": "81e0ca0cc6a37d6df2e647c0133fe63ac229182c",
@@ -437,10 +341,6 @@
       "sha": "b8619914ce82816fb3f9f8897d472d6e1e32be7b",
       "date": "2026-09-23"
     },
-    "ryll/src/web/audio.rs": {
-      "sha": "e3f34ab18cc1e7f85c34abb8f44b421e0ce2e45f",
-      "date": "2026-11-03"
-    },
     "ryll/src/web/control.rs": {
       "sha": "3af3da761d733c9511595a43c84e5d140dea0291",
       "date": "2026-10-17"
@@ -449,20 +349,8 @@
       "sha": "d90e2349477fd7aabd3e8f299acb6b09821fb867",
       "date": "2026-08-18"
     },
-    "ryll/src/web/inputs.rs": {
-      "sha": "20859cf10988820c4563f24607e5e4f24875ebe0",
-      "date": "2026-11-03"
-    },
     "ryll/src/web/lifecycle.rs": {
       "sha": "fc30506987b70342599e9f4dcb0d97ce20eba1bd",
-      "date": "2026-11-03"
-    },
-    "ryll/src/web/mod.rs": {
-      "sha": "b97b31c030126cfaf504fb20d972734c30d88b79",
-      "date": "2026-08-18"
-    },
-    "ryll/src/web/server.rs": {
-      "sha": "be45530643f05bbe80986274477bbd2538db2e96",
       "date": "2026-11-03"
     },
     "ryll/src/web/signalling.rs": {
@@ -725,10 +613,6 @@
       "sha": "f72f9661d6d30f71bd234b34b97bfa954f3acfb7",
       "date": "2026-11-07"
     },
-    "shakenfist-spice-renderer/Cargo.toml": {
-      "sha": "2818e9bc9716c9a3cfe9fd1198500883d9cb6346",
-      "date": "2026-11-25"
-    },
     "shakenfist-spice-renderer/README.md": {
       "sha": "e85ae5e7398447de9a1833174114082bcd150647",
       "date": "2026-11-07"
@@ -736,10 +620,6 @@
     "shakenfist-spice-renderer/src/byte_counter.rs": {
       "sha": "43acd97960c831cc1716f3a160b017e29cbf72d0",
       "date": "2026-11-23"
-    },
-    "shakenfist-spice-renderer/src/capture_sink.rs": {
-      "sha": "42a0ad4fa92d18ac82e769de430979e664f9a4d7",
-      "date": "2026-11-07"
     },
     "shakenfist-spice-renderer/src/channels/agent_queue.rs": {
       "sha": "a950f922ebef76486b9317f7169bf0fd9248e52b",
@@ -749,20 +629,12 @@
       "sha": "cc827463f21058b34732ffb42bc4dcb120bee6c5",
       "date": "2026-11-23"
     },
-    "shakenfist-spice-renderer/src/channels/display.rs": {
-      "sha": "6edd7fee4c2ac5250d2aab2d08892e1f6685dc95",
-      "date": "2026-11-23"
-    },
     "shakenfist-spice-renderer/src/channels/inputs.rs": {
       "sha": "c04dec6af016ebf70ab1fed067fa2c4cbde511b9",
       "date": "2026-11-23"
     },
     "shakenfist-spice-renderer/src/channels/main_channel.rs": {
       "sha": "fade00f437c7cf09cd8061f6639cbc5816ddf42e",
-      "date": "2026-11-23"
-    },
-    "shakenfist-spice-renderer/src/channels/mod.rs": {
-      "sha": "a60a987735c5ac343df677eb3d3dcb3074b421f3",
       "date": "2026-11-23"
     },
     "shakenfist-spice-renderer/src/channels/playback.rs": {
@@ -865,10 +737,6 @@
       "sha": "7339aea51a0a9ff9efbb09f489e17bae62df7315",
       "date": "2026-07-21"
     },
-    "shakenfist-spice-renderer/src/metrics.rs": {
-      "sha": "445339d6ae82d256f73514797408fc441dfef8f5",
-      "date": "2026-09-19"
-    },
     "shakenfist-spice-renderer/src/mm_clock.rs": {
       "sha": "2e747d368e8c97208019aa890cab8e5b6cfafc9e",
       "date": "2026-07-21"
@@ -899,10 +767,6 @@
     },
     "shakenfist-spice-renderer/src/session_state.rs": {
       "sha": "cf5eb172a1a1a2422cfba88de023c7c3a8ebfdcc",
-      "date": "2026-11-23"
-    },
-    "shakenfist-spice-renderer/src/snapshots.rs": {
-      "sha": "40fc8a14f972859d65b59269a0636a5b3ad0c7a0",
       "date": "2026-11-23"
     },
     "shakenfist-spice-renderer/src/surface_mirror.rs": {
@@ -949,10 +813,6 @@
       "sha": "61dfb37eb973efec10fa13ff8cf9e4ea4ffde886",
       "date": "2026-11-07"
     },
-    "shakenfist-spice-renderer/tests/webrtc_h264_smoke.rs": {
-      "sha": "6ee8eb06a3e01cd7997f1e62f3ec4ec4c27d8710",
-      "date": "2026-09-19"
-    },
     "shakenfist-spice-usbredir/Cargo.toml": {
       "sha": "8339c8126af209dd7c2e165e8defd2087c88cad6",
       "date": "2026-09-19"
@@ -977,41 +837,17 @@
       "sha": "70308378d11d123fbed6f75df2e54e2e887382f8",
       "date": "2026-07-22"
     },
-    "shakenfist-spice-webrtc/Cargo.toml": {
-      "sha": "e876cb00f34e44e5e7a0d5d986155ba268b8dd48",
-      "date": "2026-11-07"
-    },
     "shakenfist-spice-webrtc/README.md": {
       "sha": "19072e84e4fdec20fad7c35b04a26db76d5e35f0",
       "date": "2026-08-02"
-    },
-    "shakenfist-spice-webrtc/src/bind_addrs.rs": {
-      "sha": "03a8a93721957eef128a027ec0505554f88223e9",
-      "date": "2026-09-19"
-    },
-    "shakenfist-spice-webrtc/src/bridge.rs": {
-      "sha": "742265fda225e785a85d4e60fb101bbd448e622e",
-      "date": "2026-11-07"
     },
     "shakenfist-spice-webrtc/src/lib.rs": {
       "sha": "f4ae5da82db95cfaf142f4bd59f52460c233d255",
       "date": "2026-09-19"
     },
-    "shakenfist-spice-webrtc/src/sticky.rs": {
-      "sha": "fd60aa65416f0231bae4b185cc18183bba6210cc",
-      "date": "2026-09-19"
-    },
-    "shakenfist-spice-webrtc/src/test_client.rs": {
-      "sha": "7c9611cbf30b9c77cdec2a4211f6bd2e2764da87",
-      "date": "2026-11-07"
-    },
     "shakenfist-spice-webrtc/tests/lifecycle.rs": {
       "sha": "358f02d4af6b88acd5491765c494aefb31f750b6",
       "date": "2026-09-19"
-    },
-    "shakenfist-spice-webrtc/tests/loopback.rs": {
-      "sha": "c9fe0c4abf2be1373a3831e00f51f94b078a6430",
-      "date": "2026-09-26"
     },
     "tools/audit/audit-range.sh": {
       "sha": "7d2ec8fd099b53103c5734e2dc3c891b409e6226",
@@ -1236,10 +1072,6 @@
     "tools/web-smoke.sh": {
       "sha": "2c7ed8d71edd16d30c2311c7e275fab8f4763232",
       "date": "2026-11-08"
-    },
-    "tools/web-soak.sh": {
-      "sha": "bf75f82ac16c0921446cd5ebdc16d9a5cc68e8de",
-      "date": "2026-11-23"
     }
   }
 }
