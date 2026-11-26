@@ -254,7 +254,7 @@ release-rdp: fetch
 # gnu triple shares the cfg(windows)/windows-sys surface with msvc,
 # so it catches the common case cheaply. The feature set matches the
 # Windows matrix legs: the default features but `capture`, and not
-# the default-off `rdp`. See docs/plans/PLAN-two-stage-ci.md.
+# the default-off `rdp`. See docs/ci.md.
 check-windows: fetch
 	$(DOCKER_RUN_OFFLINE) \
 		$(RYLL_IMAGE) \

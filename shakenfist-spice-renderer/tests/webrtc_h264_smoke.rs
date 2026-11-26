@@ -35,8 +35,9 @@
 //! `--web` ships H.264 by default on the strength of this
 //! test. If it fails (e.g. the payloader returns an error or
 //! fails to bundle SPS+PPS into a STAP-A on the IDR), the
-//! contingency is to swap to VP8 via vpx-encode; see
-//! docs/plans/PLAN-web-frontend.md.
+//! contingency is to swap to VP8 via vpx-encode. That has not
+//! been needed; docs/web-mode-internals.md ("Why H.264") records
+//! the choice.
 
 use bytes::Bytes;
 use rtp::codecs::h264::{H264Payloader, FUA_NALU_TYPE, PPS_NALU_TYPE, SPS_NALU_TYPE};

@@ -16,7 +16,7 @@
 //! `add_transceiver_from_kind`, `gathering_complete_promise`,
 //! `connection_state`). Collapsing them here meant the 0.20 port
 //! rewrote this once rather than four times across two crates. See
-//! `docs/plans/PLAN-webrtc-0.20-upgrade.md`.
+//! `docs/web-mode-internals.md`.
 //!
 //! ## Availability
 //!

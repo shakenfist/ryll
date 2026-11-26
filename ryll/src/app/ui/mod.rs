@@ -5,9 +5,8 @@
 // then unified `TopBottomPanel`/`SidePanel` into a single `Panel`
 // type and made every panel's `show` take that `&mut Ui` instead of
 // a `&Context` (`Window`s still take `&Context`). The panel/menu/
-// frame call sites in this directory carry per-change notes; this
-// completes the migration formerly tracked in
-// `docs/plans/PLAN-egui-0.34-followups.md`.
+// frame call sites in this directory carry per-change notes, and the
+// module-wide `#![allow(deprecated)]` the 0.34 bump needed is gone.
 
 mod cursor;
 mod dialogs;

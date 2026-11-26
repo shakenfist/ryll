@@ -106,7 +106,7 @@ fn main() -> Result<()> {
     // call. On Linux this is a no-op; on macOS it forces the
     // LazyLock<Instant> that backs `process.uptime_secs` so the
     // field measures from here rather than the first bug-report
-    // trigger. See `docs/plans/PLAN-macos-runtime-metrics.md`.
+    // trigger. See "Runtime metrics on macOS" in `docs/diagnostics.md`.
     shakenfist_spice_renderer::metrics::init_at_startup();
 
     // Install the shutdown handler so graceful shutdown works on all
@@ -128,7 +128,7 @@ fn main() -> Result<()> {
     // macOS resolves with both enabled and panics. Installing a default
     // explicitly at startup covers every entry path.
     // `shakenfist-spice-webrtc` no longer has a rustls dependency of its
-    // own (see docs/plans/PLAN-webrtc-0.20-upgrade.md), so this call is
+    // own (see docs/web-mode-internals.md), so this call is
     // now the only thing installing a provider for the SPICE TLS and
     // axum-server paths.
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -469,7 +469,7 @@ fn run_headless(
             "pedantic mode in headless: traffic pcap and channel-state are \
              live, but app-level snapshot (surfaces list, bandwidth, latency) \
              is not populated — that field is updated by the GUI loop only. \
-             See docs/plans/PLAN-display-draw-ops.md."
+             See docs/multi-mode-parity.md."
         );
         // `target` here becomes `ReportMetadata::target`
         // (bugreport.rs), which lands in a bug-report zip: pass
@@ -600,8 +600,8 @@ fn run_web(
     pedantic_config: Option<PedanticConfig>,
     // Web mode never opens a host window, so the GUI's
     // "obey guest size" toggle is accepted for CLI symmetry
-    // and ignored. The browser-driven viewport flow that
-    // resolves to `VDAgentMonitorsConfig` lands in 5c.
+    // and ignored. The browser's viewport message drives the
+    // guest size instead, through `VDAgentMonitorsConfig`.
     _obey_guest_size: bool,
 ) -> Result<()> {
     info!("Running in web mode");
@@ -656,7 +656,7 @@ fn run_web(
     let result = runtime.block_on(async move {
         // Idempotent rustls CryptoProvider install, matching the one in
         // `main()` above. `shakenfist-spice-webrtc` has no rustls dependency
-        // of its own (see docs/plans/PLAN-webrtc-0.20-upgrade.md), so this
+        // of its own (see docs/web-mode-internals.md), so this
         // call is what installs a provider for the SPICE TLS and axum-server
         // paths in the `--web` entry point.
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -724,9 +724,9 @@ fn run_web(
         // `run_connection` takes mpsc receivers for inputs / usb
         // / webdav / resize and an mpsc sender for the channel-
         // event stream. Web mode keeps the senders for the input
-        // and resize channels so 5c can drive them from browser
-        // messages; usb and webdav stay closed (web mode does
-        // not implement these in MVP).
+        // and resize channels so the input relay can drive them
+        // from browser messages; usb and webdav stay closed (web
+        // mode does not implement them).
         let (event_tx_mpsc, event_rx_mpsc) =
             tokio::sync::mpsc::channel::<shakenfist_spice_renderer::ChannelEvent>(
                 shakenfist_spice_renderer::session::EVENT_CHANNEL_SIZE,
@@ -777,7 +777,7 @@ fn run_web(
         drop(usb_tx);
         drop(webdav_tx);
 
-        // Event bus the 5b/5d/5e relays subscribe to. Its forwarder
+        // Event bus the surface mirror and relays subscribe to. Its forwarder
         // pulls from the renderer's mpsc and re-broadcasts so multiple
         // consumers can observe each event, and its mirror task turns
         // those events into surface mutations on the live pixel store

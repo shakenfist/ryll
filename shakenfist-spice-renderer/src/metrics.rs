@@ -572,7 +572,7 @@ mod macos {
     // `mach_task_self_` static is deprecated in favour of the `mach2`
     // crate. Both symbols are documented and stable Mach ABI; local
     // extern declarations are simpler than pulling in `mach2` for two
-    // items. See `docs/plans/PLAN-macos-runtime-metrics.md`.
+    // items. See "Runtime metrics on macOS" in `docs/diagnostics.md`.
     extern "C" {
         fn mach_port_deallocate(
             task: libc::mach_port_t,
@@ -611,8 +611,8 @@ mod macos {
     /// `mach_port_deallocate` and the array memory via `vm_deallocate`
     /// on Drop, including the panic path. The only constructor is the
     /// struct literal below; wrapping is enforced by `task_threads`
-    /// writing directly into the fields. See
-    /// `docs/plans/PLAN-macos-runtime-metrics.md`.
+    /// writing directly into the fields. See "Runtime metrics on
+    /// macOS" in `docs/diagnostics.md`.
     struct MachThreadList {
         ports: *mut libc::thread_act_t,
         count: libc::mach_msg_type_number_t,
@@ -900,8 +900,8 @@ pub fn sample(window: Duration) -> RuntimeMetrics {
 /// Idempotent and cheap; safe to call more than once. If a
 /// `sample()` already ran before `init_at_startup`, the
 /// LazyLock is already set and this call is a no-op — see
-/// `docs/plans/PLAN-macos-runtime-metrics.md` for the
-/// ordering requirement.
+/// "Runtime metrics on macOS" in `docs/diagnostics.md` for
+/// the ordering requirement.
 pub fn init_at_startup() {
     #[cfg(target_os = "macos")]
     {

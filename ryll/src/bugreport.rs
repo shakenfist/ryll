@@ -409,8 +409,8 @@ const INPUTS_BUFFER_BYTES: usize = 2 * 1024 * 1024; // weight  1
 /// per-channel weights above capture most of the diagnostic
 /// value without the dynamic shrink/grow complexity. Revisit
 /// if real-world reports show display-channel retention is
-/// still too short to be useful; the deferral is recorded as
-/// future work in `docs/plans/PLAN-session-001-feedback.md`.
+/// still too short to be useful; the reasoning is in
+/// `docs/diagnostics.md`, "Traffic Ring Buffer".
 const TOTAL_TRAFFIC_BUFFER_BYTES: usize = 50 * 1024 * 1024;
 
 // Compile-time arithmetic guard: the per-channel caps must
@@ -848,7 +848,7 @@ pub struct AppSnapshot {
     /// non-zero value implicates encoder CPU (or downstream MP4 write
     /// speed) rather than decode or socket-read when triaging a "video
     /// not keeping up" report. See
-    /// `docs/plans/PLAN-video-keeping-up.md`.
+    /// `docs/diagnostics.md` ("Diagnosing video not keeping up").
     pub video_drop_count: u64,
     /// "Video not keeping up" diagnostic: min / max / mean
     /// microseconds of mpsc-queue lag between the display channel
@@ -858,7 +858,7 @@ pub struct AppSnapshot {
     /// decode and socket-fill metrics look healthy implicates the egui
     /// loop / GUI thread as the bottleneck. Within-batch samples are
     /// correlated; `max` is the most informative single number. See
-    /// `docs/plans/PLAN-video-keeping-up.md`.
+    /// `docs/diagnostics.md` ("Diagnosing video not keeping up").
     pub image_ready_lag_recent_min_us: u32,
     pub image_ready_lag_recent_max_us: u32,
     pub image_ready_lag_recent_mean_us: u32,

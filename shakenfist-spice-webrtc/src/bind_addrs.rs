@@ -16,7 +16,7 @@
 //! undetectable by our own test suite: two Rust peers on one host
 //! both see `0.0.0.0`, agree about it, and connect happily, so
 //! `tests/loopback.rs` would stay green on a build no browser could
-//! reach. See `docs/plans/PLAN-webrtc-0.20-upgrade.md` for the
+//! reach. See `docs/web-mode-internals.md` for the
 //! full argument. This module is the fix: reproduce what 0.17 did
 //! internally, so 0.20 gets addresses that produce routable
 //! candidates.

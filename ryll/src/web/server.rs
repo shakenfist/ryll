@@ -63,22 +63,23 @@ pub struct WebState {
     /// each new viewer.
     pub encoder: Arc<Mutex<EncoderInfra>>,
     /// Sender for the [`InputEvent`] channel `run_connection`
-    /// consumes. 5c will start sending real keyboard / pointer
-    /// events here. `None` in tests / when web mode is not
-    /// actually connected to a SPICE session.
-    #[allow(dead_code)] // wired in 5c
+    /// consumes; the input relay sends the browser's keyboard
+    /// and pointer events here. `None` in tests / when web mode
+    /// is not actually connected to a SPICE session.
+    #[allow(dead_code)] // probably stale: shakenfist/ryll#791
     pub input_tx: Option<mpsc::Sender<InputEvent>>,
     /// Sender for the `(width, height)` resize channel
     /// `run_connection` plumbs into `MainChannel` to drive the
-    /// SPICE vdagent's `VDAgentMonitorsConfig` flow. 5c will
-    /// send the browser's initial viewport here.
-    #[allow(dead_code)] // wired in 5c
+    /// SPICE vdagent's `VDAgentMonitorsConfig` flow; the input
+    /// relay sends the browser's viewport size here.
+    #[allow(dead_code)] // probably stale: shakenfist/ryll#791
     pub resize_tx: Option<mpsc::Sender<shakenfist_spice_renderer::DisplaySize>>,
     /// Broadcaster for `ChannelEvent`s emitted by the renderer's
-    /// session orchestrator. 5b/5d/5e each spawn a subscriber.
+    /// session orchestrator; the surface mirror, cursor relay and
+    /// audio path each subscribe independently.
     /// `None` outside web-with-SPICE sessions (e.g. in unit
     /// tests of the HTTP layer).
-    #[allow(dead_code)] // subscribed in 5b/5d/5e
+    #[allow(dead_code)] // probably stale: shakenfist/ryll#791
     pub event_tx: Option<broadcast::Sender<ChannelEvent>>,
     /// Live pixel store rebuilt from the renderer's `ChannelEvent`
     /// stream by the apply-event task spawned in `run_web`. The
@@ -170,7 +171,7 @@ impl WebState {
     /// Construct state without renderer channels. Used by the
     /// router unit tests and by any hypothetical caller that
     /// only wants to exercise the HTTP layer without a live
-    /// SPICE session attached. The 5a `run_web` path uses
+    /// SPICE session attached. The `run_web` path uses
     /// [`Self::with_channels`] to wire the renderer.
     #[cfg(test)]
     pub fn new() -> Self {
@@ -192,8 +193,8 @@ impl WebState {
     }
 
     /// Construct state with the renderer channels populated.
-    /// 5a's `run_web` calls this after spawning `run_connection`
-    /// so the HTTP handlers (and 5b–5e relays) can find the
+    /// `run_web` calls this after spawning `run_connection`
+    /// so the HTTP handlers and the relays can find the
     /// senders.
     #[allow(clippy::too_many_arguments)]
     pub fn with_channels(

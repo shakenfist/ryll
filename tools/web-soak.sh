@@ -4,8 +4,8 @@
 # print numbers comparable with the webrtc-rs 0.20 upgrade's 0.17
 # baseline.
 #
-# The baseline lives in the "Baseline" section of
-# docs/plans/PLAN-webrtc-0.20-upgrade-phase-01-prework.md. It was
+# The baseline lives in the "What `--web` costs, measured" section of
+# docs/web-mode-internals.md. It was
 # captured with an ad-hoc sampler that was never committed, which is
 # why this script exists: the conditions it describes are only
 # reproducible if the sampling is written down rather than
@@ -257,8 +257,8 @@ host_max="$(awk -F, 'NR > 1 && $4 > m { m = $4 } END { printf "%.1f", m }' "$CSV
 
 cat <<SUMMARY
 
-web-soak summary (compare with the Baseline table in
-docs/plans/PLAN-webrtc-0.20-upgrade-phase-01-prework.md)
+web-soak summary (compare with the table in docs/web-mode-internals.md,
+"What --web costs, measured")
 
   Duration                     ${elapsed}s
   RSS start -> end             $((rss_start / 1024)) -> $((rss_end / 1024)) MB${ended_early}

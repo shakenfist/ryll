@@ -294,7 +294,7 @@ fn channel_static(name: &str) -> Option<&'static str> {
 /// steady state with a keeping-up writer the queue sits near zero;
 /// the cap exists so a slow disk burst is dropped rather than
 /// allowed to back-pressure the SPICE socket. See
-/// `docs/plans/PLAN-video-keeping-up.md`.
+/// `docs/diagnostics.md` ("Diagnosing video not keeping up").
 const PCAP_QUEUE_CAPACITY: usize = 1024;
 
 /// Direction of a queued packet.
@@ -640,7 +640,7 @@ fn chrono_now() -> String {
 /// dominated by full RGBA surface bytes (~8 MB at 1080p, ~33 MB
 /// at 4K). Eight slots absorb ~100-250 ms of encoder backlog at
 /// typical SPICE presentation rates before drops begin. See
-/// `docs/plans/PLAN-video-keeping-up.md`.
+/// `docs/diagnostics.md` ("Diagnosing video not keeping up").
 const VIDEO_QUEUE_CAPACITY: usize = 8;
 
 /// One queued frame for the encoder thread. `pixels` is
@@ -987,7 +987,7 @@ impl CaptureSession {
     /// **Caveat**: MP4 finalisation is not synchronous with
     /// `close()`. A bug report assembled within milliseconds
     /// of `close()` may see a not-yet-finalised (unplayable)
-    /// MP4. See `docs/plans/PLAN-video-keeping-up.md` for the
+    /// MP4. See decision 6 in `docs/design-decisions.md` for the
     /// trade-off.
     pub fn close(&self) {
         if self.closed.swap(true, std::sync::atomic::Ordering::SeqCst) {

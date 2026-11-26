@@ -62,8 +62,8 @@ enum BrowserMsg {
 
     /// Pointer-button press/release. `button` is the SPICE
     /// bitmask: 1=LEFT, 2=MIDDLE, 4=RIGHT (and 8/16 for
-    /// scroll-up/down — those aren't sent from 5c's MVP but
-    /// the field is wide enough).
+    /// scroll-up/down — the browser shell sends no wheel events
+    /// yet, but the field is wide enough).
     #[serde(rename = "pointer-button")]
     PointerButton {
         button: u32,

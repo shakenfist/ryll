@@ -1,4 +1,5 @@
-//! In-app notification store. See `docs/plans/PLAN-notifications.md`.
+//! In-app notification store. The design and its reasoning are in
+//! `docs/rendering-pipeline.md`, "Notifications".
 //!
 //! The store lives ryll-side; the data types
 //! (`NotificationEntry`, `NotificationSource`) live in the
