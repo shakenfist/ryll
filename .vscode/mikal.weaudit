@@ -1124,14 +1124,6 @@
       "author": "mikal"
     },
     {
-      "path": ".cargo/audit.toml",
-      "author": "mikal"
-    },
-    {
-      "path": ".cargo",
-      "author": "mikal"
-    },
-    {
       "path": ".pre-commit-config.yaml",
       "author": "mikal"
     },
@@ -1145,10 +1137,6 @@
     },
     {
       "path": "docs/index.md",
-      "author": "mikal"
-    },
-    {
-      "path": "deny.toml",
       "author": "mikal"
     },
     {

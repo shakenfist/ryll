@@ -1,10 +1,6 @@
 {
   "version": 1,
   "files": {
-    ".cargo/audit.toml": {
-      "sha": "3abc04af2797047b5da62540dc2893881d76bb1b",
-      "date": "2026-11-23"
-    },
     ".devcontainer/Dockerfile": {
       "sha": "6c9fd633d49a305acf0f3d108692db3484b46e2e",
       "date": "2026-11-08"
@@ -127,10 +123,6 @@
     },
     "clippy.toml": {
       "sha": "aae995e6645b33813fb2570d0e0819a5be05c9e3",
-      "date": "2026-11-23"
-    },
-    "deny.toml": {
-      "sha": "2d2e172949ca9c3bf384e8c08e9bb789ac2cfbc2",
       "date": "2026-11-23"
     },
     "docs/channel-diagnostics-audit.md": {
