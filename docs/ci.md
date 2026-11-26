@@ -983,6 +983,12 @@ consistency audit.
 
 ## Workflow inventory
 
+Renovate is not in this table. Dependency updates reach ryll from
+the fleet runner in shakenfist/development, which works over every
+managed repository in one pass, so ryll carries only `renovate.json`
+and no workflow of its own; see that repository's
+`docs/audits/renovate.md`.
+
 | Workflow | Purpose |
 |----------|---------|
 | `ci.yml` | Smoke tier and merge tier, the three gates, and the automated PR review |
@@ -994,7 +1000,6 @@ consistency audit.
 | `mermaid-lint.yml` | Renders every mermaid diagram in the repository's markdown; advisory, not a gate |
 | `proxmox-functional.yml` | Deploys a real Proxmox VE node and runs the SPICE HTTP CONNECT smoke checks against it; advisory, not a gate |
 | `rdp-smoke.yml` | Nightly FreeRDP against `ryll --rdp` against a QEMU guest: authentication, frames, input, reconnects, takeover and Ctrl+C; advisory, not a gate |
-| `renovate.yml` | Automated dependency updates (hourly) |
 | `export-repo-config.yml` | Daily repository configuration export |
 | `pr-re-review.yml` | Bot-triggered PR re-review (`@shakenfist-bot please re-review`) |
 | `pr-retest.yml` | Bot-triggered CI re-run (`@shakenfist-bot please retest`) |

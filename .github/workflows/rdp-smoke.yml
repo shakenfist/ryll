@@ -27,8 +27,11 @@ on:
   schedule:
     # Daily at 14:40 UTC. No other scheduled workflow uses that hour,
     # it is clear of fuzz.yml's 12:00 run and its ninety-minute budget,
-    # it is outside the busiest merge queue hours (roughly 19:00-04:00
-    # UTC), and :40 is clear of renovate.yml's hourly :00.
+    # and it is outside the busiest merge queue hours (roughly
+    # 19:00-04:00 UTC). It used to avoid renovate.yml's hourly :00 as
+    # well; that workflow is gone, and the fleet runner that replaced
+    # it runs in shakenfist/development on a VM of its own rather than
+    # on this repository's runners.
     - cron: '40 14 * * *'
   workflow_dispatch:
   pull_request:
