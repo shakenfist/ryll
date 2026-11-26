@@ -194,3 +194,10 @@ proptest = { version = "1", default-features = false, features = ["std"] }
 [[example]]
 name = "glz_references"
 required-features = ["glz"]
+
+# Installs a counting global allocator, so it is its own test binary
+# rather than a unit test: the allocator then replaces only this
+# binary's, not the one every other test in the crate runs against.
+[[test]]
+name = "glz_shared_source"
+required-features = ["glz"]

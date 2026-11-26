@@ -245,9 +245,12 @@ impl Default for GlzDictionary {
 /// clipping path does the opposite — a hit whose source runs short
 /// advances only by what it copied, so later pixels shift — which
 /// `clipped_cross_reference_leaves_next_literal_at_actual_copy_end`
-/// pins as deliberate. Both are lenient readings of a malformed
-/// stream, and which one is right is a question about the decoder's
-/// contract rather than about these two lines.
+/// pins as deliberate. A third case is a hit whose pixel offset lies
+/// past the end of its source: it copies nothing and advances
+/// nothing, the same shape as a fully clipped hit. All three are
+/// lenient readings of a malformed stream, and which one is right is
+/// a question about the decoder's contract rather than about these
+/// two lines.
 ///
 /// The clamp is what makes `out_idx <= output_size` an invariant of
 /// the decode loop instead of a property of where its `continue`
@@ -598,64 +601,6 @@ pub async fn decompress_glz(data: &[u8], dictionary: &GlzDictionary) -> Result<D
 
     DecompressedImage::new_glz(width, height, output, image_id, win_head_dist)
         .ok_or_else(|| anyhow!("GLZ image dimensions refused: {}x{}", width, height))
-}
-
-/// Counts the bytes this thread allocates, for the one test that has
-/// to observe an allocation that no decoded pixel reflects.
-///
-/// `fragmented_cross_references_share_the_source_allocation` is the
-/// only guard on the purpose of the `Arc` in the dictionary: sharing
-/// the source and cloning it per fragment produce identical output, so
-/// nothing else in this suite would notice if the clone came back.
-/// Counting is per thread and the counter is only read by that test,
-/// so tests running in parallel do not interfere.
-#[cfg(test)]
-mod alloc_counter {
-    use std::alloc::{GlobalAlloc, Layout, System};
-    use std::cell::Cell;
-
-    thread_local! {
-        static BYTES: Cell<usize> = const { Cell::new(0) };
-    }
-
-    pub struct Counting;
-
-    // SAFETY: every method forwards to `System` with the layout it was
-    // given; the counter is a thread-local `Cell<usize>` with a const
-    // initialiser, so no allocation happens inside the allocator.
-    unsafe impl GlobalAlloc for Counting {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            add(layout.size());
-            unsafe { System.alloc(layout) }
-        }
-
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            unsafe { System.dealloc(ptr, layout) }
-        }
-
-        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-            add(new_size);
-            unsafe { System.realloc(ptr, layout, new_size) }
-        }
-    }
-
-    fn add(bytes: usize) {
-        // `try_with` rather than `with`: during thread teardown the
-        // thread-local is gone and an allocation there must not panic.
-        let _ = BYTES.try_with(|counter| counter.set(counter.get().saturating_add(bytes)));
-    }
-
-    #[global_allocator]
-    static ALLOCATOR: Counting = Counting;
-
-    /// Run `f`, returning its value and the bytes allocated on this
-    /// thread while it ran.
-    pub fn measure<T>(f: impl FnOnce() -> T) -> (T, usize) {
-        let before = BYTES.with(Cell::get);
-        let value = f();
-        let after = BYTES.with(Cell::get);
-        (value, after.saturating_sub(before))
-    }
 }
 
 #[cfg(test)]
@@ -1055,7 +1000,7 @@ mod tests {
 
     #[test]
     fn cross_ref_to_evicted_id_does_not_wait() {
-        let dict = GlzDictionary::with_cap(200);
+        let dict = GlzDictionary::with_caps(200, 8);
         // Insert id 4, then push it out with two more images so the
         // cap evicts it and leaves a tombstone.
         dict.insert(4, vec![0u8; 100]);
@@ -1106,62 +1051,35 @@ mod tests {
         );
     }
 
-    /// 128 two-pixel fragments against one 64 KiB source: enough that
-    /// cloning the source per fragment is megabytes of allocation,
-    /// while sharing the dictionary's own buffer costs the 1 KiB
-    /// output and little else.
-    fn many_fragments_one_large_source() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-        const FRAGMENTS: usize = 128;
-        const SOURCE_PIXELS: usize = 16 * 1024;
-        let source: Vec<u8> = (0..SOURCE_PIXELS)
-            .flat_map(|pixel| [pixel as u8, (pixel >> 8) as u8, 7, 255])
-            .collect();
-        let mut payload = Vec::new();
-        let mut expected = Vec::new();
-        for fragment in 0..FRAGMENTS {
-            let pixel_offset = fragment * 2;
-            // ctrl 0x40: length two pixels, source in a previous image,
-            // low nibble of the pixel offset; then the rest of the
-            // offset, then image_dist 1.
-            payload.push(0x40 | (pixel_offset & 0x0F) as u8);
-            payload.push((pixel_offset >> 4) as u8);
-            payload.push(0x01);
-            expected.extend_from_slice(&source[pixel_offset * 4..pixel_offset * 4 + 8]);
-        }
-        (
-            glz_rgb32_row((FRAGMENTS * 2) as u32, &payload),
-            source,
-            expected,
-        )
+    /// The clamp itself, independent of the decode loop: the two
+    /// end-to-end skip tests below decode to the same pixels with or
+    /// without it, and the `debug_assert!` that does notice is compiled
+    /// out of a build without debug assertions.
+    #[test]
+    fn skip_unsatisfied_reference_stops_at_the_end_of_the_output() {
+        // Within the output: advances by the whole reference.
+        assert_eq!(skip_unsatisfied_reference(0, 1, 8), 4);
+        assert_eq!(skip_unsatisfied_reference(4, 1, 8), 8);
+        // The skip fixtures' shape: 1022 pixels against two.
+        assert_eq!(skip_unsatisfied_reference(0, 1022, 8), 8);
+        // Already at the end stays there.
+        assert_eq!(skip_unsatisfied_reference(8, 1, 8), 8);
     }
 
     #[test]
-    fn fragmented_cross_references_share_the_source_allocation() {
-        let (data, source, expected) = many_fragments_one_large_source();
-        let source_bytes = source.len();
-        let dict = GlzDictionary::with_cap(1024 * 1024);
-        dict.insert(0, source);
-        let rt = paused_runtime();
-
-        let (image, allocated) =
-            alloc_counter::measure(|| rt.block_on(decompress_glz(&data, &dict)).unwrap());
-
-        assert_eq!(image.pixels, expected);
-        // Cloning the source once per fragment would allocate 128 x
-        // 64 KiB = 8 MiB. Sharing it allocates the output buffer and
-        // the decode's own small structures. The threshold sits far
-        // from both, so this fails on a returning clone rather than on
-        // an allocator detail.
-        assert!(
-            allocated < source_bytes,
-            "decode allocated {allocated} bytes against a {source_bytes}-byte source: \
-             a per-fragment clone of the source has come back"
-        );
+    fn skip_unsatisfied_reference_saturates_instead_of_wrapping() {
+        // The addition would wrap past usize::MAX: MAX - 4 + 8. (With
+        // a length of 1 it would land exactly on MAX and prove
+        // nothing.)
+        assert_eq!(skip_unsatisfied_reference(usize::MAX - 4, 2, 8), 8);
+        // The multiplication would wrap: `length * 4` overflows.
+        assert_eq!(skip_unsatisfied_reference(0, usize::MAX, 8), 8);
+        assert_eq!(skip_unsatisfied_reference(0, usize::MAX / 4 + 1, 8), 8);
     }
 
     #[test]
     fn evicted_cross_reference_longer_than_the_output_is_skipped_whole() {
-        let dict = GlzDictionary::with_cap(200);
+        let dict = GlzDictionary::with_caps(200, 8);
         dict.insert(0, vec![7u8; 100]);
         dict.insert(1, vec![8u8; 100]);
         dict.insert(2, vec![9u8; 100]);
@@ -1178,9 +1096,10 @@ mod tests {
         let image = rt.block_on(decompress_glz(&data, &dict)).unwrap();
 
         // The output is the same whether or not the skip is clamped;
-        // what catches an unclamped skip is the `debug_assert!` on
-        // `out_idx` at the end of the decode loop, which this stream
-        // is what reaches.
+        // what catches an unclamped skip here is the `debug_assert!`
+        // on `out_idx` at the end of the decode loop, which this
+        // stream is what reaches. The clamp's own tests above hold
+        // without debug assertions.
         assert_eq!(image.pixels, vec![0u8; 8]);
     }
 

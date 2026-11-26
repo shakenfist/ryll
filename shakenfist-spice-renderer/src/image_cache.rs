@@ -150,7 +150,6 @@ impl BoundedImageCache {
 mod tests {
     use super::*;
 
-    /// Helper: a cache with a 200-byte cap.
     /// A 200-byte cache whose entry cap is set explicitly: every test
     /// below is about byte-cap behaviour, and the entry cap derived
     /// from 200 bytes would be the constraint that evicted instead.

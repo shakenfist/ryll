@@ -63,9 +63,10 @@ use std::sync::Arc;
 /// 24-byte `Vec` header for an 8-byte pointer, but every value gains
 /// an `ArcInner` allocation of its own.
 ///
-/// 128 is charged rather than the derived figure — a round number
-/// inside that band, and deliberately a floor rather than a promise.
-/// It keeps the worst-case footprint at about twice `cap_bytes` (see
+/// 128 is charged rather than the derived figure because it is a
+/// round number at the low end of that band, and charging slightly
+/// over the estimate tightens the entry cap rather than loosening
+/// it. It keeps the worst-case footprint at about twice `cap_bytes` (see
 /// the module docs) instead of the twenty-five times a payload-only
 /// cap would allow. It is not an exact RSS bound and is not meant to
 /// be read as one.

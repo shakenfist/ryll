@@ -12,7 +12,7 @@ The contributor measured a 1920x1080 decode with 128
 references at 175.7 ms before and 1.5 ms after.
 
 The change was reviewed under `MERGE-TEMPLATE.md` on
-2026-11-19: Wave 0 scanners all clean, Wave 1 (injection,
+2026-11-18: Wave 0 scanners all clean, Wave 1 (injection,
 supply chain, vulnerability) clean with one low-severity
 hardening item, Wave 2 (correctness, style, tests, docs)
 found no wrong byte. Every new test fixture and the new
