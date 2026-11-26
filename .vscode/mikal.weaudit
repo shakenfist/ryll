@@ -1214,10 +1214,6 @@
     {
       "path": ".github/workflows/prune-reviews.yml",
       "author": "mikal"
-    },
-    {
-      "path": "ryll/Cargo.toml",
-      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
