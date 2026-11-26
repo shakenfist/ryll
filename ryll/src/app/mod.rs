@@ -17,7 +17,6 @@ use tracing::{error, info};
 
 use crate::bugreport::{
     AppSnapshot, BugReport, BugReportType, ChannelSnapshots, PedanticConfig, TrafficBuffers,
-    TrafficViewEntry,
 };
 use crate::capture::CaptureSession;
 use crate::config::{Config, ShareDirConfig, VirtualDiskConfig};
@@ -32,10 +31,9 @@ use crate::settings;
 use shakenfist_spice_protocol::link::H264Offer;
 use shakenfist_spice_protocol::NotifySeverity;
 use shakenfist_spice_renderer::channels::{DisplaySize, VolumeControl};
-use shakenfist_spice_renderer::usb::UsbDeviceInfo;
 use shakenfist_spice_renderer::{
     ChannelEvent, ClipboardBackend, CursorImage, InputEvent, PointerTranslator, SessionState,
-    SessionStateRx, SurfaceMirror, UsbCommand, WebdavCommand, MOUSE_MODE_UNKNOWN,
+    SessionStateRx, SurfaceMirror, MOUSE_MODE_UNKNOWN,
 };
 
 use crate::clipboard_arboard::ArboardClipboard;
@@ -62,6 +60,7 @@ use reconnect::{forbid_retry_modal, ReconnectState};
 use resize::{resolution_notification_due, RESOLUTION_NOTIFY_DEBOUNCE};
 use stats::{BandwidthTracker, LatencyTracker, Statistics};
 use trigger_snapshot::{RegionSelectEnd, TriggerSnapshot, WindowShot};
+use ui::{TrafficViewer, UsbPanel, WebdavPanel};
 use ui_state::UiStateTracker;
 
 /// Channel buffer sizes
@@ -244,15 +243,8 @@ pub struct RyllApp {
     /// that ended in the same frame, not just the first.
     pending_disconnect_report: Option<PendingDisconnectReport>,
 
-    // USB command sender and state
-    usb_tx: Option<mpsc::Sender<UsbCommand>>,
-    usb_channel_ready: bool,
-    usb_connecting: bool,
-    usb_disconnecting: bool,
-    usb_error_message: Option<String>,
-    usb_error_time: Option<Instant>,
-    usb_device_description: Option<String>,
-    usb_connected_at: Option<Instant>,
+    // USB panel state, and the USB command sender it drives
+    usb: UsbPanel,
 
     // Traffic ring buffers (always active, for bug reports and traffic viewer)
     traffic: Arc<TrafficBuffers>,
@@ -316,42 +308,11 @@ pub struct RyllApp {
     region_drag_start: Option<(u32, u32)>,
     region_drag_end: Option<(u32, u32)>,
 
-    // USB panel state
-    show_usb_panel: bool,
-    usb_available_devices: Vec<UsbDeviceInfo>,
-    usb_virtual_disks: Vec<(PathBuf, bool)>,
-    usb_devices_enumerated: bool,
-
-    // File picker for adding virtual disks
-    usb_add_disk_rx: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
-    usb_add_disk_readonly: bool,
-    usb_add_disk_message: Option<String>,
-
     // WebDAV panel state
-    show_webdav_panel: bool,
-    webdav_tx: Option<mpsc::Sender<WebdavCommand>>,
-    webdav_channel_ready: bool,
-    webdav_shared_dir: Option<String>,
-    webdav_read_only: bool,
-    webdav_sharing_active: bool,
-    webdav_connected_at: Option<Instant>,
-    webdav_error_message: Option<String>,
-    webdav_error_time: Option<Instant>,
-    webdav_pick_dir_rx: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
-    webdav_pick_dir_readonly: bool,
+    webdav: WebdavPanel,
 
     // Traffic viewer state
-    show_traffic_viewer: bool,
-    traffic_viewer_entries: Vec<TrafficViewEntry>,
-    traffic_viewer_last_refresh: Instant,
-    traffic_viewer_paused: bool,
-    traffic_filter_main: bool,
-    traffic_filter_display: bool,
-    traffic_filter_inputs: bool,
-    traffic_filter_cursor: bool,
-    traffic_filter_usbredir: bool,
-    traffic_filter_webdav: bool,
-    traffic_filter_playback: bool,
+    traffic_viewer: TrafficViewer,
 
     /// Whether the "Protocol gaps" floating window is currently open.
     gaps_popup_open: bool,
@@ -507,9 +468,11 @@ impl RyllApp {
         reason = "the GUI's construction, where every long-lived handle is made \
          and cloned: the event, input, usb, webdav and resize channels, \
          the snapshot and notification stores, the repaint bridge and the \
-         connection task, and then one struct literal naming every field. \
-         The clones have to precede the moves, and splitting the literal \
-         from the setup would mean a builder for a type built once"
+         connection task, and then one struct literal for the fields \
+         RyllApp still owns directly, with the panel state constructed \
+         alongside it. The clones have to precede the moves, and \
+         splitting the literal from the setup would mean a builder for \
+         a type built once"
     )]
     pub fn new(
         cc: &eframe::CreationContext<'_>,
@@ -723,15 +686,7 @@ impl RyllApp {
             last_disconnect_report_at: None,
             channel_ends: BTreeMap::new(),
             pending_disconnect_report: None,
-            usb_tx: Some(usb_tx),
-            webdav_tx: Some(webdav_tx),
-            usb_channel_ready: false,
-            usb_connecting: false,
-            usb_disconnecting: false,
-            usb_error_message: None,
-            usb_error_time: None,
-            usb_device_description: None,
-            usb_connected_at: None,
+            usb: UsbPanel::new(usb_tx, usb_virtual_disks),
             traffic,
             notifications,
             notification_snapshots: std::sync::Mutex::new(NotificationSnapshotStore::new()),
@@ -750,34 +705,8 @@ impl RyllApp {
             region_select_active: false,
             region_drag_start: None,
             region_drag_end: None,
-            show_usb_panel: false,
-            usb_available_devices: Vec::new(),
-            usb_virtual_disks,
-            usb_devices_enumerated: false,
-            usb_add_disk_rx: None,
-            usb_add_disk_readonly: false,
-            usb_add_disk_message: None,
-            show_webdav_panel: false,
-            webdav_channel_ready: false,
-            webdav_shared_dir: None,
-            webdav_read_only: false,
-            webdav_sharing_active: false,
-            webdav_connected_at: None,
-            webdav_error_message: None,
-            webdav_error_time: None,
-            webdav_pick_dir_rx: None,
-            webdav_pick_dir_readonly: false,
-            show_traffic_viewer: false,
-            traffic_viewer_entries: Vec::new(),
-            traffic_viewer_last_refresh: Instant::now(),
-            traffic_viewer_paused: false,
-            traffic_filter_main: true,
-            traffic_filter_display: true,
-            traffic_filter_inputs: true,
-            traffic_filter_cursor: true,
-            traffic_filter_usbredir: true,
-            traffic_filter_webdav: true,
-            traffic_filter_playback: true,
+            webdav: WebdavPanel::new(webdav_tx),
+            traffic_viewer: TrafficViewer::new(),
             gaps_popup_open: false,
             show_notifications_panel: false,
             notifications_panel_was_open_last_frame: false,
@@ -1151,13 +1080,20 @@ impl eframe::App for RyllApp {
         self.gate_keyboard_focus(ctx);
         self.fit_viewport_to_surface(ctx);
         self.handle_hotkeys(ctx);
-        self.refresh_traffic_entries();
+        self.traffic_viewer.refresh(&self.traffic);
 
         self.draw_stats_bar(ui, ctx);
-        self.draw_traffic_panel(ui);
+        self.traffic_viewer.show(ui, &self.traffic);
         self.draw_notifications_panel(ui);
-        self.draw_usb_panel(ui, ctx);
-        self.draw_webdav_panel(ui, ctx);
+        let usb_outcome = self.usb.show(ui, ctx);
+
+        // Open bug report dialog for USB error (two-pass)
+        if usb_outcome.open_bug_report {
+            let description = self.usb.error_message().unwrap_or_default().to_string();
+            self.open_bug_dialog(BugReportType::Usb, description);
+        }
+
+        self.webdav.show(ui, ctx);
         let outcome = self.draw_surface(ui, ctx);
 
         // Open bug report dialog for channel error (two-pass)

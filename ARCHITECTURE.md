@@ -211,10 +211,10 @@ ryll/src/
 │   │   ├── surface.rs   #     Central panel: the remote surface, its
 │   │   │                #     error banner, pointer and wheel handling
 │   │   ├── traffic_panel.rs
-│   │   │                #     Traffic viewer side panel
-│   │   ├── usb_panel.rs #     USB redirection side panel
+│   │   │                #     Traffic viewer side panel; owns the panel's state
+│   │   ├── usb_panel.rs #     USB redirection side panel; owns the panel's state
 │   │   └── webdav_panel.rs
-│   │                    #     WebDAV sharing side panel
+│   │                    #     WebDAV sharing side panel; owns the panel's state
 │   └── ui_state.rs      #   UiStateTracker: which panels and dialogs are
 │                        #   open, for bug reports
 ├── auto_snapshot.rs     # --auto-snapshot-interval background task,

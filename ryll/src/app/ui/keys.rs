@@ -45,7 +45,7 @@ impl RyllApp {
         if !self.region_select_active {
             let f11_pressed = ctx.input(|i| i.key_pressed(HostShortcut::TrafficViewer.key()));
             if f11_pressed {
-                self.show_traffic_viewer = !self.show_traffic_viewer;
+                self.traffic_viewer.toggle();
             }
         }
 
