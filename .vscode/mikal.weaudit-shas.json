@@ -165,6 +165,18 @@
       "sha": "0d1c0069cc8b89ba59ffdb2ff626b9eee7254de8",
       "date": "2026-11-22"
     },
+    "ryll/src/app/connection.rs": {
+      "sha": "ced7cc9876190b4f68bf44768c8270910f6ca59e",
+      "date": "2026-11-27"
+    },
+    "ryll/src/app/events.rs": {
+      "sha": "0540b645addfc17e703e3a6f84ec343ba3df8088",
+      "date": "2026-11-27"
+    },
+    "ryll/src/app/mod.rs": {
+      "sha": "b346d5982e607108edd224a9a93e4a0babe348ca",
+      "date": "2026-11-27"
+    },
     "ryll/src/app/notification_snapshots.rs": {
       "sha": "76c732cf34ff7fb901bd042373fd699b8bac1d1f",
       "date": "2026-10-17"
@@ -185,6 +197,14 @@
       "sha": "2bcdae8100211a0be291fc150461d53cc7f402d7",
       "date": "2026-10-17"
     },
+    "ryll/src/app/stats.rs": {
+      "sha": "ed09cfccba9f2163154b4c8e58ae44bcd20b9ea4",
+      "date": "2026-11-27"
+    },
+    "ryll/src/app/trigger_snapshot.rs": {
+      "sha": "f218596b5eb326011d496f7cfd5332e7206239be",
+      "date": "2026-11-27"
+    },
     "ryll/src/app/ui/cursor.rs": {
       "sha": "d4c035f75ff736716422ecdd2ecd129d146eac89",
       "date": "2026-11-22"
@@ -192,6 +212,14 @@
     "ryll/src/app/ui/dialogs.rs": {
       "sha": "90e16139a2a6dcaa05a4c6d73ade27effc41b06d",
       "date": "2026-11-22"
+    },
+    "ryll/src/app/ui/keys.rs": {
+      "sha": "883d705349a37f962f783d9120ce68c51cecdb9f",
+      "date": "2026-11-27"
+    },
+    "ryll/src/app/ui/mod.rs": {
+      "sha": "8ecff0fe71fd8b3dd5878731f6f176cb1255035c",
+      "date": "2026-11-27"
     },
     "ryll/src/app/ui/notifications_panel.rs": {
       "sha": "bfd2f2ece562396c31566edbd8142fcd6c89e0a7",
@@ -201,9 +229,25 @@
       "sha": "64cc3cece0b360ea24b10f2e5b53dcd555ec2d01",
       "date": "2026-11-22"
     },
+    "ryll/src/app/ui/stats_bar.rs": {
+      "sha": "18c585265bbe257a2f94924b448fd931abd8fa2e",
+      "date": "2026-11-27"
+    },
     "ryll/src/app/ui/surface.rs": {
       "sha": "2d608ad604e5b08daa8c6582a63dd3753f397b25",
       "date": "2026-11-22"
+    },
+    "ryll/src/app/ui/traffic_panel.rs": {
+      "sha": "f83c02ea4d4ccf4e503586d0e6c203afb903f2ed",
+      "date": "2026-11-27"
+    },
+    "ryll/src/app/ui/usb_panel.rs": {
+      "sha": "b156e8ba022cc2beaf81e1dc3c3dfd82017cb5ce",
+      "date": "2026-11-27"
+    },
+    "ryll/src/app/ui/webdav_panel.rs": {
+      "sha": "52f54641ed3a8b0e107fdc6fc051a7b57d691b76",
+      "date": "2026-11-27"
     },
     "ryll/src/app/ui_state.rs": {
       "sha": "169d3f68cb04a342c5122753af309ba37f68e31d",
@@ -228,6 +272,14 @@
     "ryll/src/input_egui.rs": {
       "sha": "44b5e6e108ab73c57fadd40d5e279be56694ff12",
       "date": "2026-11-03"
+    },
+    "ryll/src/main.rs": {
+      "sha": "edc6621fe36de1080fa2e5ea0ff5b5b41f870b8f",
+      "date": "2026-11-27"
+    },
+    "ryll/src/notifications.rs": {
+      "sha": "302cf90f903ec9d0a686165de153ed7a188be59c",
+      "date": "2026-11-27"
     },
     "ryll/src/rdp.rs": {
       "sha": "81e0ca0cc6a37d6df2e647c0133fe63ac229182c",
@@ -261,6 +313,10 @@
       "sha": "b8619914ce82816fb3f9f8897d472d6e1e32be7b",
       "date": "2026-09-23"
     },
+    "ryll/src/web/audio.rs": {
+      "sha": "520fb87c1ac90128ef5e3546f961b3fe0c22c790",
+      "date": "2026-11-27"
+    },
     "ryll/src/web/control.rs": {
       "sha": "3af3da761d733c9511595a43c84e5d140dea0291",
       "date": "2026-10-17"
@@ -269,9 +325,21 @@
       "sha": "d90e2349477fd7aabd3e8f299acb6b09821fb867",
       "date": "2026-08-18"
     },
+    "ryll/src/web/inputs.rs": {
+      "sha": "d982c7ff954f699d6c52badbc7b2d394ef224943",
+      "date": "2026-11-27"
+    },
     "ryll/src/web/lifecycle.rs": {
       "sha": "fc30506987b70342599e9f4dcb0d97ce20eba1bd",
       "date": "2026-11-03"
+    },
+    "ryll/src/web/mod.rs": {
+      "sha": "5b23e3f0200f2765ab71f198c03b58ae6acfb395",
+      "date": "2026-11-27"
+    },
+    "ryll/src/web/server.rs": {
+      "sha": "e6a9836010bea7dddab3f36ba2ea76fd0bebc19e",
+      "date": "2026-11-27"
     },
     "ryll/src/web/signalling.rs": {
       "sha": "1a0c1cbc7aca5af1004229130cb117c9874a0052",

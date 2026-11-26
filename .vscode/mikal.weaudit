@@ -1026,6 +1026,82 @@
     {
       "path": ".github/workflows/prune-reviews.yml",
       "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/ui/webdav_panel.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/mod.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/mod.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/connection.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/ui/stats_bar.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/ui/traffic_panel.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/trigger_snapshot.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/stats.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/inputs.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/notifications.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/ui/keys.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/server.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/ui/usb_panel.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/audio.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/ui/mod.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/ui",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/main.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app/events.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
