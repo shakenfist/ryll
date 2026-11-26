@@ -379,8 +379,11 @@ the survey was wrong and that is a planning question.
 * `git grep -c '#\[test\]' -- '*.rs'` summed across the
   workspace is 1,408, the same as before the phase.
 * `ryll/src/bugreport.rs` no longer contains the strings
-  `assert_baseline_channel_fields`, `DisplaySnapshot`,
-  `OutstandingResizeSnapshot` or `H264Offer`.
+  `assert_baseline_channel_fields`, `OutstandingResizeSnapshot`
+  or `H264Offer`. (This criterion named `DisplaySnapshot` too,
+  which was wrong: the `pub use` re-export block still lists it,
+  and phase 3 is what removes that block. See the execution
+  notes.)
 * The moved code is unchanged. This command prints nothing:
 
   ```
@@ -406,6 +409,60 @@ the survey was wrong and that is a planning question.
 * The master plan's open questions 1 and 3 are marked answered,
   with the answer, and its "four files" count is corrected to
   five.
+
+## Execution notes
+
+**2026-11-27 (+1100).** Both steps ran in plan order and
+sequentially, as sub-agents, in
+`../ryll-wt-bugreport-p01` on branch
+`bugreport-split-phase-01-renderer-tests`.
+
+* **The branch is based on `bugreport-split-plan`, not
+  `develop`.** The master plan is committed only on that branch
+  and the operator has held both local for review, so there was
+  no base on `develop` that carried the master plan this phase
+  plan references. If the master plan merges first, this branch
+  rebases onto `develop` with no conflict.
+
+* **Back brief answers, both as planned.**
+  `keyboard_snapshot_serialises` and
+  `test_app_snapshot_serialises` stay in ryll; the wrong
+  sentence in `docs/diagnostics.md` stays deferred to phase 3
+  (decision 6).
+
+* **Step 1a** (Sonnet 5.5, medium effort) reported that it
+  deleted the wrong lines partway through and corrected itself
+  by restoring `use serde_json::json;`. The management session
+  checked the result rather than the account: the final diff of
+  `ryll/src/bugreport.rs` is 655 deletions and **zero**
+  additions, so the misstep left no trace. The plan's
+  byte-identical `diff` criterion passed as written, first time.
+
+* **Correction to the Definition of done.** It required that
+  `ryll/src/bugreport.rs` no longer contain the string
+  `DisplaySnapshot`. It still does, once, in the
+  `pub use shakenfist_spice_renderer::snapshots::{...}`
+  re-export block -- which this phase was never going to touch,
+  because phase 3 removes it. The criterion was wrong, not the
+  implementation; it has been corrected above. The other three
+  strings are gone.
+
+* **For phase 3: that re-export block's comment is now stale.**
+  It reads "Re-export channel-state snapshot types for
+  ryll-side callers (e.g. tests in this file and consumers under
+  `ryll/src/app/`)", and the "tests in this file" half stopped
+  being true with this phase. It is not fixed here because phase
+  3 deletes the comment along with the block, and editing it
+  would have cost step 1a its purity for no gain.
+
+* **Verification.** `make test`: the new `tests/snapshots.rs`
+  binary reports `test result: ok. 9 passed; 0 failed; 0
+  ignored`, and 1,823 tests pass across the workspace with no
+  failures. `make lint` passes, including all nine stages of
+  `tools/check-slim-renderer.sh` -- `--no-default-features` and
+  then each of the seven features in isolation, plus the banned
+  dependency-tree check. The management session re-ran both
+  rather than taking them from the sub-agents' reports.
 
 ## Back brief
 
