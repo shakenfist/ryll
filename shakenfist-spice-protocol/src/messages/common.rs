@@ -255,9 +255,12 @@ impl Notify {
     pub fn message_text(&self) -> Cow<'_, str> {
         match String::from_utf8_lossy(&self.message) {
             Cow::Borrowed(text) => crate::text::sanitise_untrusted(text),
-            // The lossy decode has already allocated, so sanitising
-            // what it produced costs no more than borrowing it would.
-            Cow::Owned(text) => Cow::Owned(crate::text::sanitise_untrusted(&text).into_owned()),
+            // The lossy decode has already allocated; keep that
+            // allocation when there is nothing further to replace.
+            Cow::Owned(text) => Cow::Owned(match crate::text::sanitise_untrusted(&text) {
+                Cow::Borrowed(_) => text,
+                Cow::Owned(sanitised) => sanitised,
+            }),
         }
     }
 }

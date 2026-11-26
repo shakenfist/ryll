@@ -358,8 +358,11 @@ in "warn_once for protocol gaps" applies.
 
 Text a server chose is passed through
 `shakenfist_spice_protocol::text::sanitise_untrusted` before it
-reaches a log line, a UI label or a bug report. It replaces the C0
-and C1 controls, `DEL` and the bidi formatting characters with
+reaches a log line, a UI label, or anything else rendered for a human
+to read -- a bug report's summary included. A capture that records the
+message bytes verbatim is not rendering them and does not sanitise.
+It replaces the C0 and C1 controls, `DEL`, the Unicode line and
+paragraph separators and the Unicode `Bidi_Control` characters with
 `U+FFFD`, which stops a server forging log lines with a newline,
 driving a reader's terminal with an escape sequence, or reordering
 what a human sees with a bidi override.

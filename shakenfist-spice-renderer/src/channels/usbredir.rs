@@ -443,9 +443,12 @@ impl UsbredirChannel {
         match msg.payload {
             UsbredirPayload::Hello(hello) => {
                 self.server_caps = hello.capabilities;
+                // The version is up to 64 bytes the server chose, so
+                // it is sanitised before it reaches the log.
                 info!(
                     "usbredir: server hello: version='{}' caps=0x{:08x}",
-                    hello.version, hello.capabilities,
+                    shakenfist_spice_protocol::text::sanitise_untrusted(&hello.version),
+                    hello.capabilities,
                 );
 
                 // Auto-connect virtual disks if configured via CLI

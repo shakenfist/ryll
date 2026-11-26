@@ -26,8 +26,12 @@
 //! [`sanitise_untrusted`] replaces every such character with
 //! `U+FFFD`, the replacement character the lossy UTF-8 decode of the
 //! same bytes already produces for invalid sequences. The result is
-//! one line of printable text, as long as the input and no longer,
-//! which is safe to pass to `tracing` or to put in a UI label.
+//! one line of printable text, with exactly as many characters as the
+//! input, which is safe to pass to `tracing` or to put in a UI label.
+//! "One line" holds for every reader that follows Unicode's mandatory
+//! line breaks, not only a terminal: `U+2028` and `U+2029` are refused
+//! with the C0 and C1 line breaks, because egui and JSON or JavaScript
+//! log viewers break on them.
 //!
 //! It is deliberately not a filter on *meaning*: a server can still
 //! say anything it likes, including a lie about the client's own
@@ -39,8 +43,10 @@ use std::borrow::Cow;
 /// Whether `c` is a character this crate refuses to pass on to a log
 /// or a UI, as described in the [module docs](self).
 ///
-/// The set is the C0 controls and `DEL`, the C1 controls, and the
-/// bidirectional formatting characters. Every other character is
+/// The set is the C0 controls and `DEL`, the C1 controls, the Unicode
+/// line and paragraph separators, and the Unicode `Bidi_Control`
+/// characters (check it against that property, not against this
+/// prose). Every other character is
 /// passed through unchanged, including the non-ASCII text a server is
 /// entitled to send: a notify is localised, so filtering by script or
 /// to printable ASCII would mangle a legitimate message.
@@ -53,9 +59,13 @@ fn is_refused(c: char) -> bool {
         // C1 controls, which include the 8-bit CSI (U+009B) that some
         // terminals honour exactly as they honour `ESC[`.
         '\u{80}'..='\u{9f}' => true,
-        // Bidi marks, embeddings, overrides and isolates: they
-        // reorder the rendering of the text that follows them.
-        '\u{200e}' | '\u{200f}' => true,
+        // LINE SEPARATOR and PARAGRAPH SEPARATOR, the two mandatory
+        // line breaks outside C0 and C1 (NEL, U+0085, is C1).
+        '\u{2028}' | '\u{2029}' => true,
+        // The Unicode Bidi_Control set: ARABIC LETTER MARK, the LRM
+        // and RLM marks, embeddings, overrides and isolates. Each
+        // reorders the rendering of the text around it.
+        '\u{61c}' | '\u{200e}' | '\u{200f}' => true,
         '\u{202a}'..='\u{202e}' => true,
         '\u{2066}'..='\u{2069}' => true,
         _ => false,
@@ -68,8 +78,11 @@ fn is_refused(c: char) -> bool {
 /// Borrows when there is nothing to replace, which is every message a
 /// well-behaved server sends, so the common path does not allocate.
 /// The replacement is one character for one character, so the result
-/// is never longer than the input and a caller that has already
-/// bounded the length keeps its bound.
+/// has exactly as many characters as the input. It is not bounded the
+/// same way in bytes: a refused C0 or C1 control is one or two bytes
+/// of UTF-8 and `U+FFFD` is three, so the result can be up to three
+/// times as long in bytes. A caller that re-emits it under a byte cap
+/// must apply the cap to the result, not to the input.
 pub fn sanitise_untrusted(text: &str) -> Cow<'_, str> {
     if !text.contains(is_refused) {
         return Cow::Borrowed(text);
@@ -139,8 +152,10 @@ mod tests {
 
     #[test]
     fn bidi_overrides_cannot_reorder_the_rendering() {
+        // The whole Unicode Bidi_Control property, not a sample of it.
         for c in [
-            '\u{200e}', '\u{200f}', '\u{202a}', '\u{202e}', '\u{2066}', '\u{2069}',
+            '\u{61c}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}',
+            '\u{202e}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
         ] {
             let text = format!("a{}b", c);
             assert_eq!(
@@ -153,12 +168,29 @@ mod tests {
     }
 
     #[test]
-    fn the_result_is_never_longer_than_the_input() {
+    fn unicode_line_separators_cannot_break_the_line() {
+        assert_eq!(
+            sanitise_untrusted("a\u{2028}b\u{2029}c"),
+            "a\u{fffd}b\u{fffd}c"
+        );
+    }
+
+    #[test]
+    fn the_result_has_as_many_characters_as_the_input() {
         let text = "\u{1b}\u{0}\u{9b}\u{202e}ok";
         assert_eq!(
             sanitise_untrusted(text).chars().count(),
             text.chars().count()
         );
+    }
+
+    #[test]
+    fn the_result_is_at_most_three_times_as_long_in_bytes() {
+        // A one-byte control becomes the three-byte U+FFFD: the
+        // character count is kept, the byte count is not.
+        let text = "\u{0}".repeat(100);
+        let sanitised = sanitise_untrusted(&text);
+        assert_eq!(sanitised.len(), 3 * text.len());
     }
 
     #[test]

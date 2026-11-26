@@ -913,12 +913,15 @@ places:
   *not* checked here; it selects the layout of the `DATA` that follows,
   which the data path has to recognise anyway.
 - **Server-supplied text** is passed through `sanitise_untrusted`, which
-  replaces every C0 and C1 control, `DEL`, and bidi formatting character
-  with `U+FFFD`. `SPICE_MSG_NOTIFY` is the message that carries it, and
+  replaces every C0 and C1 control, `DEL`, `U+2028` and `U+2029`, and
+  Unicode `Bidi_Control` character with `U+FFFD`. `SPICE_MSG_NOTIFY` is the message that carries it, and
   `Notify::message_text()` is the only accessor any channel uses, so the
   sanitising happens once rather than at seven call sites. The length cap
-  (`NOTIFY_MAX_MESSAGE_LEN`, 64 KiB) bounds the text; it does nothing
-  about what is in it. Unsanitised, a notify reaches past the message it
+  (`NOTIFY_MAX_MESSAGE_LEN`, 64 KiB) bounds the bytes on the wire; it
+  does nothing about what is in them. Sanitising keeps the character
+  count but not the byte count -- each one-byte control becomes the
+  three-byte `U+FFFD` -- so the sanitised text can be up to 192 KiB, and
+  anything that re-emits it under a byte cap must cap the result. Unsanitised, a notify reaches past the message it
   was given: a newline forges log lines, an `ESC[` or the 8-bit CSI
   drives the terminal of whoever reads the log or watches `stderr`, and a
   bidi override reorders what a human sees without changing a byte. The

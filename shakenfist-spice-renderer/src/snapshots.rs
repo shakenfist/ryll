@@ -739,9 +739,10 @@ pub struct PlaybackSnapshot {
 
     // --- per-session audio state ---
     /// Metadata for the currently-active audio session. Set on
-    /// every SPICE_MSG_PLAYBACK_START. `None` when no session
-    /// has been started or the most recent session has been
-    /// STOPped.
+    /// every SPICE_MSG_PLAYBACK_START that `PlaybackStart::playable`
+    /// accepts; a refused START leaves it alone (see
+    /// `starts_refused`). `None` when no session has been started
+    /// or the most recent session has been STOPped.
     pub current_session: Option<PlaybackSessionInfo>,
     /// Monotonic count of START messages acted on.
     pub start_count: u64,

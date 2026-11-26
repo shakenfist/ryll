@@ -247,6 +247,18 @@ chased: `PlaybackStart::format` is ignored entirely (the data path
 assumes S16), and a 64 KiB `NOTIFY` per message is a log-volume
 lever even once sanitised.
 
+For server-supplied text, Phase 1's review swept every
+`from_utf8_lossy` outside test code. Two more reached a log or an
+error unsanitised and were closed in Phase 1 itself: the HTTP
+proxy's status line (`quote_status_line` in
+`shakenfist-spice-protocol/src/proxy.rs`, which is not a SPICE
+channel and so is not in the list above) and the usbredir server
+hello's version string. The rest are test code, a `dlsym` symbol
+name ryll chose itself, or clipboard content the user asked for. That
+grep does not find text a parser stores as a `String` by other
+means, so the inventory still asks the question of every string field
+in each channel above.
+
 ### Phase 3: Close the gaps
 
 Apply the Phase 1 convention to whatever Phase 2 found, one commit

@@ -1179,6 +1179,19 @@ impl PlaybackChannel {
                         // leaves any stream already playing alone,
                         // rather than clamped into a stream the server
                         // did not describe.
+                        //
+                        // What follows a refusal is not silence. The
+                        // DATA the server goes on to send is handled
+                        // with the geometry of the last accepted START,
+                        // so a refusal mid-stream garbles audio rather
+                        // than muting it, and with no accepted START at
+                        // all it is handled as 0 channels at 0Hz, as
+                        // DATA before any START always has been. Both
+                        // are memory-safe: only an accepted START
+                        // starts the output thread or the Opus decoder,
+                        // and a sink judges the geometry it is handed
+                        // (the RDP sink drops anything but 48kHz
+                        // stereo).
                         if !start.playable() {
                             self.starts_refused = self.starts_refused.saturating_add(1);
                             warn_once!(
@@ -2025,6 +2038,35 @@ mod tests {
         assert_eq!((session.sample_rate_hz, session.channels), (48_000, 2));
         assert_eq!(channel.channels, 2);
         assert_eq!(channel.sample_rate, 48_000);
+    }
+
+    #[tokio::test]
+    async fn an_unplayable_first_start_starts_nothing() {
+        // The realistic hostile case: the first START of the session
+        // is the absurd one, so there is no stream to leave alone and
+        // nothing may be set up for this one.
+        let (mut channel, sink, _peers) = sink_channel().await;
+        feed(&mut channel, &[start(u32::MAX, 48_000)]).await;
+        assert_eq!(
+            sink.calls(),
+            vec![],
+            "a refused START must not reach the sink"
+        );
+        assert!(channel.current_session.is_none());
+        assert_eq!(channel.starts_refused, 1);
+        assert_eq!(channel.start_count, 0);
+        assert_no_audio_thread(&channel);
+    }
+
+    #[cfg(feature = "audio")]
+    #[tokio::test]
+    async fn an_unplayable_first_start_does_not_spawn_the_audio_thread() {
+        let (mut channel, _peers) = channel_with(PlaybackOutput::Local).await;
+        feed(&mut channel, &[start(u32::MAX, 48_000)]).await;
+        assert_eq!(channel.audio_thread_starts, 0);
+        assert!(channel.audio_thread.is_none());
+        assert!(channel.audio_producer.is_none());
+        assert!(channel.current_session.is_none());
     }
 
     #[tokio::test]

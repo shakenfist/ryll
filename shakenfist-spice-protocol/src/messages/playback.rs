@@ -374,7 +374,12 @@ mod tests {
             (1, 8_000),   // telephony-rate mono
             (2, 44_100),  // CD rate
             (6, 48_000),  // 5.1
-            (8, 192_000), // the corners of what is accepted
+            (8, 192_000), // studio rate
+            // The corners of what is accepted, so a lowered MAX_ or
+            // raised MIN_ constant fails here.
+            (1, PlaybackStart::MIN_FREQUENCY),
+            (PlaybackStart::MAX_CHANNELS, PlaybackStart::MAX_FREQUENCY),
+            (8, 384_000),
             (1, 4_000),
         ] {
             let start = PlaybackStart {
