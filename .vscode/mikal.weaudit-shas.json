@@ -97,10 +97,6 @@
       "sha": "6fec56f3165952b0036cd2e0f26090a9eaf22353",
       "date": "2026-11-23"
     },
-    "ARCHITECTURE.md": {
-      "sha": "3fbda6fe5281c5309d5ac5975aa7bf99143733fd",
-      "date": "2026-11-23"
-    },
     "Cargo.toml": {
       "sha": "55752bca73794915cab47295f3290927b8ac3efe",
       "date": "2026-11-23"
@@ -213,10 +209,6 @@
       "sha": "0d1c0069cc8b89ba59ffdb2ff626b9eee7254de8",
       "date": "2026-11-22"
     },
-    "ryll/src/app/connection.rs": {
-      "sha": "965690769456476d5cc02822e4a5c005e623244b",
-      "date": "2026-11-22"
-    },
     "ryll/src/app/notification_snapshots.rs": {
       "sha": "76c732cf34ff7fb901bd042373fd699b8bac1d1f",
       "date": "2026-10-17"
@@ -237,20 +229,12 @@
       "sha": "2bcdae8100211a0be291fc150461d53cc7f402d7",
       "date": "2026-10-17"
     },
-    "ryll/src/app/trigger_snapshot.rs": {
-      "sha": "ce99613780d3e8653b585788e06183319ac587b0",
-      "date": "2026-11-22"
-    },
     "ryll/src/app/ui/cursor.rs": {
       "sha": "d4c035f75ff736716422ecdd2ecd129d146eac89",
       "date": "2026-11-22"
     },
     "ryll/src/app/ui/dialogs.rs": {
       "sha": "90e16139a2a6dcaa05a4c6d73ade27effc41b06d",
-      "date": "2026-11-22"
-    },
-    "ryll/src/app/ui/keys.rs": {
-      "sha": "8e5b51066182d0d4600ee5cd23d1fe9aa5e4727e",
       "date": "2026-11-22"
     },
     "ryll/src/app/ui/notifications_panel.rs": {
@@ -261,24 +245,8 @@
       "sha": "64cc3cece0b360ea24b10f2e5b53dcd555ec2d01",
       "date": "2026-11-22"
     },
-    "ryll/src/app/ui/stats_bar.rs": {
-      "sha": "f758fc5a78d3bf1ff51131b2a80f5c86eca6e9cc",
-      "date": "2026-11-22"
-    },
     "ryll/src/app/ui/surface.rs": {
       "sha": "2d608ad604e5b08daa8c6582a63dd3753f397b25",
-      "date": "2026-11-22"
-    },
-    "ryll/src/app/ui/traffic_panel.rs": {
-      "sha": "1182d38a784dee5b883077f1973d53e09fa77ee1",
-      "date": "2026-11-22"
-    },
-    "ryll/src/app/ui/usb_panel.rs": {
-      "sha": "26a58c417df3360819c27c9766b68de61f57f5cb",
-      "date": "2026-11-22"
-    },
-    "ryll/src/app/ui/webdav_panel.rs": {
-      "sha": "ecdf0caaf79ea09a73648f93501ef12c9c548a63",
       "date": "2026-11-22"
     },
     "ryll/src/app/ui_state.rs": {

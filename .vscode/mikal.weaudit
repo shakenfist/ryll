@@ -932,10 +932,6 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/app/ui/keys.rs",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/app/ui/notifications_panel.rs",
       "author": "mikal"
     },
@@ -944,31 +940,11 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/app/ui/stats_bar.rs",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/app/ui/surface.rs",
       "author": "mikal"
     },
     {
-      "path": "ryll/src/app/ui/traffic_panel.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/app/ui/usb_panel.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/app/ui/webdav_panel.rs",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/app/bug_report.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/app/connection.rs",
       "author": "mikal"
     },
     {
@@ -981,10 +957,6 @@
     },
     {
       "path": "ryll/src/app/screenshots.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/app/trigger_snapshot.rs",
       "author": "mikal"
     },
     {
@@ -1141,10 +1113,6 @@
     },
     {
       "path": "tools/check-bidi.sh",
-      "author": "mikal"
-    },
-    {
-      "path": "ARCHITECTURE.md",
       "author": "mikal"
     },
     {
