@@ -192,7 +192,7 @@ socket2 = { version = "0.6", features = ["all"] }
 nusb = "0.2"
 
 # Native file dialog for USB disk image selection.  GUI-only.
-rfd = { version = "0.17", optional = true }
+rfd = { version = "0.18", optional = true }
 
 # WebDAV server (RFC 4918 handler with LocalFs backend)
 dav-server = { version = "0.12", default-features = false, features = ["localfs"] }

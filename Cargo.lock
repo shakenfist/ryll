@@ -393,7 +393,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
  "wl-clipboard-rs",
  "x11rb",
 ]
@@ -2108,7 +2108,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "pollster 1.0.1",
+ "pollster",
  "profiling",
  "raw-window-handle",
  "ron",
@@ -2376,7 +2376,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4559,7 +4559,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4754,6 +4754,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-foundation 0.3.2",
+ "objc2-uniform-type-identifiers 0.3.2",
 ]
 
 [[package]]
@@ -5044,7 +5045,7 @@ dependencies = [
  "objc2-link-presentation",
  "objc2-quartz-core 0.2.2",
  "objc2-symbols",
- "objc2-uniform-type-identifiers",
+ "objc2-uniform-type-identifiers 0.2.2",
  "objc2-user-notifications",
 ]
 
@@ -5069,6 +5070,16 @@ dependencies = [
  "block2 0.5.1",
  "objc2 0.5.3",
  "objc2-foundation 0.2.2",
+]
+
+[[package]]
+name = "objc2-uniform-type-identifiers"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7902ac02859fc1f7045f8b598c63f1ae0cc7efeaa06a9bc9f3d9a3c955974fa4"
+dependencies = [
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
 ]
 
 [[package]]
@@ -5213,7 +5224,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5698,12 +5709,6 @@ dependencies = [
 
 [[package]]
 name = "pollster"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f3a9f18d041e6d0e102a0a46750538147e5e8992d3b4873aaafee2520b00ce3"
-
-[[package]]
-name = "pollster"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bc6355899e1c9462875b6757c79f3caa011a1fdae12bbb1a2e72dd1f234f8336"
@@ -5994,7 +5999,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6007,7 +6012,7 @@ dependencies = [
  "libc",
  "log",
  "socket2",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6304,7 +6309,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "rustix 1.1.6",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6425,9 +6430,9 @@ dependencies = [
 
 [[package]]
 name = "rfd"
-version = "0.17.2"
+version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20dafead71c16a34e1ff357ddefc8afc11e7d51d6d2b9fbd07eaa48e3e540220"
+checksum = "c4b9d4857b10297ffb0f64cae711e983a7aeaee561848d56d429d3858bd8ed93"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
@@ -6438,8 +6443,9 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
+ "objc2-uniform-type-identifiers 0.3.2",
  "percent-encoding",
- "pollster 0.4.0",
+ "pollster",
  "raw-window-handle",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -6946,7 +6952,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7014,7 +7020,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7974,10 +7980,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.6",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9181,7 +9187,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
