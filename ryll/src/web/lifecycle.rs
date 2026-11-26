@@ -47,7 +47,10 @@
 //! encoder for itself, and the generation says nothing about it — so
 //! the reaper does not decide on it whether to stop the encoder.
 //! [`stop_viewer_pipeline`] decides that, on the encoder's recorded
-//! owner.
+//! owner. That offer has also already stopped the old viewer's
+//! pipeline itself when it took the bridge out, so by the time the
+//! reaper gets there it usually finds nothing running or a pipeline
+//! that is not its viewer's.
 //!
 //! # Why the wait is a `select!`
 //!
@@ -214,27 +217,49 @@ pub async fn run_bridge_reaper(state: Arc<WebState>) {
             }
         }
 
-        if !stop_viewer_pipeline(&state, watched_offer).await {
-            tracing::debug!(
-                "bridge reaper: a later offer has restarted the encoder for itself; \
-                 leaving it running"
-            );
+        match stop_viewer_pipeline(&state, watched_offer).await {
+            PipelineStop::Stopped => {}
+            PipelineStop::OwnedBy(owner) => tracing::debug!(
+                "bridge reaper: offer {} has restarted the encoder for itself; leaving it \
+                 running",
+                owner
+            ),
+            PipelineStop::NothingRunning => tracing::debug!(
+                "bridge reaper: no encoder was running for offer {}",
+                watched_offer
+            ),
         }
 
+        state.reaps_completed.fetch_add(1, Ordering::SeqCst);
         tracing::info!("bridge reaper: reaped; awaiting next viewer");
     }
 }
 
+/// What [`stop_viewer_pipeline`] found, so a caller's log names the
+/// cause that actually applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PipelineStop {
+    /// The offer owned the pipeline, and it has been stopped.
+    Stopped,
+    /// Another offer has restarted the encoder for itself since; its
+    /// pipeline was left alone.
+    OwnedBy(u64),
+    /// Nothing was running: a restart failed after stopping the old
+    /// encoder, or someone else has already stopped it.
+    NothingRunning,
+}
+
 /// Stop the work a viewer's bridge was driving — the encoder pipeline
-/// and the audio pump's sender — if `offer` still owns it. Returns
-/// whether it did.
+/// and the audio pump's sender — if `offer` still owns it.
 ///
-/// Both the reaper above and `post_offer`'s failure paths need this,
-/// and for the same reason: the encoder restart and the
-/// `active_opus_tx` install happen before the bridge is known to be
-/// good, so whoever concludes that no viewer is attached has to undo
-/// them. The bridge close stays with its owner; this holds the two
-/// shared steps.
+/// Whoever takes a bridge out of `bridge_slot` and closes it calls
+/// this for the offer that installed it: the reaper above, and
+/// `post_offer` as it replaces the previous viewer's bridge.
+/// `post_offer`'s failure paths call it for their own offer. All of
+/// them need it for the same reason: the encoder restart and the
+/// `active_opus_tx` install are not the bridge's, and outlive it
+/// unless someone stops them. The bridge close stays with its owner;
+/// this holds the two shared steps.
 ///
 /// There is one encoder and one audio slot per process, and a later
 /// offer takes both over well before its bridge is installed: it
@@ -251,10 +276,12 @@ pub async fn run_bridge_reaper(state: Arc<WebState>) {
 /// what makes the owner check cover it too: a later offer installs its
 /// sender only after its own restart, which needs the lock this holds,
 /// so a sender cleared here cannot be one a later offer installed.
-pub(crate) async fn stop_viewer_pipeline(state: &WebState, offer: u64) -> bool {
+pub(crate) async fn stop_viewer_pipeline(state: &WebState, offer: u64) -> PipelineStop {
     let mut enc = state.encoder.lock().await;
-    if enc.owner() != Some(offer) {
-        return false;
+    match enc.owner() {
+        Some(owner) if owner == offer => {}
+        Some(owner) => return PipelineStop::OwnedBy(owner),
+        None => return PipelineStop::NothingRunning,
     }
 
     // Sends EncoderControl::Stop and awaits the task handle with a
@@ -271,7 +298,7 @@ pub(crate) async fn stop_viewer_pipeline(state: &WebState, offer: u64) -> bool {
             *inner = None;
         }
     }
-    true
+    PipelineStop::Stopped
 }
 
 #[cfg(test)]
@@ -467,9 +494,17 @@ mod tests {
         dead.raise();
         drop(old);
 
-        // Long enough for the reaper to wake, find the bridge dead and
-        // the generation unchanged, and do whatever it is going to do.
-        tokio::time::sleep(Duration::from_millis(1000)).await;
+        // Wait for the reaper to have reaped, not for a fixed delay.
+        // The reap this test is about changes nothing else observable
+        // when it is right, so after a delay alone the assertions below
+        // would also pass if the reaper had simply not run yet.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.reaps_completed.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the reaper never reaped the dead bridge");
         assert!(
             !enc_control_2.is_closed() && state.encoder.lock().await.owner() == Some(2),
             "the reaper stopped the encoder a later offer had restarted for its own viewer"

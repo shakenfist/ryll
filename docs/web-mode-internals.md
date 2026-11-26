@@ -1384,9 +1384,18 @@ at step 5, then can spend up to `GATHER_TIMEOUT` in `accept_offer`.
 So neither the bridge slot nor `bridge_generation` — which only
 installing a bridge moves — says whether a party that has concluded
 "no viewer is attached" is about to stop its own viewer's encoder or
-a newer one's. Two parties reach that conclusion: the reaper, and
-`post_offer`'s own failure paths, which close the bridge that will
-never be installed and stop the encoder restarted for it.
+a newer one's. Three parties reach that conclusion: the reaper;
+`post_offer` itself as it replaces a viewer's bridge, which closes
+the old bridge and stops the old viewer's pipeline at step 2 rather
+than leaving it to the restart at step 3; and `post_offer`'s own
+failure paths, which close the bridge that will never be installed
+and stop the encoder restarted for it. The rule they share is that
+whoever takes a bridge out and closes it stops the pipeline of the
+offer that installed it. Step 2 needs it as much as the reaper does:
+the restart refuses (the 503 for a missing primary surface) without
+touching the running encoder, and a closed bridge's video pump keeps
+draining that encoder, so leaving it to step 3 left it encoding for
+nobody whenever step 3 failed.
 
 Each request therefore takes a number at entry
 (`WebState::offer_epoch`), the encoder records the number of the
@@ -1421,7 +1430,8 @@ observes `None` and no-ops.
 A helper alongside `restart()`: sends `EncoderControl::Stop`
 to the running encoder task and joins the handle with a
 2-second timeout, and clears the recorded owner. Used by
-`stop_viewer_pipeline` (the reaper and failed offers, above) and
+`stop_viewer_pipeline` (the reaper, a replaced bridge and failed
+offers, above) and
 the shutdown path (process exiting). Any orphaned task exits
 naturally on its next send error.
 

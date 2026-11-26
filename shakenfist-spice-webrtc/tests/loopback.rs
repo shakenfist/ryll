@@ -612,10 +612,11 @@ fn rtpmap_lines(sdp: &str) -> Vec<String> {
 /// The client offers the broad default set a browser offers, so
 /// anything in the answer beyond H.264 and Opus is something this
 /// bridge chose to advertise and will never send: VP8, VP9, AV1
-/// and HEVC have no encoder behind them, an RTX codec promises
-/// retransmission the bridge does not do (a browser that NACKs
-/// gets silence), and G.722, PCMU and PCMA are not what the SPICE
-/// playback channel hands over.
+/// and HEVC have no encoder behind them, an RTX codec advertises a
+/// retransmission *stream* the bridge never sends on (plain NACK
+/// retransmission comes from the interceptor chain's NACK responder
+/// and is unaffected), and G.722, PCMU and PCMA are not what the
+/// SPICE playback channel hands over.
 ///
 /// The RTCP feedback types stay, and are asserted here so that
 /// narrowing the codec set does not quietly take them with it:

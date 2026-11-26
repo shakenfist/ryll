@@ -32,6 +32,7 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+use super::lifecycle::PipelineStop;
 use super::server::WebState;
 
 /// Encoder FPS cap. 30 fps matches master plan Resolution §4. The
@@ -293,12 +294,17 @@ async fn abandon_offer(state: &WebState, offer: u64, bridge: Option<WebrtcBridge
             warn!("web: closing an abandoned bridge errored: {}", ce);
         }
     }
-    if !crate::web::lifecycle::stop_viewer_pipeline(state, offer).await {
-        debug!(
-            "web: offer {} failed after a later offer took over the encoder; leaving the \
-             encoder and audio slot alone",
+    match crate::web::lifecycle::stop_viewer_pipeline(state, offer).await {
+        PipelineStop::Stopped => {}
+        PipelineStop::OwnedBy(owner) => debug!(
+            "web: offer {} failed after offer {} took over the encoder; leaving the encoder \
+             and audio slot alone",
+            offer, owner
+        ),
+        PipelineStop::NothingRunning => debug!(
+            "web: offer {} failed with no encoder running; nothing to stop",
             offer
-        );
+        ),
     }
 }
 
@@ -306,9 +312,10 @@ async fn abandon_offer(state: &WebState, offer: u64, bridge: Option<WebrtcBridge
 ///
 /// Steps:
 ///
-/// 1. Take `bridge_slot` lock; pull out any existing bridge.
-/// 2. Drop the lock and close the old bridge (lets its
-///    video-pump task drop the old `frame_rx`).
+/// 1. Take `bridge_slot` lock; pull out any existing bridge and the
+///    offer that installed it.
+/// 2. Drop the lock, close the old bridge, and stop the old
+///    viewer's encoder and audio pump if that offer still owns them.
 /// 3. Take `encoder` lock; `restart()` to get a fresh
 ///    `frame_rx` and a fresh `control_tx`, recording this offer
 ///    as the encoder's owner.
@@ -321,7 +328,9 @@ async fn abandon_offer(state: &WebState, offer: u64, bridge: Option<WebrtcBridge
 ///    that installed it.
 /// 8. Return JSON answer.
 ///
-/// Any failure after step 3 goes through `abandon_offer`.
+/// Any failure after step 3 goes through `abandon_offer`. A failure
+/// at step 3 has nothing of its own to undo — a restart that fails
+/// records no owner — and step 2 has already retired the old viewer.
 pub async fn post_offer(
     State(state): State<Arc<WebState>>,
     Json(offer): Json<OfferReq>,
@@ -365,14 +374,40 @@ pub async fn post_offer(
         offer.sdp.len()
     );
 
-    // Step 1+2: replace any existing bridge.
+    // Step 1+2: retire any existing bridge, and everything it was
+    // driving. The installed offer is read under the slot lock so it
+    // is the one that installed the bridge being taken.
     let old_bridge = {
         let mut slot = state.bridge_slot.lock().await;
         slot.take()
+            .map(|b| (b, state.installed_offer.load(Ordering::SeqCst)))
     };
-    if let Some(old) = old_bridge {
+    if let Some((old, old_offer)) = old_bridge {
         if let Err(e) = old.close().await {
             warn!("web: closing previous bridge errored: {}", e);
+        }
+
+        // From here this request is the old bridge's reaper, and does
+        // what the reaper does, rather than leaving the encoder and
+        // audio pump to step 3's restart. Every path out of this
+        // handler after this point would otherwise have to remember
+        // them: the restart can refuse (no primary surface) without
+        // touching the running encoder, and the old bridge's video
+        // pump keeps draining it after the close, so the encoder would
+        // keep encoding for a viewer that is gone until some later
+        // offer succeeded.
+        //
+        // The reaper is not woken here. It may stay parked on this
+        // bridge's dead signal, but with the slot empty there is
+        // nothing for it to reap, and the next bridge installed wakes
+        // it at step 7.
+        if let PipelineStop::OwnedBy(owner) =
+            crate::web::lifecycle::stop_viewer_pipeline(&state, old_offer).await
+        {
+            debug!(
+                "web: offer {} has already restarted the encoder; leaving it to that offer",
+                owner
+            );
         }
     }
 
@@ -1057,6 +1092,81 @@ mod tests {
             !pipeline_running(&state, &enc_control_4).await,
             "a later offer that never restarted the encoder took nothing over; the failing \
              offer still owns the pipeline and must stop it"
+        );
+    }
+
+    /// An offer that replaces a viewer's bridge and then cannot start
+    /// an encoder of its own must not leave the old viewer's running.
+    ///
+    /// This is the 503 for a missing primary surface after a session
+    /// was up — the guest resizing or rebooting takes the surface away
+    /// for a moment, and the browser reloads in that moment. The
+    /// restart refuses without touching the running encoder, by
+    /// design, and the old bridge's video pump keeps draining it after
+    /// the close. Before step 2 retired the old viewer's pipeline
+    /// itself, that encoder kept encoding for nobody, and the audio
+    /// slot kept the old sender, until some later offer succeeded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_offer_refused_for_no_surface_retires_the_previous_viewer() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let state = Arc::new(WebState::new());
+        seed_primary_surface(&state).await;
+
+        // Offer 1's session, installed as steps 3 to 7 leave it.
+        let first = state.offer_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+        let (_frame_rx_1, enc_control_1) = state
+            .encoder
+            .lock()
+            .await
+            .restart(&state.surface_mirror, first)
+            .await
+            .expect("first restart");
+        let _opus_rx_1 = install_opus_sender(&state);
+        let (bridge_enc_tx, _bridge_enc_rx) = mpsc::channel::<EncoderControl>(4);
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::for_tests(bridge_enc_tx))
+            .await
+            .expect("bridge");
+        {
+            let mut slot = state.bridge_slot.lock().await;
+            *slot = Some(bridge);
+            state.installed_offer.store(first, Ordering::SeqCst);
+            state.bridge_generation.fetch_add(1, Ordering::SeqCst);
+        }
+
+        // The primary surface goes away, and the browser offers again.
+        state.surface_mirror.lock().await.apply_event(
+            &shakenfist_spice_renderer::ChannelEvent::SurfaceDestroyed {
+                display_channel_id: 0,
+                surface_id: 0,
+            },
+        );
+        let res = post_offer(
+            State(Arc::clone(&state)),
+            Json(OfferReq {
+                req_type: "offer".to_string(),
+                sdp: "v=0\r\n".to_string(),
+            }),
+        )
+        .await;
+        match res {
+            Ok(_) => panic!("an offer with no primary surface should be refused"),
+            Err((status, msg)) => {
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{}", msg)
+            }
+        }
+
+        assert!(
+            state.bridge_slot.lock().await.is_none(),
+            "the previous viewer's bridge should have been taken out"
+        );
+        assert!(
+            enc_control_1.is_closed() && state.encoder.lock().await.owner().is_none(),
+            "the previous viewer's encoder is still running, for nobody"
+        );
+        assert!(
+            state.active_opus_tx.lock().expect("opus slot").is_none(),
+            "the previous viewer's audio sender is still installed"
         );
     }
 

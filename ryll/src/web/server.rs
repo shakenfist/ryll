@@ -124,6 +124,12 @@ pub struct WebState {
     /// the signal, and a stored permit survives that race where a
     /// broadcast to zero waiters would be lost.
     pub bridge_replaced: Arc<Notify>,
+    /// How many bridges the reaper has reaped, bumped once it has
+    /// finished with each. Nothing in production reads it; it is what
+    /// lets a test wait for the reaper to have *decided* rather than
+    /// for a fixed delay, which matters for the reaps that by design
+    /// change nothing else observable.
+    pub reaps_completed: AtomicU64,
     /// WebRTC media socket bind policy from `--web-media-addr` and
     /// `--web-media-port`, validated at startup by
     /// [`crate::config::web_media_bind_policy`]. Handed to every
@@ -254,6 +260,7 @@ impl WebState {
             offer_epoch: AtomicU64::new(0),
             installed_offer: AtomicU64::new(0),
             bridge_replaced: Arc::new(Notify::new()),
+            reaps_completed: AtomicU64::new(0),
             udp_bind,
             ice_servers,
             // Initialise 60 s in the past so the first offer
