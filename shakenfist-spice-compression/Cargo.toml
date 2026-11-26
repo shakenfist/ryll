@@ -29,7 +29,18 @@ encode = [
     "dep:openh264",
     "dep:openh264-sys2",
 ]
-jpeg = ["dep:jpeg-decoder", "dep:thiserror", "dep:tracing"]
+# The platform decoder backends (ImageIO on macOS, WIC on Windows)
+# live in `jpeg.rs` and come in with it. A `dep:` naming a
+# target-specific dependency simply does nothing off that target.
+jpeg = [
+    "dep:jpeg-decoder",
+    "dep:thiserror",
+    "dep:tracing",
+    "dep:objc2-image-io",
+    "dep:objc2-core-graphics",
+    "dep:objc2-core-foundation",
+    "dep:windows",
+]
 # Cross-platform SIMD-accelerated JPEG decode via the `mozjpeg`
 # crate. The `with_simd` feature on `mozjpeg-sys` is enabled by
 # default, which builds a vendored libjpeg-turbo with SIMD —
@@ -113,14 +124,15 @@ openh264-sys2 = { version = "=0.9.10", optional = true, default-features = false
 #   - objc2-core-foundation: CFData (for the input byte slice)
 # `default-features = false` keeps the dep tree from pulling
 # bitflags, block2, dispatch2, objc2, objc2-metal, etc., which
-# we don't use.
+# we don't use. Optional, with `jpeg`, like every other dependency
+# that only feature-gated code uses.
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2-image-io = { version = "=0.3.2", default-features = false, features = [
+objc2-image-io = { version = "=0.3.2", optional = true, default-features = false, features = [
     "std",
     "CGImageSource",
     "objc2-core-graphics",
 ] }
-objc2-core-graphics = { version = "=0.3.2", default-features = false, features = [
+objc2-core-graphics = { version = "=0.3.2", optional = true, default-features = false, features = [
     "std",
     "CGBitmapContext",
     "CGColorSpace",
@@ -128,7 +140,7 @@ objc2-core-graphics = { version = "=0.3.2", default-features = false, features =
     "CGImage",
     "CGGeometry",
 ] }
-objc2-core-foundation = { version = "=0.3.2", default-features = false, features = [
+objc2-core-foundation = { version = "=0.3.2", optional = true, default-features = false, features = [
     "std",
     "CFData",
 ] }
@@ -147,9 +159,10 @@ objc2-core-foundation = { version = "=0.3.2", default-features = false, features
 # `Win32_Foundation` (HRESULT etc.) is pulled in transitively via
 # the imaging / com features. The `windows` crate's monolithic
 # feature wall means adding more here would not bloat the build:
-# only the listed feature modules' bindings are compiled.
+# only the listed feature modules' bindings are compiled. Optional,
+# with `jpeg`.
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.62", features = [
+windows = { version = "0.62", optional = true, features = [
     "Win32_Graphics_Imaging",
     "Win32_System_Com",
 ] }

@@ -100,8 +100,6 @@ impl SpiceError {
     }
 }
 
-/// Capability flags
-#[allow(dead_code)]
 /// Wire values of `SpiceMsgDisplayStreamCreate::codec_type`, the
 /// `SPICE_VIDEO_CODEC_TYPE_*` enum in spice-protocol's `enums.h`.
 ///
@@ -145,6 +143,8 @@ pub mod video_codec_type {
     pub const H265: u8 = 5;
 }
 
+/// Capability flags
+#[allow(dead_code)]
 pub mod capabilities {
     // Common capabilities
     pub const AUTH_SELECTION: u32 = 1 << 0;

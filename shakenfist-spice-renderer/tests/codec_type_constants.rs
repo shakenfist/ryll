@@ -48,3 +48,22 @@ fn the_wire_enum_matches_the_spice_protocol_header() {
         [1, 2, 3, 4, 5]
     );
 }
+
+/// The names the control socket's `stats` result gives each codec
+/// type. Those strings are part of a documented external contract
+/// (docs/control-socket-protocol.md), so they are pinned to the wire
+/// numbers here rather than left to the match in `video_codec_name`.
+/// The control socket is Unix-only, as is this test.
+#[cfg(unix)]
+#[test]
+fn the_control_socket_names_each_codec_type() {
+    use shakenfist_spice_renderer::control::protocol::video_codec_name;
+
+    assert_eq!(video_codec_name(codec::MJPEG), "mjpeg");
+    assert_eq!(video_codec_name(codec::VP8), "vp8");
+    assert_eq!(video_codec_name(codec::H264), "h264");
+    assert_eq!(video_codec_name(codec::VP9), "vp9");
+    assert_eq!(video_codec_name(codec::H265), "h265");
+    assert_eq!(video_codec_name(0), "unknown");
+    assert_eq!(video_codec_name(99), "unknown");
+}

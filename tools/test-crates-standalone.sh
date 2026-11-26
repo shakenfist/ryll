@@ -1,7 +1,10 @@
 #!/bin/bash
 # Runs each published library crate's tests in its own cargo
-# resolution, which is how a crates.io consumer builds it and how
-# nothing else in CI does.
+# resolution, which is how a crates.io consumer builds it. Nothing else
+# in CI runs these crates' *tests* in their own resolution: `make
+# package-check` builds each crate standalone from its tarball, but only
+# the library target with default features, so the two lanes are not
+# redundant.
 #
 # `make test` is one invocation over the whole workspace, and cargo
 # unifies features across every package in an invocation. So a library
@@ -20,10 +23,13 @@
 # feature unification back on a smaller scale, which is the whole bug.
 #
 # Each crate is run with its own default features -- what a consumer
-# gets from a plain dependency -- plus the slim renderer
-# (`--no-default-features`), the configuration a server-role consumer
-# builds and the one `tools/check-slim-renderer.sh` lints but never
-# tests.
+# gets from a plain dependency -- plus the two slim configurations a
+# server-role consumer builds: the renderer with `--no-default-features`
+# (which `tools/check-slim-renderer.sh` lints but does not test), and
+# the compression crate encode-only, which is how andris takes it. The
+# compression crate with no features at all is run too: it is the
+# floor every other combination adds to, and the cheapest place to
+# notice a dependency some ungated code still needs.
 #
 # Not covered here, and deliberately: the full product of every
 # feature combination. The lint lane already builds those (clippy, per
@@ -57,10 +63,20 @@ for crate in "${CRATES[@]}"; do
     fi
 done
 
-echo "==> cargo test -p shakenfist-spice-renderer --no-default-features"
-if ! cargo test --frozen -p shakenfist-spice-renderer --no-default-features; then
-    failed+=("shakenfist-spice-renderer --no-default-features")
-fi
+# Each entry is one crate and the feature arguments it is run with.
+SLIM=(
+    "shakenfist-spice-renderer --no-default-features"
+    "shakenfist-spice-compression --no-default-features --features encode"
+    "shakenfist-spice-compression --no-default-features"
+)
+
+for entry in "${SLIM[@]}"; do
+    read -r -a args <<< "${entry}"
+    echo "==> cargo test -p ${entry}"
+    if ! cargo test --frozen -p "${args[@]}"; then
+        failed+=("${entry}")
+    fi
+done
 
 if [ "${#failed[@]}" -ne 0 ]; then
     echo >&2

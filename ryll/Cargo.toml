@@ -79,8 +79,11 @@ eframe = { version = "0.37", features = ["persistence"], optional = true }
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 # `ring` to match the provider `main` installs, and the protocol
-# crate's choice; see the comment there. Without this the binary
-# builds aws-lc-sys as well as ring and uses only ring.
+# crate's choice; see the comment there. This stops tokio-rustls
+# from being one of the crates that asks for the aws-lc-rs provider.
+# It does not take aws-lc-sys out of the binary: reqwest,
+# axum-server and the webrtc stack (rtc, rtc-dtls) still enable
+# rustls's aws-lc-rs feature (`cargo tree -p ryll -i aws-lc-sys`).
 tokio-rustls = { version = "0.26", default-features = false, features = [
     "logging",
     "ring",
