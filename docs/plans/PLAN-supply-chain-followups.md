@@ -35,27 +35,40 @@ reported them as `advisory-not-detected`.
 In November 2026 eight more ignores were removed although
 nothing they covered had been fixed: items 1 and 4-8 below.
 Run with no ignores at all, neither scanner failed on any of
-them. All are unmaintained-status advisories against
-transitive dependencies, and cargo-deny 0.22 checks
+them, and the `cargo audit` and `cargo deny` lanes both
+passed once they were gone (CI run 45772182263, where
+`cargo audit` lists all eight as warnings). All are
+unmaintained-status advisories against transitive
+dependencies. As observed in November 2026, cargo-deny checks
 unmaintained and unsound advisories only for the workspace's
-direct dependencies by default, so it never reported them and
-flagged each ignore as `advisory-not-detected`; cargo audit
-reports them as warnings, which do not fail the job. The
-ignores suppressed nothing, and their presence implied a gate
-that did not exist. The debt itself is still real, so those
-items stay below under *Tracked warnings*.
+direct dependencies by default; `deny.toml` now states that
+scope explicitly (`unmaintained` and `unsound`), so it no
+longer rests on a default. cargo-deny never reported the
+eight and flagged each ignore as `advisory-not-detected`;
+cargo audit reports them as warnings, which do not fail the
+job. The ignores gated nothing, and their presence implied a
+gate that did not exist. The debt itself is still real, so
+those items stay below under *Tracked warnings*.
 
 The remaining items are on the `[advisories].ignore` lists
 with inline rationale so that the scanners pass against
 `develop`: both in `deny.toml`, and RUSTSEC-2023-0071 alone in
 `.cargo/audit.toml`, because cargo audit does not fail on
 RUSTSEC-2025-0134. Each list holds only what its own scanner
-fails on. This plan tracks the debt so we can pay it down.
+fails on. Because cargo audit warns about RUSTSEC-2025-0134
+without ignoring it, the weekly cron files an issue for it
+too, as it does for the tracked warnings below. This plan
+tracks the debt so we can pay it down.
 
 Each ignore entry has a matching section below. When an
 ignore is resolved, delete the entry and the section here in
 the same PR. Before adding an ignore, confirm the scanner
 actually fails without it.
+
+Item numbers are stable identifiers: `deny.toml`,
+`.cargo/audit.toml` and other sections of this file cite them,
+so an item keeps its number when it moves between sections,
+and the sections are not in numeric order.
 
 ## Tracked debt: ignored advisories
 
@@ -108,7 +121,12 @@ actually fails without it.
 These advisories fail neither scanner, so they carry no
 ignore: cargo audit lists them as warnings on every run, and
 cargo-deny does not check them at all. They are tracked here
-because each is still debt worth paying down. If one turns
+because each is still debt worth paying down. Without an
+ignore, the weekly `Supply chain` cron's `rustsec/audit-check`
+also files one issue for each (it skips an ID already named in
+an issue title), so each item here gains a GitHub issue the
+first Monday after the ignores were removed; this section
+keeps the reasoning, the issue the status. If one turns
 into a vulnerability advisory, or the crate becomes a direct
 dependency, the scanners will fail and it moves back up to
 the ignored list (or, better, gets fixed).
@@ -316,7 +334,10 @@ This plan is complete when:
   `.cargo/audit.toml` have been removed.
 - Each corresponding section above has been deleted from
   this plan file.
-- `cargo deny check` still passes with no ignores in place.
+- Every item under *Tracked warnings* has been resolved per
+  its own *Resolved when*, and that section is empty.
+- `cargo deny check` and `cargo audit` still pass with no
+  ignores in place.
 - Separately tracked: duplicate-version policy has been
   tightened to `deny` (not a gate for this plan, but
   the natural next step).
@@ -325,9 +346,6 @@ This plan is complete when:
 
 - Evaluate adding `cargo vet` once the current debt is
   cleared and we understand how noisy our baseline is.
-- Consider a recurring monthly cron that opens an issue if
-  new advisories appear (`cargo audit` in CI produces the
-  signal; we need a mechanism to route it).
 - Fail CI on an ignore that suppresses nothing. A stale
   entry survives until someone notices by hand -- which is
   how the September 2026 sweep found its four and the

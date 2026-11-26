@@ -2,10 +2,19 @@
 #
 # Lists only the advisories cargo audit itself fails on. cargo audit
 # reports unmaintained and unsound advisories as warnings, which do
-# not fail the job, so they need no entry here; deny.toml carries
-# RUSTSEC-2025-0134 because cargo-deny does fail on that one (it is
-# an unmaintained direct dependency). Each entry must have a matching
-# rationale section in docs/plans/PLAN-supply-chain-followups.md.
+# not fail the job, so they need no entry here. deny.toml has its own
+# list for cargo-deny, which fails on a different set; the two lists
+# are not mirrors (see docs/ci.md, "Supply-chain policy"). Each entry
+# must have a matching rationale section in
+# docs/plans/PLAN-supply-chain-followups.md.
+#
+# Two consumers read this file: ci.yml's cargo-audit job, which runs
+# the CLI, and supply-chain.yml's weekly cron, which runs
+# rustsec/audit-check. On its scheduled run the action opens one
+# issue for each vulnerability and each warning whose ID no existing
+# issue or PR title names. An entry here therefore also stops that
+# issue being filed, but an ignore is not the way to silence a
+# warning: the issue is how the warning gets tracked.
 #
 # The CI workflow runs both scanners and both must pass.
 

@@ -10,9 +10,10 @@
 # accepted. Every entry must have a URL, a rationale, and a
 # follow-up tracked in docs/plans/PLAN-supply-chain-followups.md.
 # Only add an entry that cargo-deny actually reports: unmaintained
-# and unsound advisories against transitive dependencies are out of
-# cargo-deny's default scope, and an ignore for one shows up as an
-# `advisory-not-detected` warning instead of suppressing anything.
+# and unsound advisories against transitive dependencies are outside
+# the `unmaintained` and `unsound` scopes set below, and an ignore for
+# one shows up as an `advisory-not-detected` warning instead of
+# suppressing anything.
 
 [graph]
 targets = [
@@ -24,6 +25,13 @@ targets = [
 [advisories]
 version = 2
 yanked = "deny"
+# Fail on unmaintained and unsound advisories only for the
+# workspace's direct dependencies. This is cargo-deny's default,
+# stated here because the ignore list below is sized to it: widening
+# either scope means revisiting the list, and the tracked warnings in
+# PLAN-supply-chain-followups.md would start to fail.
+unmaintained = "workspace"
+unsound = "workspace"
 ignore = [
     # RUSTSEC-2023-0071: rsa Marvin timing attack.
     # No fixed version available in the ecosystem yet. Exploitation

@@ -1180,12 +1180,21 @@ themselves do not state:
   lists are not mirrors. `cargo audit` fails only on
   vulnerabilities and warns about unmaintained and unsound
   crates; `cargo deny` also fails on unmaintained and unsound
-  advisories, but by default only for direct dependencies. So
+  advisories, but only for direct dependencies (the
+  `unmaintained` and `unsound` scopes in `deny.toml`). So
   confirm a scanner fails without the entry before adding it:
   an ignore that suppresses nothing implies a gate that does
   not exist, and `cargo deny` reports one in its own list as
   `advisory-not-detected`. Ignores are debt and should not
   accumulate silently.
+- **Warnings become issues, not ignores.** The weekly
+  `Supply chain` cron runs `rustsec/audit-check`, which reads
+  `.cargo/audit.toml` too, and on a scheduled run it opens one
+  issue for each vulnerability and each unmaintained or unsound
+  warning whose ID no existing issue or pull request title
+  names. A warning that fails neither scanner therefore gets
+  one tracking issue, filed once. Leave it to do that rather
+  than adding an ignore to stop it.
 - **Allowing a new licence** means adding a permissive SPDX
   identifier to `deny.toml`'s `licenses.allow` array. The
   `licenses.exceptions` array is for a narrower case: a single
