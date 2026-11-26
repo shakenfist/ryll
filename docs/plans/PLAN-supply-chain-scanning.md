@@ -197,7 +197,11 @@ work is one PR, roughly seven files.
   until we see the baseline noise.
 - Enabling `cargo deny` to block on unmaintained crates. We
   have at least one (`audiopus`) and the migration is
-  tracked separately in `PLAN-opus-decoder.md`.
+  tracked separately in `PLAN-opus-decoder.md`. (Superseded:
+  `deny.toml` now blocks on unmaintained direct dependencies
+  only, by an explicit scope; see the *Situation* section of
+  `PLAN-supply-chain-followups.md`. Retained as the record of
+  what was deferred.)
 - Extending self-hosted coverage to the macOS/Windows
   build matrix. Requires hardware we don't have.
 

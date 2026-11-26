@@ -26,10 +26,14 @@ targets = [
 version = 2
 yanked = "deny"
 # Fail on unmaintained and unsound advisories only for the
-# workspace's direct dependencies. This is cargo-deny's default,
-# stated here because the ignore list below is sized to it: widening
-# either scope means revisiting the list, and the tracked warnings in
-# PLAN-supply-chain-followups.md would start to fail.
+# workspace's direct dependencies. This matched cargo-deny's default
+# as of 0.22 (November 2026); it is stated here so the ignore list
+# below does not rest on a default the floating cargo-deny-action
+# could change. Widening either scope means revisiting the list, and
+# the tracked warnings in PLAN-supply-chain-followups.md would start
+# to fail. By design, cargo-deny does not see an unsound advisory
+# against a transitive dependency; the weekly cron's cargo-audit
+# files an issue for each one instead (see docs/ci.md).
 unmaintained = "workspace"
 unsound = "workspace"
 ignore = [

@@ -1191,10 +1191,13 @@ themselves do not state:
   `Supply chain` cron runs `rustsec/audit-check`, which reads
   `.cargo/audit.toml` too, and on a scheduled run it opens one
   issue for each vulnerability and each unmaintained or unsound
-  warning whose ID no existing issue or pull request title
-  names. A warning that fails neither scanner therefore gets
-  one tracking issue, filed once. Leave it to do that rather
-  than adding an ignore to stop it.
+  warning whose ID no issue or pull request title names, open
+  or closed (the action's search has no state filter). A
+  warning that fails neither scanner therefore gets one
+  tracking issue, filed once. Leave it to do that rather than
+  adding an ignore to stop it. An advisory that `cargo deny`
+  fails on but `cargo audit` only warns about gets both: an
+  entry in `deny.toml` and a tracking issue.
 - **Allowing a new licence** means adding a permissive SPDX
   identifier to `deny.toml`'s `licenses.allow` array. The
   `licenses.exceptions` array is for a narrower case: a single

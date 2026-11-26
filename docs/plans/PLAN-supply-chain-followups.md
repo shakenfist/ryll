@@ -32,8 +32,9 @@ All four were removed from `deny.toml` and
 `.cargo/audit.toml` in September 2026, after `cargo deny`
 reported them as `advisory-not-detected`.
 
-In November 2026 eight more ignores were removed although
-nothing they covered had been fixed: items 1 and 4-8 below.
+In November 2026 eight more ignore entries were removed
+although nothing they covered had been fixed: six items, 1 and
+4-8 below, with item 5 covering three advisory IDs.
 Run with no ignores at all, neither scanner failed on any of
 them, and the `cargo audit` and `cargo deny` lanes both
 passed once they were gone (CI run 45772182263, where
@@ -43,7 +44,12 @@ dependencies. As observed in November 2026, cargo-deny checks
 unmaintained and unsound advisories only for the workspace's
 direct dependencies by default; `deny.toml` now states that
 scope explicitly (`unmaintained` and `unsound`), so it no
-longer rests on a default. cargo-deny never reported the
+longer rests on a default. Both are real scope keys: the
+`cargo deny` lane on the tree that set them (CI run
+45789484154) reported no unknown-field diagnostic, and
+widening both to `"all"` locally makes cargo-deny fail on the
+tracked warnings below and on transitive unsound advisories
+in `heapless` and `lru`. cargo-deny never reported the
 eight and flagged each ignore as `advisory-not-detected`;
 cargo audit reports them as warnings, which do not fail the
 job. The ignores gated nothing, and their presence implied a
@@ -56,8 +62,10 @@ with inline rationale so that the scanners pass against
 `.cargo/audit.toml`, because cargo audit does not fail on
 RUSTSEC-2025-0134. Each list holds only what its own scanner
 fails on. Because cargo audit warns about RUSTSEC-2025-0134
-without ignoring it, the weekly cron files an issue for it
-too, as it does for the tracked warnings below. This plan
+without ignoring it, the weekly cron tracks it with an issue
+too, as it does the tracked warnings below; an ignore entry
+and an issue for the same advisory is expected, not a
+double count. This plan
 tracks the debt so we can pay it down.
 
 Each ignore entry has a matching section below. When an
@@ -121,12 +129,12 @@ and the sections are not in numeric order.
 These advisories fail neither scanner, so they carry no
 ignore: cargo audit lists them as warnings on every run, and
 cargo-deny does not check them at all. They are tracked here
-because each is still debt worth paying down. Without an
-ignore, the weekly `Supply chain` cron's `rustsec/audit-check`
-also files one issue for each (it skips an ID already named in
-an issue title), so each item here gains a GitHub issue the
-first Monday after the ignores were removed; this section
-keeps the reasoning, the issue the status. If one turns
+because each is still debt worth paying down. Each is also
+tracked by a GitHub issue that the weekly `Supply chain`
+cron's `rustsec/audit-check` files for any warning no issue or
+pull request title names yet; this section keeps the
+reasoning, the issue the status. Leave the issue open until
+the crate leaves `cargo tree`. If one turns
 into a vulnerability advisory, or the crate becomes a direct
 dependency, the scanners will fail and it moves back up to
 the ignored list (or, better, gets fixed).
