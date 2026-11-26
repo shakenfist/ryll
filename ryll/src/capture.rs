@@ -987,8 +987,14 @@ impl CaptureSession {
     /// **Caveat**: MP4 finalisation is not synchronous with
     /// `close()`. A bug report assembled within milliseconds
     /// of `close()` may see a not-yet-finalised (unplayable)
-    /// MP4. See decision 6 in `docs/design-decisions.md` for the
-    /// trade-off.
+    /// MP4. Finalising here instead would block the caller on
+    /// the encoder draining, which the `App::update` call sites
+    /// above must not do, so the moov atom is written on the
+    /// encoder thread once the sender drops. [`close_and_wait`]
+    /// waits for that, and the exit paths in `main` use it, so a
+    /// clean exit still leaves a playable file. The trade-off is
+    /// recorded under "Unbuffered capture I/O on dedicated
+    /// threads" in `docs/design-decisions.md`.
     pub fn close(&self) {
         if self.closed.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return; // already closed
