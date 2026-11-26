@@ -27,7 +27,7 @@ use shakenfist_spice_renderer::{
     even_dimensions, EncodedFrame, EncoderControl, EncoderTask, H264Encoder, RealFrameSource,
     SurfaceMirror,
 };
-use shakenfist_spice_webrtc::{WebrtcBridge, WebrtcBridgeConfig};
+use shakenfist_spice_webrtc::{GatheringTimeout, WebrtcBridge, WebrtcBridgeConfig};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -78,6 +78,19 @@ pub struct EncoderInfra {
     /// JoinHandle of the running encoder task. `None` until
     /// the first restart.
     handle: Option<JoinHandle<anyhow::Result<()>>>,
+    /// The `POST /offer` request whose restart started the running
+    /// encoder, numbered from `WebState::offer_epoch`. `None` when
+    /// nothing is running.
+    ///
+    /// This is what lets a party that concludes "no viewer is
+    /// attached" tell whether the encoder it is about to stop is the
+    /// one *its* viewer was using. There is one encoder per process,
+    /// and a later offer restarts it long before that offer's bridge
+    /// is installed, so neither the bridge slot nor
+    /// `bridge_generation` can answer the question; the encoder can,
+    /// because every restart passes through here. See
+    /// `crate::web::lifecycle::stop_viewer_pipeline`.
+    owner: Option<u64>,
 }
 
 impl EncoderInfra {
@@ -85,7 +98,14 @@ impl EncoderInfra {
         Self {
             control_tx: None,
             handle: None,
+            owner: None,
         }
+    }
+
+    /// The offer whose restart started the running encoder, or `None`
+    /// if nothing is running. See [`Self::owner`]'s field docs.
+    pub fn owner(&self) -> Option<u64> {
+        self.owner
     }
 
     /// Stop any existing encoder, spawn a fresh one, and
@@ -104,10 +124,17 @@ impl EncoderInfra {
     /// session has not yet produced a primary surface,
     /// returns `Err` with [`RESTART_ERR_NO_PRIMARY`]; the
     /// HTTP handler maps that to 503 so the browser retries
-    /// after session-init finishes.
+    /// after session-init finishes, and leaves the running encoder
+    /// and its owner exactly as they were.
+    ///
+    /// `owner` is the offer this restart is for. It is recorded only
+    /// once the new encoder is running; a restart that stopped the old
+    /// encoder and then failed to build a new one leaves no owner,
+    /// because nothing is running.
     pub async fn restart(
         &mut self,
         surface_mirror: &Arc<Mutex<SurfaceMirror>>,
+        owner: u64,
     ) -> anyhow::Result<(mpsc::Receiver<EncodedFrame>, mpsc::Sender<EncoderControl>)> {
         // Read primary surface dimensions before tearing the
         // old encoder down — if the mirror has no primary yet
@@ -144,6 +171,7 @@ impl EncoderInfra {
             // fine and shouldn't error here.
             let _ = tx.send(EncoderControl::Stop).await;
         }
+        self.owner = None;
         if let Some(h) = self.handle.take() {
             let aborted = tokio::time::timeout(std::time::Duration::from_secs(2), h).await;
             match aborted {
@@ -169,6 +197,7 @@ impl EncoderInfra {
         // again internally; either copy works).
         self.control_tx = Some(control_tx.clone());
         self.handle = Some(handle);
+        self.owner = Some(owner);
 
         info!(
             "web: encoder restarted at {}x{}@{}fps",
@@ -189,6 +218,7 @@ impl EncoderInfra {
     /// it is abandoned — the task will exit naturally on the
     /// next send error once all receivers are dropped.
     pub async fn stop(&mut self) {
+        self.owner = None;
         if let Some(tx) = self.control_tx.take() {
             let _ = tx.send(EncoderControl::Stop).await;
         }
@@ -216,32 +246,60 @@ impl Default for EncoderInfra {
 ///
 /// Everything `accept_offer` rejects is the browser's offer being
 /// unusable — malformed SDP, no codec in common — except a gathering
-/// timeout, which happened entirely on this side. Reporting that as
-/// `400 Bad Request` tells the operator the browser sent rubbish and
-/// tells the page to stop retrying; `504 Gateway Timeout` says what
-/// happened and reads as worth another go.
+/// timeout, which happened entirely on this side. `400 Bad Request`
+/// would have the operator looking at the browser for a fault in this
+/// host's networking; `504 Gateway Timeout` names the right side, in
+/// the log and in the status line the page shows. The page itself
+/// treats every failure the same way, so this is diagnosis rather than
+/// a retry policy.
 ///
-/// Matched by the sentinel the webrtc crate puts in the message, for
-/// the same reason [`RESTART_ERR_NO_PRIMARY`] is a const: the
-/// producer and the consumer have to agree on the string.
-fn accept_offer_status(msg: &str) -> StatusCode {
-    if msg.contains(shakenfist_spice_webrtc::GATHERING_TIMEOUT_ERR) {
+/// Classified on the error's type, not its text. The message also
+/// carries whatever the SDP parser said about the browser's offer, so
+/// a match on a phrase could be steered by what the browser sent.
+fn accept_offer_status(err: &anyhow::Error) -> StatusCode {
+    if err.downcast_ref::<GatheringTimeout>().is_some() {
         StatusCode::GATEWAY_TIMEOUT
     } else {
         StatusCode::BAD_REQUEST
     }
 }
 
-/// Whether the request that entered `post_offer` at
-/// `generation_at_entry` is still the latest offer, and so still owns
-/// the shared encoder and audio slot.
+/// Close a bridge that will never be installed, and stop the encoder
+/// and audio pump started for it if they are still this offer's.
 ///
-/// `bridge_generation` is bumped once per bridge installed, so an
-/// unchanged counter means no later offer has reached step 7. The
-/// reaper reads the same counter for the same reason; see
-/// `crate::web::lifecycle::run_bridge_reaper`.
-fn still_the_current_offer(state: &WebState, generation_at_entry: u64) -> bool {
-    state.bridge_generation.load(Ordering::SeqCst) == generation_at_entry
+/// Used by every `post_offer` failure after the encoder restart. The
+/// bridge is not in `bridge_slot`, so nothing else will ever reap it,
+/// and on webrtc-rs 0.20 dropping it detaches the driver task rather
+/// than stopping it — the peer connection, its UDP sockets (one per
+/// non-loopback interface), the control-DC pump and the input relay
+/// would all outlive the failed request. A client posting malformed
+/// SDP in a loop would accumulate them for the life of the process;
+/// the offer cooldown bounds the rate, not the total.
+/// `WebrtcBridge`'s `Drop` is a backstop for paths that forget, but
+/// here the close is awaited, so teardown is finished before the error
+/// goes back.
+///
+/// The encoder and the audio slot are not the bridge's: there is one
+/// of each per process. A later offer may already have restarted the
+/// encoder for itself while this one was still gathering — the
+/// cooldown bounds how often an offer may *start*, and this one can
+/// sit in `accept_offer` for up to `GATHER_TIMEOUT` — and that
+/// session must survive this one's failure.
+/// [`crate::web::lifecycle::stop_viewer_pipeline`] makes the decision,
+/// on the encoder's recorded owner.
+async fn abandon_offer(state: &WebState, offer: u64, bridge: Option<WebrtcBridge>) {
+    if let Some(bridge) = bridge {
+        if let Err(ce) = bridge.close().await {
+            warn!("web: closing an abandoned bridge errored: {}", ce);
+        }
+    }
+    if !crate::web::lifecycle::stop_viewer_pipeline(state, offer).await {
+        debug!(
+            "web: offer {} failed after a later offer took over the encoder; leaving the \
+             encoder and audio slot alone",
+            offer
+        );
+    }
 }
 
 /// `POST /offer` handler.
@@ -252,14 +310,18 @@ fn still_the_current_offer(state: &WebState, generation_at_entry: u64) -> bool {
 /// 2. Drop the lock and close the old bridge (lets its
 ///    video-pump task drop the old `frame_rx`).
 /// 3. Take `encoder` lock; `restart()` to get a fresh
-///    `frame_rx` and a fresh `control_tx`.
+///    `frame_rx` and a fresh `control_tx`, recording this offer
+///    as the encoder's owner.
 /// 4. Build the new [`WebrtcBridge`] with `control_tx` as
 ///    `encoder_control`.
 /// 5. `spawn_video_pump(frame_rx)` and
 ///    `spawn_synthetic_audio_pump`.
 /// 6. `accept_offer(offer.sdp)` -> answer SDP.
-/// 7. Take `bridge_slot` lock; store the new bridge.
+/// 7. Take `bridge_slot` lock; store the new bridge and the offer
+///    that installed it.
 /// 8. Return JSON answer.
+///
+/// Any failure after step 3 goes through `abandon_offer`.
 pub async fn post_offer(
     State(state): State<Arc<WebState>>,
     Json(offer): Json<OfferReq>,
@@ -288,21 +350,20 @@ pub async fn post_offer(
         }
     }
 
+    // This request's number. The encoder restart below records it as
+    // the encoder's owner and step 7 records it against the installed
+    // bridge, so whoever later decides no viewer is attached — this
+    // request's own failure path, or the reaper — can tell whether
+    // the encoder is still the one that viewer was using. See
+    // `EncoderInfra::owner`.
+    let my_offer = state.offer_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+
     info!(
-        "web: /offer received (type={}, sdp_len={})",
+        "web: /offer {} received (type={}, sdp_len={})",
+        my_offer,
         offer.req_type,
         offer.sdp.len()
     );
-
-    // The generation this request starts from. Only the failure path
-    // below reads it, to tell "nothing has happened since" from "a
-    // later offer has installed its own bridge", which decides
-    // whether the shared encoder and audio slot are still ours to
-    // stop. The cooldown makes that interleaving rare, not
-    // impossible: it bounds how often an offer may *start*, and this
-    // request can sit in `accept_offer` for longer than a second
-    // waiting for ICE gathering.
-    let generation_at_entry = state.bridge_generation.load(Ordering::SeqCst);
 
     // Step 1+2: replace any existing bridge.
     let old_bridge = {
@@ -322,7 +383,7 @@ pub async fn post_offer(
     // sentinel as a 503 so the browser retries.
     let (frame_rx, encoder_control) = {
         let mut enc = state.encoder.lock().await;
-        match enc.restart(&state.surface_mirror).await {
+        match enc.restart(&state.surface_mirror, my_offer).await {
             Ok(pair) => pair,
             Err(e) => {
                 let msg = e.to_string();
@@ -337,19 +398,24 @@ pub async fn post_offer(
         }
     };
 
-    // Step 4: build the new bridge.
-    let bridge = WebrtcBridge::new(WebrtcBridgeConfig {
+    // Step 4: build the new bridge. A failure here strands the
+    // encoder just restarted exactly as a failed `accept_offer` does.
+    let bridge = match WebrtcBridge::new(WebrtcBridgeConfig {
         ice_servers: state.ice_servers.clone(),
         encoder_control,
         udp_bind: state.udp_bind.clone(),
     })
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("bridge new: {}", e),
-        )
-    })?;
+    {
+        Ok(bridge) => bridge,
+        Err(e) => {
+            abandon_offer(&state, my_offer, None).await;
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("bridge new: {}", e),
+            ));
+        }
+    };
 
     // Step 5: spawn pumps. The handles are detached — the
     // pumps live for as long as the bridge does. Closing the
@@ -404,44 +470,14 @@ pub async fn post_offer(
         }
     }
 
-    // Step 6: SDP exchange.
-    //
-    // Close the bridge explicitly on the error path, and stop the work
-    // started for it. It is not in `bridge_slot` yet, so nothing else
-    // will ever reap it, and on 0.20 dropping it detaches the driver
-    // task rather than stopping it — the peer connection, its UDP
-    // sockets (one per non-loopback interface), the control-DC pump,
-    // and the input relay spawned above would all outlive the failed
-    // request. A client posting malformed SDP in a loop would
-    // accumulate them for the life of the process; the offer cooldown
-    // bounds the rate, not the total. `WebrtcBridge`'s `Drop` is a
-    // backstop for paths that forget, but here the close is awaited,
-    // so teardown is finished before the 400 goes back.
-    //
-    // The encoder restarted at step 3 and the audio sender installed
-    // at step 5 are not the bridge's to drop, and a failed offer
-    // leaves them running for a viewer that does not exist — burning
-    // a core on H.264 nobody receives until the next offer restarts
-    // it. They are stopped here through the same helper the reaper
-    // uses, but only while this request is still the latest one: a
-    // later offer that has already installed its bridge owns the
-    // encoder and the audio slot now, and its session must survive
-    // this one's failure.
+    // Step 6: SDP exchange. On failure, undo everything this request
+    // started; see `abandon_offer`.
     let answer_sdp = match bridge.accept_offer(offer.sdp).await {
         Ok(sdp) => sdp,
         Err(e) => {
-            if let Err(ce) = bridge.close().await {
-                warn!("web: closing an abandoned bridge errored: {}", ce);
-            }
-            if still_the_current_offer(&state, generation_at_entry) {
-                crate::web::lifecycle::stop_viewer_pipeline(&state).await;
-            } else {
-                debug!(
-                    "web: a later offer installed its own bridge while this one failed;                      leaving the encoder and audio slot alone"
-                );
-            }
-            let msg = format!("accept_offer: {}", e);
-            return Err((accept_offer_status(&msg), msg));
+            let status = accept_offer_status(&e);
+            abandon_offer(&state, my_offer, Some(bridge)).await;
+            return Err((status, format!("accept_offer: {}", e)));
         }
     };
 
@@ -465,10 +501,13 @@ pub async fn post_offer(
     // Step 7: store the new bridge and bump the generation
     // counter so the reaper knows not to act on the dead
     // signal from the OLD bridge (which may fire after the
-    // new bridge is already in the slot).
+    // new bridge is already in the slot). Record which offer
+    // installed it under the same lock, so the reaper reads the
+    // bridge and its offer as a pair.
     {
         let mut slot = state.bridge_slot.lock().await;
         *slot = Some(bridge);
+        state.installed_offer.store(my_offer, Ordering::SeqCst);
         state.bridge_generation.fetch_add(1, Ordering::SeqCst);
     }
 
@@ -562,13 +601,12 @@ mod tests {
         // expectations don't match the answer side. That is
         // what the seed datachannel is for.
         //
-        // This test previously built its client without the
-        // bridge's explicit H.264 registration. That turns out
-        // to be indistinguishable from registering it --
-        // webrtc-rs's default codecs already advertise H.264 --
-        // so `TestPeer`'s single spelling is used here too. See
-        // `register_h264_is_redundant_with_default_codecs` in
-        // shakenfist-spice-webrtc.
+        // `TestPeer`'s default client offers webrtc-rs's default
+        // codecs, which include H.264, so it needs no codec setup
+        // of its own. Whether each browser's H.264 profile
+        // negotiates against the bridge's single entry is
+        // `both_browser_h264_profiles_negotiate_video` in
+        // shakenfist-spice-webrtc's `tests/loopback.rs`.
         let client = TestPeer::builder()
             .seed_control_channel()
             .build()
@@ -615,6 +653,17 @@ mod tests {
             lower.contains("h264"),
             "answer SDP should advertise H264:\n{}",
             answer.sdp
+        );
+
+        // The installed bridge and the running encoder agree on which
+        // offer they belong to. The reaper stops the encoder only for
+        // the offer recorded against the bridge it reaps, so if these
+        // disagree a viewer who leaves leaves its encoder running.
+        let owner = state.encoder.lock().await.owner();
+        assert_eq!(
+            Some(state.installed_offer.load(Ordering::SeqCst)),
+            owner,
+            "the installed bridge's offer is not the encoder's owner"
         );
 
         // Cleanup: feed the answer back to the client PC so
@@ -743,7 +792,7 @@ mod tests {
         let mirror = Arc::new(Mutex::new(SurfaceMirror::new()));
         let mut infra = EncoderInfra::new();
         let err = infra
-            .restart(&mirror)
+            .restart(&mirror, 1)
             .await
             .expect_err("restart should error on empty mirror");
         let msg = err.to_string();
@@ -771,7 +820,7 @@ mod tests {
         }
         let mut infra = EncoderInfra::new();
         let (frame_rx, control_tx) = infra
-            .restart(&mirror)
+            .restart(&mirror, 1)
             .await
             .expect("restart should succeed");
         // Sanity: the channel pair is alive.
@@ -800,7 +849,7 @@ mod tests {
         }
         let mut infra = EncoderInfra::new();
         let (_frame_rx, _control_tx) = infra
-            .restart(&mirror)
+            .restart(&mirror, 1)
             .await
             .expect("restart should succeed");
         // Encoder is running. Now stop it via stop().
@@ -876,52 +925,138 @@ mod tests {
     }
 
     /// A gathering timeout is this side's failure, not the browser's,
-    /// and the handler has to say so: the page shows the status, and a
-    /// 400 would have the operator looking at the browser.
+    /// and the handler has to say so: a 400 would have the operator
+    /// looking at the browser.
+    ///
+    /// The second half is why the decision is on the error's type: a
+    /// failure whose *message* happens to say the same thing — which
+    /// the SDP parser quoting the browser's offer back could arrange —
+    /// is still the browser's.
     #[test]
     fn a_gathering_timeout_is_a_gateway_timeout_not_a_bad_request() {
-        let timed_out = format!(
-            "accept_offer: {} within 20s: no local description at all",
-            shakenfist_spice_webrtc::GATHERING_TIMEOUT_ERR
-        );
+        let timed_out = anyhow::Error::from(GatheringTimeout {
+            timeout: Duration::from_secs(20),
+            progress: "no local description at all".to_string(),
+        });
         assert_eq!(
             accept_offer_status(&timed_out),
             StatusCode::GATEWAY_TIMEOUT,
             "a gathering timeout must not be reported as a bad offer"
         );
         assert_eq!(
-            accept_offer_status("accept_offer: SdpInvalidSyntax"),
+            accept_offer_status(&anyhow::anyhow!("SdpInvalidSyntax")),
             StatusCode::BAD_REQUEST,
             "an unusable offer is still the browser's fault"
         );
+        let lookalike = anyhow::anyhow!("SdpInvalidSyntax: {}", timed_out);
+        assert_eq!(
+            accept_offer_status(&lookalike),
+            StatusCode::BAD_REQUEST,
+            "a message that merely reads like a gathering timeout is not one"
+        );
     }
 
-    /// The teardown above must not reach across a newer viewer. If a
-    /// later offer has installed its bridge — which bumps
-    /// `bridge_generation` — the encoder and the audio slot belong to
-    /// that session, and a failure finishing afterwards must leave
-    /// them alone.
+    /// Whether `post_offer`'s pipeline is still running, observed from
+    /// outside: the encoder has an owner and its control channel is
+    /// open, and the audio slot holds a sender.
+    async fn pipeline_running(
+        state: &WebState,
+        enc_control: &mpsc::Sender<EncoderControl>,
+    ) -> bool {
+        let enc = state.encoder.lock().await;
+        enc.owner().is_some()
+            && !enc_control.is_closed()
+            && state.active_opus_tx.lock().expect("opus slot").is_some()
+    }
+
+    /// A failed offer must not stop the pipeline of a later offer that
+    /// is still in flight — one that has restarted the encoder and
+    /// installed its audio sender but not yet installed its bridge.
     ///
-    /// Tested on the predicate rather than through `post_offer`,
-    /// because the interleaving it guards against cannot be staged
-    /// deterministically from outside: the bump has to land after the
-    /// handler has read the counter and before its `accept_offer`
-    /// returns, and a malformed offer fails that fast with no await
-    /// point in between. The predicate is the whole of the decision.
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_later_offer_takes_ownership_of_the_shared_pipeline() {
+    /// That is the interleaving the 20 s gathering bound makes
+    /// ordinary rather than theoretical: a slow offer can be overtaken
+    /// by up to twenty later ones before it gives up, none of which has
+    /// reached step 7. An earlier version decided on
+    /// `bridge_generation`, which only step 7 bumps, and so stopped the
+    /// newer session's encoder and audio here.
+    ///
+    /// The other half is the case a cheaper fix gets wrong: a later
+    /// offer that *entered* but failed before restarting the encoder
+    /// (the 503 for a missing primary surface) took nothing over, so
+    /// the earlier offer still owns the pipeline and must still stop
+    /// it. Deciding on "has any later offer started" would leak it.
+    ///
+    /// Staged through `abandon_offer`, which is the whole of what the
+    /// failure paths do; the steps before it are done here as
+    /// `post_offer` does them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_offer_leaves_a_later_offers_pipeline_alone() {
         let state = WebState::new();
-        let generation_at_entry = state.bridge_generation.load(Ordering::SeqCst);
+        seed_primary_surface(&state).await;
+
+        // Offer 1 restarts the encoder and installs its audio sender,
+        // then sits in `accept_offer`.
+        let first = state.offer_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+        let (_frame_rx_1, enc_control_1) = state
+            .encoder
+            .lock()
+            .await
+            .restart(&state.surface_mirror, first)
+            .await
+            .expect("first restart");
+        let _opus_rx_1 = install_opus_sender(&state);
+
+        // A later offer enters and fails before touching the encoder.
+        state.offer_epoch.fetch_add(1, Ordering::SeqCst);
+
+        // Offer 3 restarts the encoder for itself and installs its own
+        // audio sender, then is also still gathering.
+        let third = state.offer_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+        let (_frame_rx_3, enc_control_3) = state
+            .encoder
+            .lock()
+            .await
+            .restart(&state.surface_mirror, third)
+            .await
+            .expect("third restart");
+        let _opus_rx_3 = install_opus_sender(&state);
         assert!(
-            still_the_current_offer(&state, generation_at_entry),
-            "with no later bridge installed, the failing offer still owns the pipeline"
+            enc_control_1.is_closed(),
+            "the restart should have stopped offer 1's encoder"
         );
 
-        // Step 7 of a later offer: install a bridge, bump the counter.
-        state.bridge_generation.fetch_add(1, Ordering::SeqCst);
+        // Offer 1's gathering times out.
+        abandon_offer(&state, first, None).await;
         assert!(
-            !still_the_current_offer(&state, generation_at_entry),
-            "once a later offer has installed its bridge, the pipeline is no longer ours"
+            pipeline_running(&state, &enc_control_3).await,
+            "a failed offer stopped the encoder or audio of a later offer still in flight"
+        );
+
+        // Offer 3 fails too, and its pipeline is its own to stop.
+        abandon_offer(&state, third, None).await;
+        assert!(
+            !pipeline_running(&state, &enc_control_3).await,
+            "the offer that owns the pipeline must stop it when it fails"
+        );
+
+        // Now the half where nothing took over: offer 4 restarts, a
+        // later offer enters and fails early, and offer 4 must still
+        // clean up after itself.
+        let fourth = state.offer_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+        let (_frame_rx_4, enc_control_4) = state
+            .encoder
+            .lock()
+            .await
+            .restart(&state.surface_mirror, fourth)
+            .await
+            .expect("fourth restart");
+        let _opus_rx_4 = install_opus_sender(&state);
+        state.offer_epoch.fetch_add(1, Ordering::SeqCst);
+        abandon_offer(&state, fourth, None).await;
+        assert!(
+            !pipeline_running(&state, &enc_control_4).await,
+            "a later offer that never restarted the encoder took nothing over; the failing \
+             offer still owns the pipeline and must stop it"
         );
     }
 

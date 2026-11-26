@@ -96,6 +96,20 @@ pub struct WebState {
     /// wakes, a new bridge has replaced the old one and the
     /// reaper skips the reap to avoid closing a healthy bridge.
     pub bridge_generation: Arc<AtomicU64>,
+    /// Number of the last `POST /offer` to get past the cooldown.
+    /// Each request takes the next value at entry and carries it as
+    /// its identity: the encoder records it as its owner on restart
+    /// (`EncoderInfra::owner`), and step 7 records it in
+    /// [`Self::installed_offer`]. Offers are numbered from 1, so 0
+    /// means none.
+    pub offer_epoch: AtomicU64,
+    /// The offer whose bridge is in `bridge_slot`. Written by
+    /// `post_offer` under the slot lock as it installs the bridge, and
+    /// read by the reaper under the same lock, so the two are always
+    /// a pair. The reaper passes it to
+    /// `crate::web::lifecycle::stop_viewer_pipeline`, which stops the
+    /// encoder only if that offer still owns it.
+    pub installed_offer: AtomicU64,
     /// Raised by `POST /offer` once a new bridge is in the slot and
     /// [`Self::bridge_generation`] has been bumped.
     ///
@@ -237,6 +251,8 @@ impl WebState {
             surface_mirror,
             active_opus_tx,
             bridge_generation: Arc::new(AtomicU64::new(0)),
+            offer_epoch: AtomicU64::new(0),
+            installed_offer: AtomicU64::new(0),
             bridge_replaced: Arc::new(Notify::new()),
             udp_bind,
             ice_servers,

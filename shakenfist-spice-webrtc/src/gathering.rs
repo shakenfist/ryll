@@ -16,7 +16,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use webrtc::peer_connection::PeerConnection;
 
 use crate::sticky::StickySignal;
@@ -37,12 +37,24 @@ pub const GATHER_TIMEOUT: Duration = Duration::from_secs(20);
 /// bound of its own.
 const GATHER_DIAGNOSIS_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Marker in the error [`wait_for_gathering`] returns, so a caller can
-/// tell a gathering timeout from the other ways accepting an offer can
-/// fail without parsing prose. Ryll's `POST /offer` handler answers
-/// `504 Gateway Timeout` on this, rather than reporting the browser's
-/// offer as malformed.
-pub const GATHERING_TIMEOUT_ERR: &str = "ice gathering did not complete";
+/// The error [`wait_for_gathering`] returns when gathering does not
+/// complete in time.
+///
+/// A type rather than a phrase in the message, so a caller can tell a
+/// gathering timeout from the other ways accepting an offer can fail
+/// with `anyhow::Error::downcast_ref`. Matching on text would not do:
+/// the other failures quote the SDP parser on the remote offer, so the
+/// remote side has a say in what their messages contain. Ryll's
+/// `POST /offer` handler answers `504 Gateway Timeout` on this, rather
+/// than reporting the browser's offer as malformed.
+#[derive(Debug, thiserror::Error)]
+#[error("ice gathering did not complete within {timeout:?}: {progress}")]
+pub struct GatheringTimeout {
+    /// The bound that ran out.
+    pub timeout: Duration,
+    /// How far gathering got, for the operator.
+    pub progress: String,
+}
 
 /// Wait for `gathered` to be raised, or fail after `timeout` saying how
 /// far gathering got.
@@ -86,7 +98,5 @@ pub(crate) async fn wait_for_gathering(
                    driver is probably wedged holding the lock"
                 .to_owned(),
         };
-    Err(anyhow!(
-        "{GATHERING_TIMEOUT_ERR} within {timeout:?}: {progress}"
-    ))
+    Err(GatheringTimeout { timeout, progress }.into())
 }

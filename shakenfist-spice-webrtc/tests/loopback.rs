@@ -22,8 +22,10 @@
 //! The tests below it narrow the client's codec set: one offers a
 //! reduced-but-workable set and still expects media, the other offers
 //! no H.264 at all and expects the encoder task to retire rather than
-//! spin. Each carries its own doc comment; this list is a summary of
-//! the first test, not an inventory of the file.
+//! spin. The last two stop short of media and assert on the answer
+//! SDP: what the bridge advertises, and that both browsers' H.264
+//! profiles still negotiate. Each carries its own doc comment; this
+//! list is a summary of the first test, not an inventory of the file.
 //!
 //! No browser involved; SDP exchange is direct between the two
 //! peers. ICE uses host-only candidates (empty `ice_servers`).
@@ -331,21 +333,21 @@ async fn loopback_video_audio_datachannel() {
 /// include the payload types the bridge registered.
 ///
 /// `loopback_video_audio_datachannel` above cannot catch this. Its
-/// `TestPeer` registers the same codec set as the bridge, so every
-/// payload type the bridge might stamp is negotiated and accepted no
-/// matter where the number came from. Real browsers offer a subset:
-/// Chrome offers H.264 `42001f` (which matches the MediaEngine entry at
-/// PT 102), Firefox offers only `42e01f` (which matches PT 125). The
-/// core remaps each offered codec onto whichever of *our* entries it
-/// matched, and 0.20's `write_rtp` then rejects any packet whose
-/// payload type is not on the resulting list.
+/// `TestPeer` offers webrtc-rs's default codecs, numbered the way the
+/// bridge's own entries are, so the payload type the bridge stamps is
+/// negotiated and accepted no matter where the number came from. Real
+/// browsers number their codecs however they like. The core remaps
+/// each offered codec onto the bridge's entry it matched, and 0.20's
+/// `write_rtp` then rejects any packet whose payload type is not on
+/// the resulting list.
 ///
 /// So this offers what Firefox offers, and numbers it the way Firefox
 /// does — 126 for H.264 and 109 for Opus, neither of which is a number
-/// the bridge registers — and asserts packets still arrive. Stamping a
-/// constant fails this test with zero video packets while every other
-/// test in the suite stays green, which is exactly the failure mode
-/// worth a dedicated test.
+/// the bridge registers — and asserts packets still arrive. While the
+/// bridge registered several H.264 entries, stamping a constant failed
+/// this test with zero video packets while every other test in the
+/// suite stayed green, which is exactly the failure mode worth a
+/// dedicated test; with one entry it holds the remapping down instead.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loopback_media_flows_when_client_offers_a_narrow_codec_set() {
     let (server_enc_tx, server_enc_rx) = mpsc::channel::<EncoderControl>(4);
@@ -595,4 +597,143 @@ async fn loopback_video_stops_when_the_client_offers_no_h264() {
 
     server.close().await.expect("server close");
     client.close().await.expect("client close");
+}
+
+/// `a=rtpmap` lines from an SDP, lowercased.
+fn rtpmap_lines(sdp: &str) -> Vec<String> {
+    sdp.lines()
+        .filter(|l| l.starts_with("a=rtpmap:"))
+        .map(|l| l.to_ascii_lowercase())
+        .collect()
+}
+
+/// The answer advertises only what the pumps can send.
+///
+/// The client offers the broad default set a browser offers, so
+/// anything in the answer beyond H.264 and Opus is something this
+/// bridge chose to advertise and will never send: VP8, VP9, AV1
+/// and HEVC have no encoder behind them, an RTX codec promises
+/// retransmission the bridge does not do (a browser that NACKs
+/// gets silence), and G.722, PCMU and PCMA are not what the SPICE
+/// playback channel hands over.
+///
+/// The RTCP feedback types stay, and are asserted here so that
+/// narrowing the codec set does not quietly take them with it:
+/// `nack pli` is how a browser asks for a keyframe, which is the
+/// one feedback request this bridge is in a position to answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_answer_advertises_only_what_the_bridge_can_send() {
+    let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
+    let bridge = WebrtcBridge::new(WebrtcBridgeConfig::for_tests(tx))
+        .await
+        .expect("bridge");
+    let client = TestPeer::builder()
+        .seed_control_channel()
+        .build()
+        .await
+        .expect("client peer");
+    let offer_sdp = client.offer_and_gather().await.expect("client offer");
+
+    // Guard the premise: a client that offered a narrow set could
+    // not tell a narrow answer from an echo of its own offer.
+    let offered = rtpmap_lines(&offer_sdp);
+    assert!(
+        offered.iter().any(|l| l.contains("vp8")),
+        "the test client should offer the broad set a browser does:\n{offer_sdp}"
+    );
+
+    let answer_sdp = bridge.accept_offer(offer_sdp).await.expect("accept offer");
+    let answered = rtpmap_lines(&answer_sdp);
+
+    assert!(
+        answered.iter().any(|l| l.contains("h264")),
+        "the answer must still advertise H.264:\n{answer_sdp}"
+    );
+    assert!(
+        answered.iter().any(|l| l.contains("opus")),
+        "the answer must still advertise Opus:\n{answer_sdp}"
+    );
+    for unsendable in ["vp8", "vp9", "av1", "h265", "rtx", "g722", "pcmu", "pcma"] {
+        assert!(
+            !answered.iter().any(|l| l.contains(unsendable)),
+            "the answer advertises {unsendable}, which the bridge never sends:\n{answer_sdp}"
+        );
+    }
+    // RTX also shows up as an `apt=` fmtp and an FID ssrc-group,
+    // which is what a browser keys retransmission off.
+    assert!(
+        !answer_sdp.contains("apt="),
+        "the answer still carries an RTX association:\n{answer_sdp}"
+    );
+    assert!(
+        !answer_sdp.contains("ssrc-group:FID"),
+        "the answer still carries an RTX ssrc group:\n{answer_sdp}"
+    );
+    // The profile in the answer is the one the encoder emits.
+    // Before the MediaEngine was narrowed, the default PT 102
+    // entry won and the answer said `42001f` while openh264 sent
+    // baseline `42e01f`.
+    assert!(
+        answer_sdp.contains("profile-level-id=42e01f"),
+        "the answer should name the profile the encoder emits:\n{answer_sdp}"
+    );
+    // `nack`, `nack pli` and `transport-cc` are still advertised,
+    // by the interceptor chain rather than by the codec
+    // registration — see `register_sendable_codecs`.
+    assert!(
+        answer_sdp.contains("nack pli"),
+        "the interceptors' feedback should survive the narrower codec set:\n{answer_sdp}"
+    );
+
+    client.close().await.expect("client close");
+    bridge.close().await.expect("bridge close");
+}
+
+/// Both profile-level-ids browsers actually offer still negotiate
+/// a video codec against the single entry the bridge registers.
+///
+/// This is what the narrowed MediaEngine rests on. Chrome offers
+/// `42001f` and Firefox `42e01f`; the bridge registers `42e01f`
+/// alone, and `rtc` matches the other by mime type because the
+/// fmtp lines differ. Were that not so, one of the two browsers
+/// would get a session where everything except the picture works
+/// — so this is the test that says whether one entry is enough.
+///
+/// The payload types are the browsers' own numbers, neither of
+/// which the bridge registers for both cases, so a match here is
+/// negotiation rather than coincidence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn both_browser_h264_profiles_negotiate_video() {
+    for (profile, client_pt) in [("42001f", 102u8), ("42e01f", 126u8)] {
+        let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::for_tests(tx))
+            .await
+            .expect("bridge");
+        let client = TestPeer::builder()
+            .seed_control_channel()
+            .offer_only_h264_fmtp(
+                &format!(
+                    "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id={profile}"
+                ),
+                client_pt,
+                109,
+            )
+            .build()
+            .await
+            .expect("client peer");
+        let offer_sdp = client.offer_and_gather().await.expect("client offer");
+        let answer_sdp = bridge.accept_offer(offer_sdp).await.expect("accept offer");
+
+        assert!(
+            bridge.video_negotiated(),
+            "a viewer offering only {profile} must still get a video codec:\n{answer_sdp}"
+        );
+        assert!(
+            rtpmap_lines(&answer_sdp).iter().any(|l| l.contains("h264")),
+            "the answer to a {profile}-only offer must advertise H.264:\n{answer_sdp}"
+        );
+
+        client.close().await.expect("client close");
+        bridge.close().await.expect("bridge close");
+    }
 }

@@ -27,7 +27,10 @@
 //!
 //! 1. `bridge_slot` — to get or take the active bridge.
 //! 2. `encoder` — to stop the pipeline.
-//! 3. `active_opus_tx` — to clear the audio pump sender.
+//! 3. `active_opus_tx` — to clear the audio pump sender, taken while
+//!    `encoder` is still held (see [`stop_viewer_pipeline`]). It is a
+//!    `std::sync::Mutex` held for one assignment, and nothing that
+//!    holds it ever waits for `encoder`.
 //!
 //! # Race: reaper vs. `/offer`
 //!
@@ -37,6 +40,14 @@
 //! the reaper was waiting), the reaper skips the reap and loops
 //! back. This prevents the reaper from closing a healthy new
 //! bridge when the old bridge's dead signal fires late.
+//!
+//! The generation only moves when a bridge is *installed*, which is
+//! the last thing an offer does. A later offer still gathering has
+//! already taken the old bridge out of the slot and restarted the
+//! encoder for itself, and the generation says nothing about it — so
+//! the reaper does not decide on it whether to stop the encoder.
+//! [`stop_viewer_pipeline`] decides that, on the encoder's recorded
+//! owner.
 //!
 //! # Why the wait is a `select!`
 //!
@@ -110,12 +121,17 @@ pub async fn run_bridge_reaper(state: Arc<WebState>) {
         // the active bridge — both without holding the lock across
         // the await.
         let gen_at_subscribe = state.bridge_generation.load(Ordering::SeqCst);
-        let dead = {
+        let watched = {
             let slot = state.bridge_slot.lock().await;
-            slot.as_ref().map(|b| b.dead_signal())
+            slot.as_ref().map(|b| {
+                (
+                    b.dead_signal(),
+                    state.installed_offer.load(Ordering::SeqCst),
+                )
+            })
         };
 
-        let Some(dead) = dead else {
+        let Some((dead, watched_offer)) = watched else {
             // No active bridge; sleep briefly and re-check.
             tokio::time::sleep(Duration::from_millis(500)).await;
             continue;
@@ -198,41 +214,52 @@ pub async fn run_bridge_reaper(state: Arc<WebState>) {
             }
         }
 
-        stop_viewer_pipeline(&state).await;
+        if !stop_viewer_pipeline(&state, watched_offer).await {
+            tracing::debug!(
+                "bridge reaper: a later offer has restarted the encoder for itself; \
+                 leaving it running"
+            );
+        }
 
         tracing::info!("bridge reaper: reaped; awaiting next viewer");
     }
 }
 
-/// Stop the work a viewer's bridge was driving: the encoder pipeline
-/// and the audio pump's sender.
+/// Stop the work a viewer's bridge was driving — the encoder pipeline
+/// and the audio pump's sender — if `offer` still owns it. Returns
+/// whether it did.
 ///
-/// Both the reaper above and `post_offer`'s failure path need this,
-/// and for the same reason — the encoder restart and the
+/// Both the reaper above and `post_offer`'s failure paths need this,
+/// and for the same reason: the encoder restart and the
 /// `active_opus_tx` install happen before the bridge is known to be
 /// good, so whoever concludes that no viewer is attached has to undo
-/// them. The reaper additionally takes the bridge out of
-/// `bridge_slot`; the failure path's bridge was never in it. That is
-/// the whole of the difference, so the bridge close stays with its
-/// owner and this holds the two shared steps.
+/// them. The bridge close stays with its owner; this holds the two
+/// shared steps.
 ///
-/// Lock ordering, continuing `post_offer`'s and the reaper's: this is
-/// called after any `bridge_slot` work is finished, takes `encoder`
-/// first and `active_opus_tx` second, and holds neither across the
-/// other.
+/// There is one encoder and one audio slot per process, and a later
+/// offer takes both over well before its bridge is installed: it
+/// restarts the encoder at step 3 and installs its sender at step 5,
+/// then can spend up to the gathering bound in `accept_offer`. So
+/// whoever calls this cannot tell from the bridge slot or
+/// `bridge_generation` whether the pipeline is still theirs. The
+/// encoder can, because every restart records the offer it was for
+/// (`EncoderInfra::owner`), and that is what this decides on. A later
+/// offer that entered but failed before restarting took nothing over,
+/// and does not stop the earlier one cleaning up.
 ///
-/// Callers decide *whether* to call it. It stops the one encoder and
-/// clears the one audio slot the process has, so a caller that is no
-/// longer the current viewer would stop a healthy newer session's
-/// pipeline; the reaper discriminates with `bridge_generation` and so
-/// does `post_offer`.
-pub(crate) async fn stop_viewer_pipeline(state: &WebState) {
+/// The audio slot is cleared while `encoder` is still held. That is
+/// what makes the owner check cover it too: a later offer installs its
+/// sender only after its own restart, which needs the lock this holds,
+/// so a sender cleared here cannot be one a later offer installed.
+pub(crate) async fn stop_viewer_pipeline(state: &WebState, offer: u64) -> bool {
+    let mut enc = state.encoder.lock().await;
+    if enc.owner() != Some(offer) {
+        return false;
+    }
+
     // Sends EncoderControl::Stop and awaits the task handle with a
     // 2 s ceiling.
-    {
-        let mut enc = state.encoder.lock().await;
-        enc.stop().await;
-    }
+    enc.stop().await;
 
     // Clear the audio pump sender so the renderer-side
     // WebPlaybackSink drops packets rather than building up a
@@ -244,6 +271,7 @@ pub(crate) async fn stop_viewer_pipeline(state: &WebState) {
             *inner = None;
         }
     }
+    true
 }
 
 #[cfg(test)]
@@ -300,8 +328,6 @@ mod tests {
     /// reaper's half of that sharing honest.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reaping_stops_the_encoder_and_the_audio_sender() {
-        use shakenfist_spice_renderer::EncoderControl;
-        use shakenfist_spice_webrtc::{WebrtcBridge, WebrtcBridgeConfig};
         use tokio::sync::mpsc;
 
         let state = Arc::new(WebState::new());
@@ -318,26 +344,18 @@ mod tests {
             });
         }
 
-        // A real encoder, as `post_offer` step 3 starts, and an audio
-        // sender in the slot, as its step 5 installs.
+        // A real encoder, as `post_offer` step 3 starts for offer 1,
+        // an audio sender in the slot, as its step 5 installs, and the
+        // bridge in the slot as its step 7 installs it.
         let (_frame_rx, enc_control) = {
             let mut enc = state.encoder.lock().await;
-            enc.restart(&state.surface_mirror)
+            enc.restart(&state.surface_mirror, 1)
                 .await
                 .expect("encoder restart")
         };
         let (opus_tx, _opus_rx) = mpsc::channel::<(Vec<u8>, u32)>(4);
         *state.active_opus_tx.lock().expect("opus slot") = Some(opus_tx);
-
-        let (enc_tx, _enc_rx) = mpsc::channel::<EncoderControl>(4);
-        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::for_tests(enc_tx))
-            .await
-            .expect("bridge");
-        let dead = bridge.dead_signal();
-        {
-            let mut slot = state.bridge_slot.lock().await;
-            *slot = Some(bridge);
-        }
+        let dead = install_bridge(&state, 1).await;
 
         let reaper = tokio::spawn(run_bridge_reaper(Arc::clone(&state)));
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -368,6 +386,102 @@ mod tests {
 
         reaper.abort();
         let _ = tokio::time::timeout(Duration::from_millis(200), reaper).await;
+    }
+
+    /// Put a test bridge in the slot as `post_offer`'s step 7 does for
+    /// `offer`, and return its dead signal.
+    async fn install_bridge(
+        state: &WebState,
+        offer: u64,
+    ) -> Arc<shakenfist_spice_webrtc::StickySignal> {
+        use shakenfist_spice_renderer::EncoderControl;
+        use shakenfist_spice_webrtc::{WebrtcBridge, WebrtcBridgeConfig};
+        use tokio::sync::mpsc;
+
+        let (enc_tx, _enc_rx) = mpsc::channel::<EncoderControl>(4);
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::for_tests(enc_tx))
+            .await
+            .expect("bridge");
+        let dead = bridge.dead_signal();
+        let mut slot = state.bridge_slot.lock().await;
+        *slot = Some(bridge);
+        state.installed_offer.store(offer, Ordering::SeqCst);
+        dead
+    }
+
+    /// Reaping a dead bridge leaves alone a pipeline that a later,
+    /// still-gathering offer has already taken over.
+    ///
+    /// This is a page reload. The new offer takes the old bridge out
+    /// of the slot and closes it, restarts the encoder for itself and
+    /// installs its audio sender, then waits for ICE gathering. The
+    /// old bridge's death reaches the reaper in that window — closing
+    /// it can raise the signal, and so can the browser tearing down
+    /// its old peer connection — and the generation has not moved,
+    /// because only installing a bridge moves it. Deciding on the
+    /// generation, the reaper stopped the new viewer's encoder and
+    /// cleared its audio, and the viewer connected to no picture and
+    /// no sound.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reaping_leaves_a_later_offers_pipeline_alone() {
+        use tokio::sync::mpsc;
+
+        let state = Arc::new(WebState::new());
+        {
+            let mut m = state.surface_mirror.lock().await;
+            m.apply_event(&shakenfist_spice_renderer::ChannelEvent::SurfaceCreated {
+                display_channel_id: 0,
+                surface_id: 0,
+                width: 640,
+                height: 480,
+            });
+        }
+
+        // Offer 1's session, fully installed.
+        let (_frame_rx_1, _enc_control_1) = state
+            .encoder
+            .lock()
+            .await
+            .restart(&state.surface_mirror, 1)
+            .await
+            .expect("first restart");
+        let dead = install_bridge(&state, 1).await;
+
+        let reaper = tokio::spawn(run_bridge_reaper(Arc::clone(&state)));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Offer 2, steps 1 to 5: take the old bridge out, restart the
+        // encoder, install its audio sender. It is now gathering.
+        let old = state.bridge_slot.lock().await.take();
+        let (_frame_rx_2, enc_control_2) = state
+            .encoder
+            .lock()
+            .await
+            .restart(&state.surface_mirror, 2)
+            .await
+            .expect("second restart");
+        let (opus_tx, _opus_rx) = mpsc::channel::<(Vec<u8>, u32)>(4);
+        *state.active_opus_tx.lock().expect("opus slot") = Some(opus_tx);
+
+        // The old bridge dies.
+        dead.raise();
+        drop(old);
+
+        // Long enough for the reaper to wake, find the bridge dead and
+        // the generation unchanged, and do whatever it is going to do.
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        assert!(
+            !enc_control_2.is_closed() && state.encoder.lock().await.owner() == Some(2),
+            "the reaper stopped the encoder a later offer had restarted for its own viewer"
+        );
+        assert!(
+            state.active_opus_tx.lock().expect("opus slot").is_some(),
+            "the reaper cleared the audio sender a later offer had installed"
+        );
+
+        reaper.abort();
+        let _ = tokio::time::timeout(Duration::from_millis(200), reaper).await;
+        state.encoder.lock().await.stop().await;
     }
 
     /// A bridge replaced by `/offer` does not strand the reaper on the
