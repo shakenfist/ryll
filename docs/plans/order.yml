@@ -28,3 +28,4 @@
 - PLAN-app-split.md: Splitting app.rs
 - PLAN-rdp-frontend.md: RDP frontend
 - PLAN-crate-boundaries.md: Crate boundaries and transcoding out
+- PLAN-bugreport-split.md: Splitting bugreport.rs
