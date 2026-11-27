@@ -986,8 +986,19 @@ consistency audit.
 Renovate is not in this table. Dependency updates reach ryll from
 the fleet runner in shakenfist/development, which works over every
 managed repository in one pass, so ryll carries only `renovate.json`
-and no workflow of its own; see that repository's
-`docs/audits/renovate.md`.
+and no workflow of its own; see the fleet audit
+[renovate](https://github.com/shakenfist/development/blob/main/docs/audits/renovate.md).
+
+`renovate.json` extends that repository's `renovate-fleet.json`
+preset, which is where the policy now lives: the weekly and monthly
+schedules, the dependency dashboard, `automerge: false` for minor,
+patch and digest updates, the three-day `minimumReleaseAge`,
+enabling Renovate's pre-commit manager (which keeps the revs in
+`.pre-commit-config.yaml` current), and the regex versioning that
+lets it read `shellcheck-py`'s four-component tags. A change to any
+of those is a pull request against shakenfist/development, not
+ryll. What stays in ryll's file is what only ryll knows: the holds
+and groupings that follow from its own dependency graph.
 
 | Workflow | Purpose |
 |----------|---------|
@@ -1071,8 +1082,8 @@ for what the unfixed version cost, and the fleet audit
 [merge-group-cancellation](https://github.com/shakenfist/development/blob/main/audits/merge-group-cancellation.md).
 
 Scheduled, push-to-default, and release workflows must **not**
-enable `cancel-in-progress`. Cancelling a release mid-publish,
-or a renovate run mid-PR-creation, leaves partial state behind.
+enable `cancel-in-progress`. Cancelling a release mid-publish
+leaves partial state behind.
 
 `fuzz.yml` is the awkward case: it is scheduled, but it also
 takes a `workflow_dispatch`, and a manual run *should* supersede
