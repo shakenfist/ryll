@@ -616,7 +616,7 @@ impl AudioThread {
             default_config.sample_format()
         );
         let config = cpal::StreamConfig {
-            channels: source_channels as u16,
+            channels: u16::try_from(source_channels).unwrap_or(u16::MAX), // saturate, as channels_u8 does
             sample_rate: default_config.sample_rate(),
             buffer_size: cpal::BufferSize::Default,
         };
@@ -660,7 +660,7 @@ impl AudioThread {
             crate::snapshots::PlaybackOutputInfo {
                 device: name,
                 sample_rate_hz: device_rate,
-                channels: source_channels as u16,
+                channels: config.channels,
                 sample_format: default_config.sample_format().to_string(),
             },
         ))

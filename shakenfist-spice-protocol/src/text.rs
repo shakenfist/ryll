@@ -25,7 +25,12 @@
 //!
 //! [`sanitise_untrusted`] replaces every such character with
 //! `U+FFFD`, the replacement character the lossy UTF-8 decode of the
-//! same bytes already produces for invalid sequences. The result is
+//! same bytes already produces for invalid sequences. That makes a
+//! `U+FFFD` in the result deliberately ambiguous between a bad
+//! encoding and a refused character, and it applies to tab and
+//! newline too, so a multi-line notify reads as one line with
+//! replacement characters where its breaks were: the raw bytes on the
+//! message say which it was. The result is
 //! one line, with exactly as many characters as the input and no
 //! character that can forge a record, drive a terminal or reorder the
 //! rendering, which is safe to pass to `tracing` or to put in a UI

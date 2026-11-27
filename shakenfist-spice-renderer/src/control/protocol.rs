@@ -46,7 +46,11 @@
 //! session started without `--enable-paste-as-keystrokes`.  The field
 //! and the code are additive, so a minor bump; the `paste` answer
 //! changes on purpose, because v1.6's `ok` there was never true --
-//! nothing was typed and no event followed.
+//! nothing was typed and no event followed.  It also added
+//! `starts_refused` to the `playback` object, counting
+//! `PLAYBACK_START` messages refused for a channel count or sample
+//! rate no output could serve; `starts` now counts only the STARTs
+//! acted on, so it can trail `stops`.
 
 use serde::{Deserialize, Serialize};
 use shakenfist_spice_protocol::display_server;
@@ -370,6 +374,9 @@ pub struct PlaybackStats {
     /// `PLAYBACK_START` messages refused because their channel count
     /// or sample rate was outside what any output could serve (v1.7).
     /// Non-zero means the server is malformed or adversarial.
+    /// Defaulted for the reason `StreamStats::frames_dropped_empty_dest`
+    /// is: an older server's reply has no such field.
+    #[serde(default)]
     pub starts_refused: u64,
     /// `PLAYBACK_STOP` messages received.
     pub stops: u64,
@@ -688,6 +695,25 @@ mod tests {
             serde_json::from_value(v1_6).expect("a v1.6 stream should still parse");
         assert_eq!(stream.frames_received, 460);
         assert_eq!(stream.frames_dropped_empty_dest, 0);
+    }
+
+    #[test]
+    fn playback_from_an_older_server_deserialises_without_starts_refused() {
+        let v1_6 = serde_json::json!({
+            "starts": 1,
+            "stops": 0,
+            "packets_received": 3120,
+            "packets_decoded": 3120,
+            "decode_failures": 0,
+            "bytes_received": 411_840,
+            "codec": "opus",
+            "sample_rate": 48_000,
+            "channels": 2,
+        });
+        let playback: PlaybackStats =
+            serde_json::from_value(v1_6).expect("a v1.6 playback object should still parse");
+        assert_eq!(playback.starts, 1);
+        assert_eq!(playback.starts_refused, 0);
     }
 
     #[test]
