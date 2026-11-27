@@ -470,10 +470,16 @@ fn parse_status_code(line: &[u8]) -> Option<u16> {
         .try_fold(0u16, |acc, &b| Some(acc * 10 + u16::from(b - b'0')))
 }
 
-/// Render a status line for an error message: lossily decoded, and
-/// truncated to [`MAX_QUOTED_STATUS_LINE`] characters.
+/// Render a status line for an error message: lossily decoded,
+/// sanitised, and truncated to [`MAX_QUOTED_STATUS_LINE`] characters.
+///
+/// The proxy chose these bytes and the error reaches a log line and
+/// the user, so they get the same treatment as any server-supplied
+/// text (see [`crate::text`]): the line ends at the first CRLF, but a
+/// bare newline or an escape sequence before it is still in it.
 fn quote_status_line(line: &[u8]) -> String {
-    let text = String::from_utf8_lossy(line);
+    let decoded = String::from_utf8_lossy(line);
+    let text = crate::text::sanitise_untrusted(&decoded);
     let mut chars = text.chars();
     let mut quoted: String = chars.by_ref().take(MAX_QUOTED_STATUS_LINE).collect();
     if chars.next().is_some() {
@@ -1016,6 +1022,19 @@ mod tests {
         };
         assert_eq!(status_line.chars().count(), MAX_QUOTED_STATUS_LINE + 3);
         assert!(status_line.ends_with("..."));
+    }
+
+    #[test]
+    fn a_status_line_cannot_forge_a_log_line() {
+        let err =
+            parse_connect_response(b"HTTP/1.1 502 Bad\nWARN forged\x1b[2J\r\n\r\n").unwrap_err();
+        let ConnectError::Refused { status_line, .. } = err else {
+            panic!("expected Refused, got {err:?}");
+        };
+        assert_eq!(
+            status_line,
+            "HTTP/1.1 502 Bad\u{fffd}WARN forged\u{fffd}[2J"
+        );
     }
 
     #[test]

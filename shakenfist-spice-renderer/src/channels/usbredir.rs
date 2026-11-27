@@ -445,7 +445,8 @@ impl UsbredirChannel {
                 self.server_caps = hello.capabilities;
                 info!(
                     "usbredir: server hello: version='{}' caps=0x{:08x}",
-                    hello.version, hello.capabilities,
+                    hello_version_for_log(&hello),
+                    hello.capabilities,
                 );
 
                 // Auto-connect virtual disks if configured via CLI
@@ -1113,4 +1114,31 @@ fn payload_type_name(payload: &UsbredirPayload) -> &'static str {
         UsbredirPayload::InterruptPacket { .. } => msg_type::INTERRUPT_PACKET,
         UsbredirPayload::Unknown { msg_type: mt, .. } => *mt,
     })
+}
+
+/// The server hello's version string, made safe to log.
+///
+/// It is up to 64 bytes the server chose. It is sanitised here rather
+/// than in an accessor because the usbredir crate does not depend on
+/// the protocol crate, and this is its only consumer (STYLEGUIDE.md,
+/// "Server-supplied text").
+fn hello_version_for_log(hello: &Hello) -> std::borrow::Cow<'_, str> {
+    shakenfist_spice_protocol::text::sanitise_untrusted(&hello.version)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{hello_version_for_log, Hello};
+
+    #[test]
+    fn a_hello_version_cannot_forge_a_log_line() {
+        let hello = Hello {
+            version: "qemu 9.0\nWARN forged\u{1b}[2J".to_string(),
+            capabilities: 0,
+        };
+        assert_eq!(
+            hello_version_for_log(&hello),
+            "qemu 9.0\u{fffd}WARN forged\u{fffd}[2J"
+        );
+    }
 }

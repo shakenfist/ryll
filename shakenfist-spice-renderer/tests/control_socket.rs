@@ -2092,6 +2092,7 @@ async fn stats_reports_playback_once_the_channel_links() {
         resp["result"]["playback"],
         serde_json::json!({
             "starts": 0,
+            "starts_refused": 0,
             "stops": 0,
             "packets_received": 0,
             "packets_decoded": 0,
@@ -2106,6 +2107,7 @@ async fn stats_reports_playback_once_the_channel_links() {
     {
         let mut snap = inputs.playback_snapshot.lock().unwrap();
         snap.start_count = 2;
+        snap.starts_refused = 3;
         snap.stop_count = 1;
         snap.data_packets_received = 500;
         snap.data_packets_decoded = 497;
@@ -2125,6 +2127,7 @@ async fn stats_reports_playback_once_the_channel_links() {
         resp["result"]["playback"],
         serde_json::json!({
             "starts": 2,
+            "starts_refused": 3,
             "stops": 1,
             "packets_received": 500,
             "packets_decoded": 497,
