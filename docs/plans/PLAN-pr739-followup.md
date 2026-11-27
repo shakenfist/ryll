@@ -66,7 +66,7 @@ Two things worth recording against the items as written:
 
 - **Must fix 1's figures were derived again and came out lower.** The
   review's estimate was 111 bytes before #739 and 143 after. Deriving
-  it from `lru` 0.19's node layout against glibc gives about 91 and
+  it from the `lru` crate's node layout against glibc gives about 91 and
   123. The +32 delta the decision rested on is the same either way,
   and 128 still sits inside the honest band, so the operator's choice
   stands; the doc comment now shows the derivation rather than
@@ -79,6 +79,13 @@ Two things worth recording against the items as written:
   any well-formed stream. Malformed streams are where kerbside,
   spice-gtk and ryll all differ, which sharpens should consider 9
   below from an unease into a decision.
+- **Must fix 2 closed on the clamp alone.** It asked for the
+  hole-versus-shift inconsistency between the miss and clipped-hit
+  paths to be settled as well. That is a decision about what the
+  decoder does with a malformed stream, not about the clamp, so it
+  moved to should consider 9; `skip_unsatisfied_reference`'s doc
+  comment enumerates the three current behaviours so the question
+  is visible where the code is.
 
 ## Still open
 
@@ -152,8 +159,8 @@ tracked as #135 rather than duplicated here.
      copied, which shifts every later pixel instead. Both are
      safe, both are attacker-visible as garbage, and they
      disagree about what a reference that cannot be satisfied
-     means. Clamping does not settle that — pick one meaning and
-     say why in the code.
+     means. Clamping does not settle that. (Deferred to should
+     consider 9; see "What has landed".)
    - **The multiply is unclamped as well as the addition.** On a
      32-bit target `length * 4` overflows at roughly 1.07e9
      pixels, which about 4.2 MiB of `0xFF` continuation bytes
@@ -245,10 +252,12 @@ tracked as #135 rather than duplicated here.
    make it generic.
 
 8. **Consolidate the GLZ stream builders in tests.** There are
-   now four hand-rolled builders: `glz_rgb32_row` (`glz.rs`,
+   now five hand-rolled builders: `glz_rgb32_row` (`glz.rs`,
    new), `glz_image_2x1` (`glz.rs`, pre-existing), the inline
-   header in `fragmented_cross_ref_image`, and the encoder in
-   `examples/glz_references.rs`. `glz_rgb32_row` is a strict
+   header in `fragmented_cross_ref_image`, the encoder in
+   `examples/glz_references.rs`, and a copy of `glz_rgb32_row` in
+   `tests/glz_shared_source.rs`, which as an integration test
+   cannot see the unit tests' helpers either. `glz_rgb32_row` is a strict
    generalisation of `glz_image_2x1`. A wrong fixture is how a
    wrong decoder looks right, so one shared builder is worth
    having. Constraint: an example cannot see `#[cfg(test)]`
@@ -265,7 +274,11 @@ tracked as #135 rather than duplicated here.
    intended behaviour, so a future decision to refuse such
    streams has to change them. Either write down that the
    leniency is deliberate and why, or change it — but not
-   silently.
+   silently. The same decision covers the inconsistency must fix 2
+   found: a reference that misses leaves a hole and keeps later
+   pixels in place, while a hit whose source runs short shifts
+   them, as does one whose offset is past the end of its source
+   (it copies and advances nothing).
 
 10. **Done by the contributor in 1269a38fd385.** The example's
     comment overstated its own coverage.

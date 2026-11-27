@@ -52,7 +52,10 @@ static ALLOCATOR: Counting = Counting;
 
 /// Run `f`, returning its value and the bytes allocated on this thread
 /// while it ran. Counting is per thread, so tests running in parallel
-/// do not interfere.
+/// do not interfere -- and so the count is only meaningful while the
+/// work runs inline on the calling thread. A decode moved onto
+/// `spawn_blocking` or a worker thread would allocate where this
+/// cannot see.
 fn measure<T>(f: impl FnOnce() -> T) -> (T, usize) {
     let before = BYTES.with(Cell::get);
     let value = f();
@@ -118,6 +121,15 @@ fn fragmented_cross_references_share_the_source_allocation() {
     let (image, allocated) = measure(|| rt.block_on(decompress_glz(&data, &dict)).expect("decode"));
 
     assert_eq!(image.pixels, expected);
+    // The decode allocates at least its own output on this thread, so
+    // a count below that means the counter has stopped seeing the work
+    // and the upper bound below would pass vacuously.
+    assert!(
+        allocated >= image.pixels.len(),
+        "the allocation counter saw {allocated} bytes, less than the {}-byte output: \
+         has the decode moved off the measuring thread?",
+        image.pixels.len()
+    );
     // Cloning the source once per fragment would allocate 128 x 64 KiB
     // = 8 MiB. Sharing it allocates the output buffer and the decode's
     // own small structures. The threshold sits far from both, so this

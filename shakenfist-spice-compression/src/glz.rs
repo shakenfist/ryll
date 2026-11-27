@@ -70,14 +70,7 @@ impl GlzDictionary {
 
     /// Create a new empty dictionary with an explicit byte cap.
     pub fn with_cap(cap_bytes: usize) -> Self {
-        Self {
-            images: Mutex::new(ByteBoundedLru::new(cap_bytes)),
-            notify: tokio::sync::Notify::new(),
-            evicted_ids: Mutex::new(LruCache::new(
-                NonZeroUsize::new(EVICTED_ID_TOMBSTONES).expect("tombstone capacity is non-zero"),
-            )),
-            first_eviction_logged: Mutex::new(false),
-        }
+        Self::from_lru(ByteBoundedLru::new(cap_bytes))
     }
 
     /// Create a dictionary with an explicit entry cap as well as a
@@ -89,8 +82,14 @@ impl GlzDictionary {
     /// exercise the byte cap has to say so.
     #[cfg(test)]
     fn with_caps(cap_bytes: usize, max_entries: usize) -> Self {
+        Self::from_lru(ByteBoundedLru::with_caps(cap_bytes, max_entries))
+    }
+
+    /// The one initialiser, so a new field is added in one place and
+    /// the test-only constructor cannot drift from the production one.
+    fn from_lru(images: ByteBoundedLru) -> Self {
         Self {
-            images: Mutex::new(ByteBoundedLru::with_caps(cap_bytes, max_entries)),
+            images: Mutex::new(images),
             notify: tokio::sync::Notify::new(),
             evicted_ids: Mutex::new(LruCache::new(
                 NonZeroUsize::new(EVICTED_ID_TOMBSTONES).expect("tombstone capacity is non-zero"),
@@ -1088,18 +1087,22 @@ mod tests {
         // ctrl 0xE0 asks for the extended length form; three 0xFF
         // continuations and a 250 make it 1022 pixels, against an
         // output of two. Then code1 0, image_dist 1 (so source id 0,
-        // the tombstoned one), then one literal pixel that the
-        // exhausted output must drop rather than misplace.
+        // the tombstoned one), then one literal pixel. The skip fills
+        // the output, so the literal is never decoded; it is there so
+        // that a skip which failed to advance `out_idx` would decode
+        // it at pixel 0 and fail the assertion below.
         let payload = [0xE0, 0xFF, 0xFF, 0xFF, 250, 0x00, 0x01, 0x00, 9, 10, 11];
         let data = glz_rgb32_row(2, &payload);
         let rt = paused_runtime();
         let image = rt.block_on(decompress_glz(&data, &dict)).unwrap();
 
-        // The output is the same whether or not the skip is clamped;
-        // what catches an unclamped skip here is the `debug_assert!`
-        // on `out_idx` at the end of the decode loop, which this
-        // stream is what reaches. The clamp's own tests above hold
-        // without debug assertions.
+        // This catches a skip that does not advance. It does not, on
+        // its own, catch one that advances unclamped: the output is
+        // the same either way, and only the `debug_assert!` on
+        // `out_idx` at the end of the decode loop notices, so in a
+        // build without debug assertions it passes regardless. The
+        // clamp's regression guard is
+        // `skip_unsatisfied_reference_stops_at_the_end_of_the_output`.
         assert_eq!(image.pixels, vec![0u8; 8]);
     }
 
@@ -1110,7 +1113,9 @@ mod tests {
         // here it is an id the dictionary has never held, so the skip
         // happens after the timeout. Both advance `out_idx` past a
         // reference the sender sized far beyond the output, and both
-        // have to leave it no further than the end.
+        // have to leave it no further than the end. The same caveat
+        // applies: this catches a skip that does not advance, and only
+        // a debug-assertions build catches an unclamped one here.
         let dict = GlzDictionary::with_cap(1024);
         assert!(!dict.was_evicted(0), "test setup: id 0 is simply unknown");
 

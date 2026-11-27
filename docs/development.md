@@ -659,7 +659,8 @@ three caveats:
 
 - It reports **elapsed decode time, not session frame rate**. A
   hundredfold change here is a change in one decode path, not in what
-  a user sees: the figures in the pull request that added the example
+  a user sees: the figures measured in
+  [shakenfist/ryll#739](https://github.com/shakenfist/ryll/pull/739)
   (175.7 ms to 1.5 ms at 128 references) are decode time alone.
 - There is **no threshold and no CI job**. Nothing fails if it
   regresses, so it is only worth running deliberately, and only
