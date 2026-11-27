@@ -212,10 +212,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/development-macos.md",
-      "author": "mikal"
-    },
-    {
       "path": "examples/control-socket-demo.py",
       "author": "mikal"
     },
@@ -353,10 +349,6 @@
     },
     {
       "path": ".github/actionlint.yaml",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-protocol/Cargo.toml",
       "author": "mikal"
     },
     {
@@ -544,10 +536,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-protocol/src/client.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-protocol/src/reader.rs",
       "author": "mikal"
     },
@@ -616,10 +604,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-compression/src/jpeg.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-compression/src/encode/mod.rs",
       "author": "mikal"
     },
@@ -636,27 +620,11 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-compression/src/video.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-protocol/src/logging.rs",
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-protocol/src/constants.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-protocol/src/lib.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-protocol/src/link.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-rdp/Cargo.toml",
       "author": "mikal"
     },
     {
@@ -681,18 +649,6 @@
     },
     {
       "path": "shakenfist-spice-rdp/src/input.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-rdp/tests/loopback.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-rdp/tests",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-rdp/src/tls.rs",
       "author": "mikal"
     },
     {
@@ -793,10 +749,6 @@
     },
     {
       "path": "tools/check-parity-matrix.py",
-      "author": "mikal"
-    },
-    {
-      "path": "tools/check-slim-renderer.sh",
       "author": "mikal"
     },
     {
@@ -960,19 +912,11 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-compression/src/lib.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-compression/src/byte_bounded_lru.rs",
       "author": "mikal"
     },
     {
       "path": "shakenfist-spice-compression/src/lz.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-compression/Cargo.toml",
       "author": "mikal"
     },
     {
@@ -992,23 +936,7 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-protocol/src",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-rdp/src/clipboard.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-rdp/src/server.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-rdp/src",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-rdp",
       "author": "mikal"
     },
     {
@@ -1057,14 +985,6 @@
     },
     {
       "path": "shakenfist-spice-renderer/src/session_state.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/control/protocol.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/control",
       "author": "mikal"
     },
     {
@@ -1124,10 +1044,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-compression/src",
-      "author": "mikal"
-    },
-    {
       "path": "docs/index.md",
       "author": "mikal"
     },
@@ -1145,10 +1061,6 @@
     },
     {
       "path": "MERGE-TEMPLATE.md",
-      "author": "mikal"
-    },
-    {
-      "path": "Cargo.toml",
       "author": "mikal"
     },
     {
