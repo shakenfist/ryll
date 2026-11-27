@@ -117,16 +117,6 @@ socket2 = { version = "0.6", features = ["all"] }
 # the display channel
 flate2 = "1"
 
-# PNG encoding for the control socket's `screenshot` verb, and JPEG
-# fixtures in the display channel's tests. SPICE JPEG decoding lives
-# in `shakenfist-spice-compression`.
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
-
-# Base64 encoding for the control socket's `screenshot` verb (3e):
-# image bytes (PNG or raw RGBA) are emitted as a base64 string in
-# the NDJSON response.
-base64 = "0.23"
-
 # Visual digest decoder for the `digest-decode` feature.  Pulled
 # in only when the test harness opts in; production builds carry
 # no QR decoder.  `qr` enables the rqrr-backed RGBA→bytes path
@@ -151,6 +141,18 @@ hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 libc = "0.2"
 
+# The control socket's `screenshot` verb. The control socket is
+# `cfg(unix)` (see lib.rs), so these are too: on Windows nothing outside
+# the tests names them, and `cargo::unused_dependencies` rejects a normal
+# dependency that only tests use.
+[target.'cfg(unix)'.dependencies]
+# PNG encoding of the screenshot. SPICE JPEG decoding lives in
+# `shakenfist-spice-compression`.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+# Image bytes (PNG or raw RGBA) are emitted as a base64 string in the
+# NDJSON response.
+base64 = "0.23"
+
 # USB device access (pure Rust, no libusb), for the `usbredir`
 # feature. Physical passthrough is Linux-only; see usb/mod.rs.
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -158,6 +160,9 @@ nusb = { version = "0.2", optional = true }
 
 [dev-dependencies]
 bytes = "1"
+# JPEG fixtures in the display channel's tests, on every platform; the
+# normal dependency above is unix-only.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
 
