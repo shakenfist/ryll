@@ -464,6 +464,39 @@ sequentially, as sub-agents, in
   dependency-tree check. The management session re-ran both
   rather than taking them from the sub-agents' reports.
 
+**2026-11-27 (+1100), after the master plan merged.** The
+master-plan pull request merged and GitHub retargeted this one to
+`develop`, which had taken four more merges meanwhile, so this
+branch was rebased onto the fresh `develop`. The master plan's own
+commit dropped as already landed, and the single conflict was in
+`tools/source-size-baseline`, where another pull request had
+raised `ryll/src/capture.rs` to 1,789 on the line below this
+phase's entry; both lines keep their new value. `make test` (1,823
+passed, 0 failed) and `pre-commit run --all-files` were re-run
+after the rebase.
+
+* **Review round 1 raised no `fix` item:** 1 document, 2
+  consider, 4 none. Taken, in one commit: the document item, and
+  one missing blank line between the two moved blocks in the new
+  test file. The document item is
+  `docs/channel-diagnostics-audit.md`, which named
+  `ryll/src/bugreport.rs` as the home of the per-channel
+  serialiser tests and as where to write the next one -- true
+  before this phase, wrong after it. The reviewer also suggested
+  naming the two ryll-owned snapshots there as exceptions; that
+  was left out, because the document is channel-scoped and
+  mentions neither `AppSnapshot` nor `KeyboardSnapshot`, so the
+  distinction would be new information in the wrong place.
+  Declined: consolidating the 271-line display fixture, which
+  decision 5 forbids and which is now recorded under the master
+  plan's *Future work*.
+
+* **The byte-identical `diff` criterion holds against the move
+  commit, not against the branch head.** The blank line above is
+  one added line in a later commit, so running the criterion
+  against the head now reports that one line. Run it against the
+  move commit.
+
 ## Back brief
 
 Before executing any step of this plan, back brief the operator

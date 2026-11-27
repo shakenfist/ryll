@@ -1032,6 +1032,14 @@ Already known, and deliberately out of scope:
   `UsbredirSnapshot` and `WebdavSnapshot` carry diagnostic
   fields a connection report could also surface. This plan moves
   that `TODO`; it does not resolve it.
+* **`test_display_snapshot_serialises` is 271 lines and carries
+  an `#[expect(clippy::too_many_lines)]`.** Now that it lives in
+  the crate that defines `DisplaySnapshot`, a shared fixture
+  builder would retire that expectation without crossing a crate
+  boundary. It is left alone because one fully populated fixture
+  is the thing the test exists to pin, and because rewriting a
+  test this plan has just moved verbatim costs the move its
+  reviewability. Raised by the review of phase 1.
 * **The webdav channel records no traffic**, so `TrafficBuffers`
   deliberately has no webdav ring while `ChannelSnapshots` has a
   webdav field. The asymmetry is documented in `buffer_for`'s

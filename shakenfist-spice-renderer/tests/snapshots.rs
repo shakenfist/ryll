@@ -657,6 +657,7 @@ fn test_webdav_snapshot_serialises() {
     assert_eq!(v["last_response_ts_secs"], json!(0.9));
     assert_eq!(v["decompressed_size_limit_exceeded_count"], json!(1));
 }
+
 #[test]
 fn test_channel_snapshots_new() {
     let snapshots = ChannelSnapshots::new();
