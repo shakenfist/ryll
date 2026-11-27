@@ -10,7 +10,7 @@
 # pull request description why the file should grow rather than split.
 # Comments here are not preserved when the tool rewrites this file.
 
-5110 ryll/src/bugreport.rs
+4455 ryll/src/bugreport.rs
 1789 ryll/src/capture.rs
 1703 ryll/src/config.rs
 1746 ryll/src/input_egui.rs

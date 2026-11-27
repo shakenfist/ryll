@@ -88,7 +88,8 @@ promoting it to every channel adds complexity without a clear
 immediate payoff. Revisit if a future channel needs a time-ordered
 event log.
 
-Every snapshot has a serialiser test in `ryll/src/bugreport.rs`
+Every snapshot has a serialiser test in
+`shakenfist-spice-renderer/tests/snapshots.rs`
 (`test_<channel>_snapshot_serialises`) that constructs a fully
 populated snapshot, serialises it to JSON, and asserts each field is
 present — catching serde renames before they reach a real bug report.
@@ -327,7 +328,9 @@ point following the baseline template in this document.
 4. **Wire the bug-report side** in `ryll/src/bugreport.rs` so the
    appropriate report type's `channel_name()` resolves to the new
    channel and its snapshot lands in the report's channel-state JSON.
-5. **Write a serialiser test** mirroring the
+5. **Write a serialiser test** in
+   `shakenfist-spice-renderer/tests/snapshots.rs`, next to the type
+   added in step 3 and mirroring the
    `test_display_snapshot_serialises` pattern: construct a snapshot
    with all fields populated, serialise to JSON, and assert that each
    field is present with the expected value. This catches serde
