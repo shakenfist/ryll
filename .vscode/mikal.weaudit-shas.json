@@ -61,16 +61,8 @@
       "sha": "e26503ce741b47a1e1fa6edceae8ab710619ac54",
       "date": "2026-11-24"
     },
-    ".github/workflows/rdp-smoke.yml": {
-      "sha": "9379254e5fb85125db0a79711e5cabcbee1a16c5",
-      "date": "2026-11-18"
-    },
     ".github/workflows/release.yml": {
       "sha": "acc257119b9664fbfcc95e583349dc949a6d65f5",
-      "date": "2026-11-18"
-    },
-    ".github/workflows/renovate.yml": {
-      "sha": "feb7442ffb3ba1896db9b35cc91ed5591d02e809",
       "date": "2026-11-18"
     },
     ".github/workflows/supply-chain.yml": {
@@ -180,10 +172,6 @@
     "examples/ryll-web.service": {
       "sha": "ffeba1d4155450125fa098094f1167ed0cdbc9d2",
       "date": "2026-09-17"
-    },
-    "renovate.json": {
-      "sha": "44eaba1530d7a3a352a82dde065d9159530e63a9",
-      "date": "2026-11-23"
     },
     "ryll/build.rs": {
       "sha": "b0803d125978073b943df8c6a6207879c41f5157",

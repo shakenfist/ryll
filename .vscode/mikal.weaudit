@@ -896,15 +896,7 @@
       "author": "mikal"
     },
     {
-      "path": ".github/workflows/renovate.yml",
-      "author": "mikal"
-    },
-    {
       "path": ".github/workflows/release.yml",
-      "author": "mikal"
-    },
-    {
-      "path": ".github/workflows/rdp-smoke.yml",
       "author": "mikal"
     },
     {
@@ -1161,10 +1153,6 @@
     },
     {
       "path": "tools/source-size-exclude",
-      "author": "mikal"
-    },
-    {
-      "path": "renovate.json",
       "author": "mikal"
     },
     {
