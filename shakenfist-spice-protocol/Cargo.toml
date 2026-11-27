@@ -20,7 +20,24 @@ rand = "0.8"
 rsa = "0.9"
 sha1 = "0.10"
 tokio = { version = "1", features = ["io-util", "net", "time"] }
-tokio-rustls = "0.26"
+# `ring`, not the default `aws_lc_rs`. rustls's default provider
+# decides which crypto library every consumer of this crate builds,
+# and aws-lc-rs means aws-lc-sys: a C library built with cmake. This
+# crate is the SPICE link handshake, so it is in the dependency tree
+# of every consumer of the renderer -- including server-role ones that
+# want display decode and nothing else -- and aws-lc-sys was the last
+# C build any of them could not switch off (#593).
+#
+# Nothing here chooses a provider in code: `create_tls_connector` asks
+# for the process-wide default (`CryptoProvider::get_default`) and
+# fails with a message if the embedding process installed none. ryll
+# and kerbside's proxy both install ring, so the feature now agrees
+# with what they do rather than compiling a second library beside it.
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "logging",
+    "ring",
+    "tls12",
+] }
 thiserror = "2"
 tracing = "0.1"
 rustls-pemfile = "2"

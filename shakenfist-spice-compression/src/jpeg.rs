@@ -9,11 +9,11 @@
 //!
 //! [`JpegDecoderRsDecoder`] (wrapping the pure-Rust
 //! `jpeg-decoder` crate) is the universal fallback.
-//! [`MozJpegDecoder`] (wrapping `mozjpeg` with a vendored
-//! SIMD-accelerated libjpeg-turbo build) is the
-//! cross-platform baseline preferred ahead of it. Future
-//! steps (3C–3E) add `ImageIoDecoder`, `WicDecoder`, and
-//! `VaapiDecoder` to this module.
+//! `MozJpegDecoder` (wrapping `mozjpeg` with a vendored
+//! SIMD-accelerated libjpeg-turbo build) is the cross-platform
+//! baseline preferred ahead of it. It is unlinked because a link
+//! to a `mozjpeg`-gated item is unresolved without that feature.
+//! `ImageIoDecoder`, `WicDecoder`, `VaapiDecoder`: per-platform.
 
 use std::sync::Arc;
 

@@ -122,12 +122,12 @@ crate. (`quic_decode` is the exception and returns raw bytes --
 Per-algorithm dependency differences are features instead -- `glz`
 is what pulls in tokio, for the cross-channel wait on the shared GLZ
 dictionary -- so a consumer that does not need an algorithm does not
-pay for *that algorithm's* dependencies, over the small unconditional
-set (`anyhow`, `byteorder`, `thiserror`, `tracing` and `lru`) that
-every consumer pays for, plus the per-platform JPEG-decoder backends
-(`objc2-*` on macOS, `windows` on Windows, `libloading` on Linux),
-which are not feature-gated because the decoder selector probes for
-them at run time. The crate has since grown JPEG and H.264
+pay for *that algorithm's* dependencies. `lru` is the only
+unconditional dependency; every other one is named by the features
+whose modules use it, including the per-platform JPEG-decoder
+backends (`objc2-*` on macOS and `windows` on Windows, with `jpeg`;
+`libloading` on Linux, with `mozjpeg`, which the VA-API backend is
+gated on), which the decoder selector then probes for at run time. The crate has since grown JPEG and H.264
 decoders and the encoders a SPICE server needs, behind their own
 features.
 

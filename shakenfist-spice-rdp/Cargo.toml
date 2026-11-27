@@ -90,7 +90,15 @@ tokio = { version = "1", features = ["rt", "sync", "time", "net", "macros"] }
 # from the process-wide crypto provider. The same release
 # `ironrdp-server` builds on and the other workspace crates use, so
 # this adds an edge, not a crate.
-tokio-rustls = "0.26"
+# `ring`, as the protocol crate and ryll do; see the comment in
+# shakenfist-spice-protocol/Cargo.toml. IronRDP's own TLS is served
+# through this connector, and the provider has to be the installed
+# one.
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "logging",
+    "ring",
+    "tls12",
+] }
 
 # Error handling
 anyhow = "1"
@@ -144,10 +152,11 @@ ironrdp-svc = "0.8"
 # versions are the ones `ironrdp-server` builds on. The connector and
 # tokio crates are already in Cargo.lock through it; the session crate
 # (with `ironrdp-bulk`, its bulk decompressor) and the TLS crate are
-# new to the tree and reach only test builds. The `rustls` feature
-# selects the TLS backend with the aws-lc-rs provider the workspace
-# already carries.
+# new to the tree and reach only test builds. `rustls-ring` selects
+# the rustls backend with the `ring` provider, the one this crate's
+# tokio-rustls dependency names and its tests install; plain `rustls`
+# would pull in the aws-lc-rs provider instead.
 ironrdp-connector = "0.10"
 ironrdp-session = "0.11"
 ironrdp-tokio = "0.10"
-ironrdp-tls = { version = "0.2", features = ["rustls"] }
+ironrdp-tls = { version = "0.2", features = ["rustls-ring"] }

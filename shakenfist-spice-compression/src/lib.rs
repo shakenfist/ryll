@@ -1,20 +1,51 @@
-//! Pure-Rust implementations of the SPICE image-stream
-//! decompression algorithms: QUIC (the SPICE wavelet/arithmetic
-//! codec, not the QUIC transport protocol), GLZ
-//! (dictionary-based cross-frame LZ), LZ (single-frame LZ),
-//! and LZ4.
+//! The image and video codecs a SPICE client and a SPICE server
+//! need, in pure Rust where that is possible.
 //!
-//! Each algorithm is gated behind a Cargo feature (`quic`,
-//! `glz`, `lz`, `lz4`) with all four enabled by default.
-//! Consumers who only need a subset can disable default
-//! features and opt in to the ones they need.
+//! # Decoding
 //!
-//! Three of the four decoders return a [`DecompressedImage`] on
-//! success. `quic_decode` returns `Option<Vec<u8>>` and leaves
-//! the wrapping to the caller. That asymmetry is now in
-//! a published API, so closing it is a breaking change rather
-//! than the free fix it would have been before the first
-//! release: see
+//! The four image-stream decompression algorithms, each in pure
+//! Rust: QUIC (the SPICE wavelet/arithmetic codec, not the QUIC
+//! transport protocol), GLZ (dictionary-based cross-frame LZ), LZ
+//! (single-frame LZ) and LZ4.
+//!
+//! Then JPEG, through whichever backend the platform offers (the
+//! `jpeg` module: ImageIO on macOS, WIC on Windows, VA-API or
+//! libjpeg-turbo on Linux, with a pure-Rust fallback everywhere);
+//! and the video streams a display channel carries (the `video`
+//! module): MJPEG over that JPEG backend, and H.264 through
+//! openh264.
+//!
+//! Those two are named without links on purpose: both modules are
+//! behind the `jpeg` feature, and an intra-doc link to a
+//! feature-gated item is an unresolved link in the documentation of
+//! a build that leaves the feature off.
+//!
+//! # Encoding
+//!
+//! What a SPICE server needs to produce the above, behind the
+//! `encode` feature: LZ4 and JPEG for images, H.264 for video
+//! streams. Independent of the decoders, so a server-role consumer
+//! can take the encoders alone.
+//!
+//! # Features
+//!
+//! Every codec is behind its own feature, and the default set is
+//! `quic`, `glz`, `lz`, `lz4`, `jpeg`, `mozjpeg` and `h264-decode`
+//! -- the decoders a client needs. `encode` is not in it. Each
+//! feature names the dependencies its modules use and nothing else,
+//! so a consumer who disables the default features and opts into a
+//! subset builds that subset: notably, neither openh264's C++ nor
+//! libjpeg-turbo's C is compiled for a build that leaves the
+//! features needing them off.
+//!
+//! # A known asymmetry
+//!
+//! Three of the four decompression algorithms above return a
+//! [`DecompressedImage`] on success. `quic_decode` returns
+//! `Option<Vec<u8>>` and leaves the wrapping to the caller. That
+//! asymmetry is now in a published API, so closing it is a breaking
+//! change rather than the free fix it would have been before the
+//! first release: see
 //! <https://github.com/shakenfist/ryll/issues/697>.
 //!
 //! Extracted from the

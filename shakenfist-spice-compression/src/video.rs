@@ -32,14 +32,25 @@ use crate::jpeg::{DecodedJpeg, JpegDecoder};
 
 /// SPICE wire codec type for MJPEG streams
 /// (`SpiceMsgDisplayStreamCreate::codec_type == 1`).
+///
+/// These two are what [`for_stream`] dispatches on, so they live
+/// beside it. They are *not* the place to name a codec type from
+/// outside: this module is gated on the `jpeg` feature, so a consumer
+/// that only encodes cannot see them without building decoders it
+/// will never call. `shakenfist_spice_protocol::video_codec_type`
+/// names the whole wire enum with no decoder in sight, and the
+/// renderer's `tests/codec_type_constants.rs` holds the two copies to
+/// the same numbers. See
+/// shakenfist/ryll#555 for why these are copies rather than
+/// re-exports.
 pub const SPICE_VIDEO_CODEC_TYPE_MJPEG: u8 = 1;
 
 /// SPICE wire codec type for H.264 streams
 /// (`SpiceMsgDisplayStreamCreate::codec_type == 3`).
 /// Decoded via `H264VideoDecoder` (openh264 software backend) when
-/// the `h264-decode` feature is on. The constant stays available
-/// without it, so a consumer can still recognise the codec it is
-/// refusing.
+/// the `h264-decode` feature is on; without it [`for_stream`]
+/// refuses the codec by this number, which is why the constant is
+/// not itself gated on `h264-decode`.
 pub const SPICE_VIDEO_CODEC_TYPE_H264: u8 = 3;
 
 // ---------------------------------------------------------------------------

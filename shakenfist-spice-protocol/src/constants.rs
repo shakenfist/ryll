@@ -100,6 +100,49 @@ impl SpiceError {
     }
 }
 
+/// Wire values of `SpiceMsgDisplayStreamCreate::codec_type`, the
+/// `SPICE_VIDEO_CODEC_TYPE_*` enum in spice-protocol's `enums.h`.
+///
+/// Named here, in the protocol crate, because naming a wire value is
+/// not the same as being able to decode it. A server-role consumer
+/// that only encodes -- andris -- has to put a codec type on the
+/// stream-create it sends, and previously the only copy of these
+/// numbers in this workspace sat in `shakenfist-spice-compression`'s
+/// `video` module, behind that crate's `jpeg` decoder feature. So a
+/// consumer either built decoders it would never call, or wrote the
+/// number down again itself, which is what andris did
+/// (shakenfist/ryll#555).
+///
+/// The compression crate keeps its own copies rather than re-exporting
+/// these, which is the one part of #555's suggested fix not taken: it
+/// would make that crate depend on this one, and this one carries the
+/// link handshake's TLS stack -- tokio-rustls, rsa, sha1,
+/// webpki-roots, x509-parser. Pulling that into an encode-only codec
+/// build is the very problem this crate's consumers are trying to
+/// avoid. `shakenfist-spice-renderer`'s
+/// `tests/codec_type_constants.rs`, in the one crate that depends on
+/// both, is what keeps the two copies honest; a crate small enough for
+/// both to share belongs to the crate-boundaries plan rather than
+/// here.
+pub mod video_codec_type {
+    /// MJPEG (`SPICE_VIDEO_CODEC_TYPE_MJPEG`). ryll decodes this.
+    pub const MJPEG: u8 = 1;
+    /// VP8 (`SPICE_VIDEO_CODEC_TYPE_VP8`). Not decoded by ryll, and
+    /// not advertised: no `DISPLAY_CODEC_VP8` cap is sent, so a
+    /// server has no reason to stream it.
+    pub const VP8: u8 = 2;
+    /// H.264 (`SPICE_VIDEO_CODEC_TYPE_H264`). ryll decodes this when
+    /// the compression crate's `h264-decode` feature is on, and
+    /// advertises [`capabilities::DISPLAY_CODEC_H264`] accordingly.
+    pub const H264: u8 = 3;
+    /// VP9 (`SPICE_VIDEO_CODEC_TYPE_VP9`). Not decoded, not
+    /// advertised.
+    pub const VP9: u8 = 4;
+    /// H.265 (`SPICE_VIDEO_CODEC_TYPE_H265`). Not decoded, not
+    /// advertised.
+    pub const H265: u8 = 5;
+}
+
 /// Capability flags
 #[allow(dead_code)]
 pub mod capabilities {

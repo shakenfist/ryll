@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn acceptor_builds_once_a_provider_is_installed() {
-        let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
         let identity = TlsIdentity::self_signed(&names()).expect("self-signed identity");
         identity.acceptor().expect("acceptor");
     }

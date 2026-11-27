@@ -74,9 +74,9 @@ pub use constants::{
     audio_data_mode, audio_fmt, capabilities, cursor_client, cursor_server, display_client,
     display_server, inputs_client, inputs_server, keyboard_modifiers, main_client, main_server,
     mouse_buttons, playback_server, port_client, port_server, spicevmc_client, spicevmc_server,
-    ChannelType, ImageType, NotifySeverity, SpiceError, SpiceVisibility, IMAGE_FLAGS_CACHE_ME,
-    IMAGE_FLAGS_CACHE_REPLACE_ME, MOUSE_MODE_CLIENT, MOUSE_MODE_SERVER, SPICE_MAGIC,
-    SPICE_VERSION_MAJOR, SPICE_VERSION_MINOR,
+    video_codec_type, ChannelType, ImageType, NotifySeverity, SpiceError, SpiceVisibility,
+    IMAGE_FLAGS_CACHE_ME, IMAGE_FLAGS_CACHE_REPLACE_ME, MOUSE_MODE_CLIENT, MOUSE_MODE_SERVER,
+    SPICE_MAGIC, SPICE_VERSION_MAJOR, SPICE_VERSION_MINOR,
 };
 
 /// SPICE server connection parameters.

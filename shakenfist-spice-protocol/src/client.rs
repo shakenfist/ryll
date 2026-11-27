@@ -725,7 +725,7 @@ mod tests {
     /// the global default, see `install_crypto_provider`), so a fresh
     /// instance per test avoids any cross-test install race entirely.
     fn crypto_provider() -> Arc<CryptoProvider> {
-        Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider())
+        Arc::new(tokio_rustls::rustls::crypto::ring::default_provider())
     }
 
     /// Install a process-wide default CryptoProvider, for the tests that
@@ -734,9 +734,8 @@ mod tests {
     /// Losing an install race to another test is fine: all that matters
     /// is that some provider is installed afterwards.
     fn install_crypto_provider() {
-        let _ = CryptoProvider::install_default(
-            tokio_rustls::rustls::crypto::aws_lc_rs::default_provider(),
-        );
+        let _ =
+            CryptoProvider::install_default(tokio_rustls::rustls::crypto::ring::default_provider());
     }
 
     fn utf8(s: &str) -> DnValue {

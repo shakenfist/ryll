@@ -7075,7 +7075,6 @@ dependencies = [
  "jpeg-decoder",
  "lz4_flex",
  "mp4",
- "nusb",
  "pcap-file",
  "png",
  "rand 0.8.8",
