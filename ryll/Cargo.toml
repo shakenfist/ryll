@@ -163,7 +163,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg"] }
 jpeg-decoder = "0.3"
 
 # Capture mode (--capture) — optional, disabled on Windows
-pcap-file = { version = "2", optional = true }
+pcap-file = { version = "3", optional = true }
 etherparse = { version = "0.21", optional = true }
 mp4 = { version = "0.14", optional = true }
 
