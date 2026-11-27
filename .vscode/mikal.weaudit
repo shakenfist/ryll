@@ -360,10 +360,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-protocol/src/proxy.rs",
-      "author": "mikal"
-    },
-    {
       "path": ".github/workflows/proxmox-functional.yml",
       "author": "mikal"
     },
@@ -504,10 +500,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-protocol/src/messages/common.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-protocol/src/messages/cursor.rs",
       "author": "mikal"
     },
@@ -525,10 +517,6 @@
     },
     {
       "path": "shakenfist-spice-protocol/src/messages/mod.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-protocol/src/messages/playback.rs",
       "author": "mikal"
     },
     {
@@ -804,10 +792,6 @@
       "author": "mikal"
     },
     {
-      "path": "STYLEGUIDE.md",
-      "author": "mikal"
-    },
-    {
       "path": "tools/lz4-fixtures/lz4_check.py",
       "author": "mikal"
     },
@@ -849,14 +833,6 @@
     },
     {
       "path": ".github/workflows/release.yml",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/channel-diagnostics-audit.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/control-socket-protocol.md",
       "author": "mikal"
     },
     {
@@ -932,10 +908,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-protocol/src/messages",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-rdp/src/clipboard.rs",
       "author": "mikal"
     },
@@ -948,19 +920,11 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/channels/usbredir.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/src/channels/cursor.rs",
       "author": "mikal"
     },
     {
       "path": "shakenfist-spice-renderer/src/channels/agent_queue.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/tests/control_socket.rs",
       "author": "mikal"
     },
     {
@@ -985,10 +949,6 @@
     },
     {
       "path": "shakenfist-spice-renderer/src/session_state.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/channels/playback.rs",
       "author": "mikal"
     },
     {
@@ -1049,10 +1009,6 @@
     },
     {
       "path": "PUSH-AUDIT.md",
-      "author": "mikal"
-    },
-    {
-      "path": "AGENTS.md",
       "author": "mikal"
     },
     {
