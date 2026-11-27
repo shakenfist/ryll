@@ -13,7 +13,7 @@ libfuzzer-sys = "0.4"
 # `OnceLock` static -- the key itself is generated via the parent crate's own
 # `generate_ticket_keypair()`, never constructed directly here. Pinned to the
 # same "0.9" the parent crate uses (see ../Cargo.toml).
-rsa = "0.9"
+rsa = "0.10"
 
 [dependencies.shakenfist-spice-protocol]
 path = ".."
