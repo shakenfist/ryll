@@ -444,7 +444,11 @@ impl UsbredirChannel {
             UsbredirPayload::Hello(hello) => {
                 self.server_caps = hello.capabilities;
                 // The version is up to 64 bytes the server chose, so
-                // it is sanitised before it reaches the log.
+                // it is sanitised before it reaches the log. Here
+                // rather than in an accessor because the usbredir
+                // crate does not depend on the protocol crate; this
+                // is its only consumer (STYLEGUIDE.md, "Server-supplied
+                // text").
                 info!(
                     "usbredir: server hello: version='{}' caps=0x{:08x}",
                     shakenfist_spice_protocol::text::sanitise_untrusted(&hello.version),

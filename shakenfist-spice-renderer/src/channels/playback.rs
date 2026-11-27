@@ -2053,9 +2053,13 @@ mod tests {
             "a refused START must not reach the sink"
         );
         assert!(channel.current_session.is_none());
-        assert_eq!(channel.starts_refused, 1);
-        assert_eq!(channel.start_count, 0);
         assert_no_audio_thread(&channel);
+        // The published snapshot is what diagnostics, the bug report and the control socket read.
+        channel.update_snapshot();
+        let snap = channel.snapshot.lock().unwrap();
+        assert_eq!(snap.starts_refused, 1);
+        assert_eq!(snap.start_count, 0);
+        assert!(snap.current_session.is_none());
     }
 
     #[cfg(feature = "audio")]

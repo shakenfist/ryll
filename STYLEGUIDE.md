@@ -373,6 +373,13 @@ one of them will not. `Notify::message_text()` is the model — it
 sanitises, and the raw bytes stay on the struct for a caller that
 wants them verbatim.
 
+The one exception is a parsing crate that cannot depend on
+`shakenfist-spice-protocol`: `shakenfist-spice-usbredir` has no
+dependency on it, so the usbredir hello's version string is sanitised
+at its single consumer in the renderer instead. Keep such a consumer
+single, and say at it why it is not an accessor; do not add the
+dependency or copy the function to make the rule fit.
+
 ### Message framing
 
 Channel read loops keep their received bytes in a `ReceiveBuffer`

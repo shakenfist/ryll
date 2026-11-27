@@ -38,6 +38,12 @@ impl PlaybackStart {
     /// wire field is a `u32` and spice-server sends 2, so this is
     /// headroom rather than a real configuration, but it is the point
     /// past which a count is a hostile number rather than a layout.
+    ///
+    /// This bounds the geometry, not what each codec can decode: an
+    /// Opus decoder takes only 1 or 2 channels, so an Opus stream of
+    /// 3 to 8 is accepted here and then fails decoder construction,
+    /// with every DATA packet counted as a decode failure. That is
+    /// the expected outcome, not a bug.
     pub const MAX_CHANNELS: u32 = 8;
 
     /// The lowest sample rate a playable stream has, below telephony.

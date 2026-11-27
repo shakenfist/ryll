@@ -26,8 +26,14 @@
 //! [`sanitise_untrusted`] replaces every such character with
 //! `U+FFFD`, the replacement character the lossy UTF-8 decode of the
 //! same bytes already produces for invalid sequences. The result is
-//! one line of printable text, with exactly as many characters as the
-//! input, which is safe to pass to `tracing` or to put in a UI label.
+//! one line, with exactly as many characters as the input and no
+//! character that can forge a record, drive a terminal or reorder the
+//! rendering, which is safe to pass to `tracing` or to put in a UI
+//! label. Invisible characters outside those classes (zero-width
+//! characters, the tag block, the interlinear annotation marks) still
+//! pass: they can hide text from a reader but not do any of those
+//! three things, and a filter wide enough to catch them all starts to
+//! mangle legitimate localised text.
 //! "One line" holds for every reader that follows Unicode's mandatory
 //! line breaks, not only a terminal: `U+2028` and `U+2029` are refused
 //! with the C0 and C1 line breaks, because egui and JSON or JavaScript

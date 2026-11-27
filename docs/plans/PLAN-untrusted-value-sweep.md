@@ -259,6 +259,13 @@ grep does not find text a parser stores as a `String` by other
 means, so the inventory still asks the question of every string field
 in each channel above.
 
+Also for the inventory: `sanitise_untrusted` deliberately passes
+invisible characters that cannot forge a record, drive a terminal or
+reorder the rendering (zero-width characters, the U+E0000 tag block,
+the U+FFF9 to U+FFFB annotation marks). Decide whether hiding text
+from a reader of a log or bug report is in the threat model, and if
+so which of them to refuse without mangling localised text.
+
 ### Phase 3: Close the gaps
 
 Apply the Phase 1 convention to whatever Phase 2 found, one commit

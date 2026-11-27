@@ -363,8 +363,14 @@ pub struct StatsResult {
 /// cumulative since the channel linked.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlaybackStats {
-    /// `PLAYBACK_START` messages received.
+    /// `PLAYBACK_START` messages acted on. A START whose geometry
+    /// no output could serve is refused and counted in
+    /// `starts_refused` instead, so `starts` can trail `stops`.
     pub starts: u64,
+    /// `PLAYBACK_START` messages refused because their channel count
+    /// or sample rate was outside what any output could serve (v1.7).
+    /// Non-zero means the server is malformed or adversarial.
+    pub starts_refused: u64,
     /// `PLAYBACK_STOP` messages received.
     pub stops: u64,
     /// `PLAYBACK_DATA` messages received, decodable or not.
@@ -406,6 +412,7 @@ impl PlaybackStats {
         let session = snap.current_session.as_ref();
         Some(PlaybackStats {
             starts: snap.start_count,
+            starts_refused: snap.starts_refused,
             stops: snap.stop_count,
             packets_received: snap.data_packets_received,
             packets_decoded: snap.data_packets_decoded,

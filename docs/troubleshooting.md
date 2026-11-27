@@ -814,8 +814,9 @@ not help here. Use the snapshot to answer "where did the audio go?"
   described was dropped whole rather than set up. The accepted ranges are
   1 to 8 channels and 4 kHz to 384 kHz; a real server sends 2 channels at
   48 kHz. A non-zero count means something upstream is malformed or
-  hostile, not misconfigured, and the log carries the values that were
-  refused.
+  hostile, not misconfigured. The log carries the values of the first
+  refusal only (it is a once-per-session warning, so a server cannot
+  flood it); the counter carries the rest.
 
 - **`output`**: The device the sound is going to. If it is not the device
   you are listening to, the problem is local routing, not ryll or the
