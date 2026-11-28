@@ -42,21 +42,28 @@
       "dependencyDashboardApproval": true
     },
     {
-      "description": "Hold sha1 < 0.11 until rsa 0.10 stable releases. sha1 0.11 moves to digest 0.11, but our transitive rsa 0.9 still requires digest 0.10, so Sha1 no longer satisfies rsa::Oaep::new's DynDigest bound. Tracked in shakenfist/ryll#93 / RustCrypto/RSA#647.",
+      "description": "Hold rsa < 0.10 until picky releases a version that takes pkcs1 0.8.0 final. rsa 0.10 requires pkcs1 ^0.8, which resolves to 0.8.0, but picky 7.0.0-rc.25 -- reached through ironrdp-connector 0.10, which shakenfist-spice-rdp depends on -- pins pkcs1 =0.8.0-rc.4. Both are the same 0.8.x range, so cargo cannot keep two copies: it cannot satisfy both requirements at once and `cargo fetch --locked` fails to resolve, which also fails Build, Lint, cargo deny, Cross-check Windows and Can enqueue (see #769). The tree already carries rsa 0.9.10 directly and rsa 0.10.0-rc.18 transitively through picky; those coexist only because they are different majors. Tracked in shakenfist/ryll#93.",
+      "matchPackageNames": [
+        "rsa"
+      ],
+      "allowedVersions": "<0.10"
+    },
+    {
+      "description": "Hold sha1 < 0.11 until our direct rsa can move to 0.10, which the rsa rule above holds back. sha1 0.11 moves to digest 0.11, but our rsa 0.9 still requires digest 0.10, so Sha1 no longer satisfies rsa::Oaep::new's DynDigest bound. rsa 0.10.0 has now released, so RustCrypto/RSA#647 is no longer what this waits on; picky's pkcs1 pin is. Tracked in shakenfist/ryll#93.",
       "matchPackageNames": [
         "sha1"
       ],
       "allowedVersions": "<0.11"
     },
     {
-      "description": "Hold rand < 0.9 until rsa 0.10 stable releases. rand 0.9 restructured CryptoRngCore, which rsa 0.9 calls through. Tracked in shakenfist/ryll#93 / RustCrypto/RSA#647.",
+      "description": "Hold rand < 0.9 until our direct rsa can move to 0.10, which the rsa rule above holds back. rand 0.9 restructured CryptoRngCore, which rsa 0.9 calls through. rsa 0.10.0 has now released, so RustCrypto/RSA#647 is no longer what this waits on; picky's pkcs1 pin is. Tracked in shakenfist/ryll#93.",
       "matchPackageNames": [
         "rand"
       ],
       "allowedVersions": "<0.9"
     },
     {
-      "description": "Hold rand_core < 0.10 to stay aligned with the rand 0.8 / rsa 0.9 pin above. Tracked in shakenfist/ryll#93 / RustCrypto/RSA#647.",
+      "description": "Hold rand_core < 0.10 to stay aligned with the rand 0.8 / rsa 0.9 pins above, and so released with them once the rsa rule above lifts. Tracked in shakenfist/ryll#93.",
       "matchPackageNames": [
         "rand_core"
       ],
