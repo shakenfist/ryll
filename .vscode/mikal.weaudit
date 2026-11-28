@@ -240,10 +240,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/image_cache.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/src/notification.rs",
       "author": "mikal"
     },
@@ -876,10 +872,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-compression/src/byte_bounded_lru.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-compression/src/lz.rs",
       "author": "mikal"
     },
@@ -985,10 +977,6 @@
     },
     {
       "path": ".pre-commit-config.yaml",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-compression/src/glz.rs",
       "author": "mikal"
     },
     {

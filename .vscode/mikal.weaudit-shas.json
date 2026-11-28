@@ -341,10 +341,6 @@
       "sha": "1ab3cf0aab2be244054a90c20328004b2abfa84b",
       "date": "2026-11-22"
     },
-    "shakenfist-spice-compression/src/byte_bounded_lru.rs": {
-      "sha": "b81aaabb0a9de461e959f2390de7251548388c8c",
-      "date": "2026-11-22"
-    },
     "shakenfist-spice-compression/src/dimensions.rs": {
       "sha": "85174bc3b055bd36c1cc74aebed1cba3b16db6a6",
       "date": "2026-11-04"
@@ -356,10 +352,6 @@
     "shakenfist-spice-compression/src/encode/mod.rs": {
       "sha": "47fc1b1ac662abb43059dce97cc7d8d22f16a3ad",
       "date": "2026-11-04"
-    },
-    "shakenfist-spice-compression/src/glz.rs": {
-      "sha": "e764a33be4e93301abb172e5ddf16fdd1d7b087d",
-      "date": "2026-11-23"
     },
     "shakenfist-spice-compression/src/limits.rs": {
       "sha": "511bad0854b2df5f385083b391724790adccc406",
@@ -620,10 +612,6 @@
     "shakenfist-spice-renderer/src/event_bus.rs": {
       "sha": "156c496198cbd9f4063715801615583d8bce5c74",
       "date": "2026-11-23"
-    },
-    "shakenfist-spice-renderer/src/image_cache.rs": {
-      "sha": "96afd58b68815692f90d4c7fed1ae6b98d52063c",
-      "date": "2026-09-19"
     },
     "shakenfist-spice-renderer/src/lib.rs": {
       "sha": "e58afb1d1a8981b0a3c51643bb8b87a8fad26074",
