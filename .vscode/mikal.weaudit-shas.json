@@ -273,10 +273,6 @@
       "sha": "44b5e6e108ab73c57fadd40d5e279be56694ff12",
       "date": "2026-11-03"
     },
-    "ryll/src/main.rs": {
-      "sha": "edc6621fe36de1080fa2e5ea0ff5b5b41f870b8f",
-      "date": "2026-11-27"
-    },
     "ryll/src/notifications.rs": {
       "sha": "302cf90f903ec9d0a686165de153ed7a188be59c",
       "date": "2026-11-27"
@@ -328,22 +324,6 @@
     "ryll/src/web/inputs.rs": {
       "sha": "d982c7ff954f699d6c52badbc7b2d394ef224943",
       "date": "2026-11-27"
-    },
-    "ryll/src/web/lifecycle.rs": {
-      "sha": "fc30506987b70342599e9f4dcb0d97ce20eba1bd",
-      "date": "2026-11-03"
-    },
-    "ryll/src/web/mod.rs": {
-      "sha": "5b23e3f0200f2765ab71f198c03b58ae6acfb395",
-      "date": "2026-11-27"
-    },
-    "ryll/src/web/server.rs": {
-      "sha": "e6a9836010bea7dddab3f36ba2ea76fd0bebc19e",
-      "date": "2026-11-27"
-    },
-    "ryll/src/web/signalling.rs": {
-      "sha": "1a0c1cbc7aca5af1004229130cb117c9874a0052",
-      "date": "2026-11-03"
     },
     "scripts/check-rust.sh": {
       "sha": "6b134226743b654c751c04352cc9072f20476bb9",
@@ -752,10 +732,6 @@
     "shakenfist-spice-webrtc/README.md": {
       "sha": "19072e84e4fdec20fad7c35b04a26db76d5e35f0",
       "date": "2026-08-02"
-    },
-    "shakenfist-spice-webrtc/src/lib.rs": {
-      "sha": "f4ae5da82db95cfaf142f4bd59f52460c233d255",
-      "date": "2026-09-19"
     },
     "shakenfist-spice-webrtc/tests/lifecycle.rs": {
       "sha": "358f02d4af6b88acd5491765c494aefb31f750b6",
