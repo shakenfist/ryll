@@ -11,7 +11,7 @@
 # Comments here are not preserved when the tool rewrites this file.
 
 5110 ryll/src/bugreport.rs
-1789 ryll/src/capture.rs
+1793 ryll/src/capture.rs
 1703 ryll/src/config.rs
 1746 ryll/src/input_egui.rs
 2319 shakenfist-spice-compression/src/jpeg.rs

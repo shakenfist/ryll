@@ -199,13 +199,13 @@ impl TrafficRingBuffer {
                 // Explicit slice borrow: &entry.pcap_frame is &Arc<[u8]> and
                 // PcapPacket wants &[u8].
                 &entry.pcap_frame[..],
-            );
+            )?;
             pcap.write_packet(&packet)?;
             // Additional segments for SPICE messages that exceeded the IPv4
             // frame limit. Written at the same timestamp — matches what the
             // live capture writer produces for the same payload.
             for seg in &entry.additional_segments {
-                let seg_packet = PcapPacket::new(entry.timestamp, seg.len() as u32, &seg[..]);
+                let seg_packet = PcapPacket::new(entry.timestamp, seg.len() as u32, &seg[..])?;
                 pcap.write_packet(&seg_packet)?;
             }
             // `count` reflects the number of SPICE messages, not segments.
@@ -332,10 +332,10 @@ fn write_newest_pcap(
     let (omitted, kept) = segments.split_at(start);
 
     let mut output = Vec::new();
-    let written: Result<(), pcap_file::PcapError> = (|| {
+    let written: Result<(), pcap_file::pcap::PcapError> = (|| {
         let mut pcap = PcapWriter::with_header(&mut output, crate::capture::pcap_header())?;
         for (ts, seg) in kept {
-            pcap.write_packet(&PcapPacket::new(*ts, seg.len() as u32, &seg[..]))?;
+            pcap.write_packet(&PcapPacket::new(*ts, seg.len() as u32, &seg[..])?)?;
         }
         Ok(())
     })();

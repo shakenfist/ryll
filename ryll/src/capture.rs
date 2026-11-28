@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
+use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriteError, PcapWriter};
 use pcap_file::DataLink;
 use tracing::{debug, info, warn};
 
@@ -121,8 +121,12 @@ impl PcapChannelWriter {
     }
 
     fn write_frame(&mut self, frame: &[u8], elapsed: std::time::Duration) {
-        let packet = PcapPacket::new(elapsed, frame.len() as u32, frame);
-        if let Err(e) = self.writer.write_packet(&packet) {
+        // A frame pcap-file refuses to build counts as refused, the same
+        // as one the writer refuses to write.
+        let written = PcapPacket::new(elapsed, frame.len() as u32, frame)
+            .map_err(PcapWriteError::from)
+            .and_then(|packet| self.writer.write_packet(&packet));
+        if let Err(e) = written {
             self.refused_frames += 1;
             if self.refused_frames == 1 {
                 warn!(
