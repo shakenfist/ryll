@@ -17,10 +17,10 @@ use axum::{
 use axum_server::tls_rustls::RustlsConfig;
 use axum_server::Handle;
 use rand::RngCore;
-use shakenfist_spice_renderer::{ChannelEvent, InputEvent, SurfaceMirror};
+use shakenfist_spice_renderer::{InputEvent, SurfaceMirror};
 use shakenfist_spice_webrtc::{UdpBindPolicy, WebrtcBridge};
 use subtle::ConstantTimeEq;
-use tokio::sync::{broadcast, mpsc, watch, Mutex, Notify};
+use tokio::sync::{mpsc, watch, Mutex, Notify};
 use tracing::info;
 
 use super::signalling::EncoderInfra;
@@ -38,9 +38,11 @@ pub const RESIZE_CHANNEL_CAPACITY: usize = 16;
 ///
 /// Also holds the channel handles that bridge the renderer
 /// (running inside `run_connection`) to web-mode consumers
-/// and producers. The senders are owned by the input, cursor
-/// and audio relays; the broadcast `event_tx` lets multiple
-/// observers subscribe to `ChannelEvent`s independently.
+/// and producers. The `ChannelEvent` bus is not among them:
+/// every consumer of it (the surface mirror, the cursor relay,
+/// the notification relay, a control socket) is handed its own
+/// `broadcast::Receiver` by `run_web` at spawn time, so there is
+/// no handler that would look one up here.
 pub struct WebState {
     pub token: String,
     /// Holds the active [`WebrtcBridge`] when one exists.
@@ -63,24 +65,15 @@ pub struct WebState {
     /// each new viewer.
     pub encoder: Arc<Mutex<EncoderInfra>>,
     /// Sender for the [`InputEvent`] channel `run_connection`
-    /// consumes; the input relay sends the browser's keyboard
-    /// and pointer events here. `None` in tests / when web mode
-    /// is not actually connected to a SPICE session.
-    #[allow(dead_code)] // probably stale: shakenfist/ryll#791
+    /// consumes. Cloned into each bridge's input relay by
+    /// `post_offer`. `None` in tests / when web mode is not
+    /// actually connected to a SPICE session.
     pub input_tx: Option<mpsc::Sender<InputEvent>>,
     /// Sender for the `(width, height)` resize channel
     /// `run_connection` plumbs into `MainChannel` to drive the
-    /// SPICE vdagent's `VDAgentMonitorsConfig` flow; the input
-    /// relay sends the browser's viewport size here.
-    #[allow(dead_code)] // probably stale: shakenfist/ryll#791
+    /// SPICE vdagent's `VDAgentMonitorsConfig` flow. Carries the
+    /// browser's viewport, through the same input relay.
     pub resize_tx: Option<mpsc::Sender<shakenfist_spice_renderer::DisplaySize>>,
-    /// Broadcaster for `ChannelEvent`s emitted by the renderer's
-    /// session orchestrator; the surface mirror, cursor relay and
-    /// audio path each subscribe independently.
-    /// `None` outside web-with-SPICE sessions (e.g. in unit
-    /// tests of the HTTP layer).
-    #[allow(dead_code)] // probably stale: shakenfist/ryll#791
-    pub event_tx: Option<broadcast::Sender<ChannelEvent>>,
     /// Live pixel store rebuilt from the renderer's `ChannelEvent`
     /// stream by the apply-event task spawned in `run_web`. The
     /// encoder reads from this via `RealFrameSource`. Wrapped in
@@ -103,6 +96,20 @@ pub struct WebState {
     /// wakes, a new bridge has replaced the old one and the
     /// reaper skips the reap to avoid closing a healthy bridge.
     pub bridge_generation: Arc<AtomicU64>,
+    /// Number of the last `POST /offer` to get past the cooldown.
+    /// Each request takes the next value at entry and carries it as
+    /// its identity: the encoder records it as its owner on restart
+    /// (`EncoderInfra::owner`), and step 7 records it in
+    /// [`Self::installed_offer`]. Offers are numbered from 1, so 0
+    /// means none.
+    pub offer_epoch: AtomicU64,
+    /// The offer whose bridge is in `bridge_slot`. Written by
+    /// `post_offer` under the slot lock as it installs the bridge, and
+    /// read by the reaper under the same lock, so the two are always
+    /// a pair. The reaper passes it to
+    /// `crate::web::lifecycle::stop_viewer_pipeline`, which stops the
+    /// encoder only if that offer still owns it.
+    pub installed_offer: AtomicU64,
     /// Raised by `POST /offer` once a new bridge is in the slot and
     /// [`Self::bridge_generation`] has been bumped.
     ///
@@ -117,6 +124,12 @@ pub struct WebState {
     /// the signal, and a stored permit survives that race where a
     /// broadcast to zero waiters would be lost.
     pub bridge_replaced: Arc<Notify>,
+    /// How many bridges the reaper has reaped, bumped once it has
+    /// finished with each. Nothing in production reads it; it is what
+    /// lets a test wait for the reaper to have *decided* rather than
+    /// for a fixed delay, which matters for the reaps that by design
+    /// change nothing else observable.
+    pub reaps_completed: AtomicU64,
     /// WebRTC media socket bind policy from `--web-media-addr` and
     /// `--web-media-port`, validated at startup by
     /// [`crate::config::web_media_bind_policy`]. Handed to every
@@ -178,7 +191,6 @@ impl WebState {
         Self::build(
             None,
             None,
-            None,
             // No session, so nothing will ever publish a mode; the
             // receiver keeps the initial value after its sender drops.
             watch::channel(shakenfist_spice_renderer::MOUSE_MODE_UNKNOWN).1,
@@ -200,7 +212,6 @@ impl WebState {
     pub fn with_channels(
         input_tx: mpsc::Sender<InputEvent>,
         resize_tx: mpsc::Sender<shakenfist_spice_renderer::DisplaySize>,
-        event_tx: broadcast::Sender<ChannelEvent>,
         mouse_mode: watch::Receiver<u32>,
         surface_mirror: Arc<Mutex<SurfaceMirror>>,
         active_opus_tx: super::audio::ActiveSenderSlot,
@@ -210,7 +221,6 @@ impl WebState {
         Self::build(
             Some(input_tx),
             Some(resize_tx),
-            Some(event_tx),
             mouse_mode,
             surface_mirror,
             active_opus_tx,
@@ -223,7 +233,6 @@ impl WebState {
     fn build(
         input_tx: Option<mpsc::Sender<InputEvent>>,
         resize_tx: Option<mpsc::Sender<shakenfist_spice_renderer::DisplaySize>>,
-        event_tx: Option<broadcast::Sender<ChannelEvent>>,
         mouse_mode: watch::Receiver<u32>,
         surface_mirror: Arc<Mutex<SurfaceMirror>>,
         active_opus_tx: super::audio::ActiveSenderSlot,
@@ -245,11 +254,13 @@ impl WebState {
             encoder: Arc::new(Mutex::new(EncoderInfra::new())),
             input_tx,
             resize_tx,
-            event_tx,
             surface_mirror,
             active_opus_tx,
             bridge_generation: Arc::new(AtomicU64::new(0)),
+            offer_epoch: AtomicU64::new(0),
+            installed_offer: AtomicU64::new(0),
             bridge_replaced: Arc::new(Notify::new()),
+            reaps_completed: AtomicU64::new(0),
             udp_bind,
             ice_servers,
             // Initialise 60 s in the past so the first offer

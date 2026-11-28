@@ -710,13 +710,14 @@ fn run_web(
             traffic.clone() as Arc<dyn shakenfist_spice_renderer::TrafficSink>;
         let capture_dyn: Option<Arc<dyn shakenfist_spice_renderer::CaptureSink>> =
             capture_for_renderer.map(|c| c as Arc<dyn shakenfist_spice_renderer::CaptureSink>);
-        // Notification sink is wired even though web mode has no
-        // notification UI yet — the renderer emits notifications
-        // for protocol gaps that the gap observer above already
-        // funnels into the SharedNotifications store; keeping
-        // the sink wired means a future "web notifications" UI
-        // gets the same data without any session-side changes.
-        let _notifications_sink: Arc<dyn shakenfist_spice_renderer::NotificationSink> =
+        // The notification sink has a consumer even though the
+        // browser shell has no notification UI yet: a `--pedantic`
+        // bug report carries the store (see the observer above), so
+        // the renderer's notifications have to reach it. `run_web`
+        // relays them off the event bus below, because
+        // `run_connection` — unlike `run_headless` — takes no sink
+        // and drains nothing on the host's behalf.
+        let notifications_sink: Arc<dyn shakenfist_spice_renderer::NotificationSink> =
             Arc::new(NotificationStoreSink(notifications.clone()));
         let log_config = settings::log_config();
 
@@ -824,6 +825,12 @@ fn run_web(
         // auth take, which is a race that happens to be won by a wide
         // margin rather than one that cannot be lost.
         let cursor_event_rx = event_bus.subscribe();
+        // Subscribed here for the same reason as the cursor relay: a
+        // `broadcast::Receiver` only sees what is sent after it was
+        // created, and a notification raised during session-init — a
+        // failed channel, a guest agent that never came up — is
+        // exactly the kind a bug report is wanted for.
+        let notification_event_rx = event_bus.subscribe();
 
         // Mouse mode and vdagent state are not on the bus at all. The
         // main channel publishes them through `SessionState`'s watch
@@ -968,7 +975,6 @@ fn run_web(
         let state = Arc::new(crate::web::WebState::with_channels(
             input_tx,
             resize_tx,
-            event_broadcast_tx,
             session_state_rx.mouse_mode.clone(),
             surface_mirror,
             active_opus_tx,
@@ -992,6 +998,10 @@ fn run_web(
             cursor_event_rx,
             state.control_tx.clone(),
             cursor_mirror,
+        ));
+        let notification_handle = tokio::spawn(crate::web::notifications::run_notification_relay(
+            notification_event_rx,
+            notifications_sink,
         ));
         let mouse_mode_handle = tokio::spawn(crate::web::inputs::run_mouse_mode_tracker(
             session_state_rx.mouse_mode,
@@ -1067,6 +1077,7 @@ fn run_web(
         event_bus_handles.forwarder.abort();
         event_bus_handles.mirror.abort();
         cursor_handle.abort();
+        notification_handle.abort();
         mouse_mode_handle.abort();
         control_writer_handle.abort();
 

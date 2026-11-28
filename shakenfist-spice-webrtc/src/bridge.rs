@@ -9,17 +9,24 @@
 //!
 //! ## Codec registration
 //!
-//! webrtc-rs's [`MediaEngine::register_default_codecs`] registers
-//! Opus by default, but H.264 registration depends on the build
-//! features enabled in the `webrtc` crate. To make H.264
-//! advertisement deterministic regardless of feature flags, this
-//! module always registers H.264 manually with a profile / level
-//! that matches what openh264 emits at the renderer layer
-//! (`profile-level-id=42e01f`, baseline level 3.1, packetization
-//! mode 1). See RFC 6184 §8.1 for the SDP fmtp line semantics.
+//! The MediaEngine carries exactly what the pumps can send: H.264 in
+//! packetization mode 1, and Opus. Not
+//! [`MediaEngine::register_default_codecs`], which also registers
+//! VP8, VP9, AV1, HEVC, four more H.264 entries, an RTX codec per
+//! video codec and three legacy audio codecs — every one of which
+//! this bridge would advertise in its answer and then never send.
+//!
+//! One H.264 entry serves every browser, because `rtc` matches a
+//! codec by mime type when the fmtp lines differ: Chrome offers
+//! `42001f` and Firefox `42e01f`, and both match the single `42e01f`
+//! entry registered here — the profile openh264 actually emits. See
+//! RFC 6184 §8.1 for the fmtp line semantics, and
+//! [`register_sendable_codecs`] for the rest of the reasoning,
+//! including why no RTCP feedback is registered.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use bytes::{Bytes, BytesMut};
@@ -29,6 +36,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::task::JoinHandle;
 
 use crate::bind_addrs::UdpBindPolicy;
+use crate::gathering::GATHER_TIMEOUT;
 use crate::sticky::StickySignal;
 
 // The protocol-level types come from `rtc`, the sans-io core, because
@@ -57,6 +65,7 @@ use webrtc::peer_connection::{
     PeerConnectionEventHandler, RTCConfigurationBuilder, RTCIceGatheringState, RTCIceServer,
     RTCPeerConnectionState, RTCSessionDescription, Registry, SettingEngine, SettingEngineBuilder,
 };
+use webrtc::rtp_transceiver::RtpSender;
 
 /// Payload type we register H.264 under in the MediaEngine, and the
 /// value the pumps stamp until negotiation replaces it.
@@ -162,6 +171,10 @@ const AUDIO_TRACK_ID: &str = "audio";
 const H264_FMTP_LINE: &str =
     "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f";
 
+/// Opus fmtp line: webrtc-rs's default Opus parameters, which
+/// [`register_sendable_codecs`] registers unchanged.
+const OPUS_FMTP_LINE: &str = "minptime=10;useinbandfec=1";
+
 /// H.264 RTP clock rate per RFC 6184 / RFC 4566.
 const VIDEO_CLOCK_RATE_HZ: u32 = 90_000;
 
@@ -170,10 +183,10 @@ const VIDEO_CLOCK_RATE_HZ: u32 = 90_000;
 /// MTU minus UDP+IP+SRTP overhead on a 1500-byte ethernet frame.
 const VIDEO_MTU: usize = 1200;
 
-/// Payload type Opus is registered under by webrtc-rs's
-/// [`MediaEngine::register_default_codecs`] (which the bridge calls in
-/// [`WebrtcBridge::new`]), and the value the audio pumps stamp until
-/// negotiation replaces it.
+/// Payload type Opus is registered under by
+/// [`register_sendable_codecs`] — the number webrtc-rs's defaults give
+/// it — and the value the audio pumps stamp until negotiation replaces
+/// it.
 ///
 /// Opus is far safer than H.264 here — there is exactly one Opus entry
 /// in the MediaEngine, so any Opus the remote peer offers remaps onto
@@ -638,6 +651,10 @@ pub struct WebrtcBridge {
     /// keep the registry type out of this struct.
     pc: Arc<dyn PeerConnection>,
     video_track: Arc<TrackLocalStaticRTP>,
+    /// The video track's sender, kept so [`Self::accept_offer`] can
+    /// withdraw the track from a viewer that offered no H.264. See
+    /// there for why the answer needs that.
+    video_sender: Arc<dyn RtpSender>,
     audio_track: Arc<TrackLocalStaticRTP>,
     control_dc: Arc<dyn DataChannel>,
     // The on-state handler keeps its own clone for keyframe
@@ -768,11 +785,7 @@ impl WebrtcBridge {
     /// a viewer attaches.
     pub async fn new(config: WebrtcBridgeConfig) -> Result<Self> {
         let mut media_engine = MediaEngine::default();
-        // register_default_codecs is conditional on webrtc's H.264
-        // feature being enabled. Register Opus + H.264 explicitly
-        // so the answer SDP advertises both regardless.
-        media_engine.register_default_codecs()?;
-        register_h264(&mut media_engine)?;
+        register_sendable_codecs(&mut media_engine)?;
 
         let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
 
@@ -917,8 +930,8 @@ impl WebrtcBridge {
         // (`rtc-0.20.2/src/rtp_transceiver/rtp_sender/rtp_codec.rs:139-163`),
         // and the codec that ends up negotiated is cloned from the
         // MediaEngine's registered entry — so the payload type and fmtp
-        // in the SDP come from `register_h264` and
-        // `register_default_codecs`, never from the values below. Do
+        // in the SDP come from `register_sendable_codecs`, never from
+        // the values below. Do
         // not try to fix an fmtp mismatch by editing this side; it is
         // the side that is ignored.
         //
@@ -965,7 +978,7 @@ impl WebrtcBridge {
         // driver and one socket per interface, with `WebrtcBridge`
         // never constructed so its `Drop` backstop cannot help. So
         // the fallible part is one call with one error path.
-        let (video_track, audio_track, control_dc) =
+        let (video_track, video_sender, audio_track, control_dc) =
             match attach_tracks_and_control_dc(&pc, video_ssrc, audio_ssrc).await {
                 Ok(attached) => attached,
                 Err(e) => {
@@ -996,6 +1009,7 @@ impl WebrtcBridge {
         Ok(Self {
             pc,
             video_track,
+            video_sender,
             audio_track,
             control_dc,
             encoder_control: config.encoder_control,
@@ -1056,10 +1070,41 @@ impl WebrtcBridge {
         // MediaEngine and fixes the payload types.
         self.resolve_negotiated_payload_types().await;
 
+        // A viewer that offered no codec this bridge can send gets its
+        // video m-line rejected rather than an answer that fails to
+        // build.
+        //
+        // The MediaEngine carries only H.264 and Opus, so an offer
+        // without H.264 leaves the video sender with an empty codec
+        // list — and `rtc` refuses to render a media section for a
+        // sender in that state (`ErrSenderWithNoCodecs`), which would
+        // fail the whole offer. Withdrawing the track removes the
+        // sender, and `rtc` then takes its other branch: port 0 with
+        // the mid kept, which is how RFC 9429 §5.3.1 says to reject a
+        // media section.
+        //
+        // The session is worth keeping. Audio, input, the cursor
+        // overlay and the control datachannel all work without video,
+        // and `video_negotiated()` is what tells the browser why the
+        // picture is missing (see ryll's `web::control`). Failing the
+        // offer instead would leave a Firefox whose OpenH264 plugin
+        // has not loaded with no session and no explanation.
+        if !self.video_negotiated() {
+            tracing::warn!(
+                "webrtc: this viewer offered no H.264; withdrawing the video track so the \
+                 answer rejects the video m-line, and the rest of the session continues"
+            );
+            if let Err(e) = self.pc.remove_track(&self.video_sender).await {
+                return Err(anyhow!(
+                    "no common video codec, and withdrawing the video track failed: {e}"
+                ));
+            }
+        }
+
         let answer = self.pc.create_answer(None).await?;
         self.pc.set_local_description(answer).await?;
 
-        self.wait_for_gathering().await;
+        self.wait_for_gathering(GATHER_TIMEOUT).await?;
 
         let local_desc = self
             .pc
@@ -1085,13 +1130,16 @@ impl WebrtcBridge {
     /// each match remapped onto *our* payload type
     /// (`rtc-0.20.2/src/rtp_transceiver/internal.rs:299-383`), so which
     /// number survives depends on what the browser offered.
-    /// `register_default_codecs` registers five H.264 entries at
-    /// different profile-level-ids, and browsers do not all offer the
-    /// same ones: Chrome offers `42001f`, which matches our PT 102,
-    /// while Firefox offers only `42e01f`, which matches PT 125. Stamp
-    /// 102 for a Firefox viewer and every video packet is rejected at
-    /// the sender — a connected viewer looking at a black screen, with
-    /// the explanation only at `trace` level inside the library.
+    /// With several H.264 entries registered, as there were before
+    /// [`register_sendable_codecs`], the surviving number depended on
+    /// the browser: Chrome's `42001f` matched one entry and Firefox's
+    /// `42e01f` another, and stamping the wrong one rejected every
+    /// video packet at the sender — a connected viewer looking at a
+    /// black screen, with the explanation only at `trace` level inside
+    /// the library. There is one entry now, so both browsers' offers
+    /// remap onto the same number; this still reads the number back
+    /// rather than assuming it, because "one entry" is a property of
+    /// the registration, not of this function.
     ///
     /// Audio has one Opus entry and so cannot drift today, but it is
     /// resolved the same way rather than trusted.
@@ -1186,7 +1234,7 @@ impl WebrtcBridge {
         self.video_payload_type.load(Ordering::Relaxed) != PAYLOAD_TYPE_NONE
     }
 
-    /// Wait until ICE gathering has completed.
+    /// Wait until ICE gathering has completed, or `timeout` runs out.
     ///
     /// Backed by [`BridgeEvents::on_ice_gathering_state_change`]
     /// rather than `RTCPeerConnection::gathering_complete_promise`,
@@ -1196,8 +1244,14 @@ impl WebrtcBridge {
     /// closes the lost-wakeup window that 0.17's oneshot
     /// `gathering_complete_promise` never had; see its docs for the
     /// reasoning.
-    async fn wait_for_gathering(&self) {
-        self.gathered.wait().await;
+    ///
+    /// The bound is the point: this wait is on the request path, and
+    /// an unbounded one parked `POST /offer` and the encoder restart
+    /// behind it for the life of the process. See
+    /// [`crate::gathering::wait_for_gathering`] for what the error
+    /// reports.
+    async fn wait_for_gathering(&self, timeout: Duration) -> Result<()> {
+        crate::gathering::wait_for_gathering(&self.pc, &self.gathered, timeout).await
     }
 
     /// Spawn the video pump task: consume [`EncodedFrame`]s from
@@ -1405,6 +1459,7 @@ async fn attach_tracks_and_control_dc(
     audio_ssrc: u32,
 ) -> Result<(
     Arc<TrackLocalStaticRTP>,
+    Arc<dyn RtpSender>,
     Arc<TrackLocalStaticRTP>,
     Arc<dyn DataChannel>,
 )> {
@@ -1422,7 +1477,11 @@ async fn attach_tracks_and_control_dc(
             ..Default::default()
         }],
     )));
-    pc.add_track(video_track.clone() as Arc<dyn TrackLocal>)
+    // The sender is kept, not discarded: `accept_offer` withdraws the
+    // video track when a viewer offers no H.264, which is what lets
+    // the answer reject the video m-line instead of failing to build.
+    let video_sender = pc
+        .add_track(video_track.clone() as Arc<dyn TrackLocal>)
         .await?;
 
     let audio_track = Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
@@ -1463,7 +1522,7 @@ async fn attach_tracks_and_control_dc(
         )
         .await?;
 
-    Ok((video_track, audio_track, control_dc))
+    Ok((video_track, video_sender, audio_track, control_dc))
 }
 
 /// Draw a random SSRC that is never zero.
@@ -1480,36 +1539,57 @@ fn nonzero_random_ssrc() -> u32 {
     }
 }
 
-/// Register H.264 with the MediaEngine. We pin profile-level-id to
-/// `42e01f` (baseline profile, level 3.1) which matches what the
-/// renderer's openh264 wrapper emits and what every browser decodes.
-/// Packetization-mode 1 enables FU-A fragmentation per RFC 6184 §5.4.
+/// Register the codecs this bridge can actually send: one H.264 entry
+/// and one Opus entry. See the module docs for why this is not
+/// [`MediaEngine::register_default_codecs`].
 ///
-/// This call is redundant on 0.20 and is kept deliberately.
-/// `register_default_codecs` registers five H.264 entries
-/// unconditionally (PT 102, 127, 125, 108, 123) and webrtc-rs drops
-/// this one as a duplicate payload type —
-/// `register_h264_is_redundant_with_default_codecs` asserts exactly
-/// that, and the answer SDP is byte-identical with or without it.
-/// It stays because
-/// it states our profile-level preference in one place: if the
-/// defaults ever stop carrying H.264, or carry it at a profile the
-/// renderer cannot emit, this is what turns that into a changed SDP
-/// rather than a silent renegotiation onto VP8.
+/// One H.264 entry is enough for every browser, which is not obvious:
+/// `rtc` degrades an fmtp mismatch to a mime-type-only match rather
+/// than an error (`rtc-0.21.1/src/rtp_transceiver/rtp_sender/
+/// rtp_codec.rs`), so Chrome's `42001f` offer matches this `42e01f`
+/// entry and Firefox's `42e01f` offer matches it too —
+/// `both_browser_h264_profiles_negotiate_video` holds that down. The
+/// answer then carries the profile registered here, which is the one
+/// openh264 emits. The old registration had this backwards: the
+/// default PT 102 entry won and the answer advertised `42001f` while
+/// the encoder sent baseline.
 ///
-/// It is also why PT 102 negotiates `profile-level-id=42001f` while
-/// the encoder emits `42e01f`: the default entry wins, and 0.20's
-/// codec matching degrades an fmtp mismatch to a mime-type-only match
-/// rather than an error
-/// (`rtc-0.20.2/src/rtp_transceiver/rtp_sender/rtp_codec.rs:139-163`).
-/// Browsers tolerate the constraint-set difference. The discrepancy
-/// predates the port and is deliberately left alone.
-pub(crate) fn register_h264(media_engine: &mut MediaEngine) -> Result<()> {
-    let h264 = RTCRtpCodecParameters {
-        rtp_codec: h264_codec(),
-        payload_type: H264_PAYLOAD_TYPE,
-    };
-    media_engine.register_codec(h264, RtpCodecKind::Video)?;
+/// No RTCP feedback is registered. The feedback the answer carries —
+/// `nack`, `nack pli`, `transport-cc` — comes from
+/// `register_default_interceptors`, which is where the
+/// implementations are. Adding `goog-remb` and `ccm fir` here, as
+/// `register_default_codecs` did, would ask browsers for a bandwidth
+/// estimate this bridge does not read (#550) and full-intra-requests
+/// it does not answer (#789) — the same promise-without-delivery that
+/// the RTX entries were making.
+///
+/// The payload types are the ones webrtc-rs's defaults gave these
+/// codecs (102 for H.264, 111 for Opus), and are a starting point
+/// either way: `set_remote_description` remaps each match onto the
+/// offer's numbering, which is what
+/// [`WebrtcBridge::resolve_negotiated_payload_types`] reads back.
+pub(crate) fn register_sendable_codecs(media_engine: &mut MediaEngine) -> Result<()> {
+    media_engine.register_codec(
+        RTCRtpCodecParameters {
+            rtp_codec: RTCRtpCodec {
+                mime_type: MIME_TYPE_OPUS.to_owned(),
+                clock_rate: AUDIO_SAMPLE_RATE_HZ,
+                channels: 2,
+                sdp_fmtp_line: OPUS_FMTP_LINE.to_owned(),
+                rtcp_feedback: vec![],
+            },
+            payload_type: OPUS_PAYLOAD_TYPE,
+        },
+        RtpCodecKind::Audio,
+    )?;
+
+    media_engine.register_codec(
+        RTCRtpCodecParameters {
+            rtp_codec: h264_codec(),
+            payload_type: H264_PAYLOAD_TYPE,
+        },
+        RtpCodecKind::Video,
+    )?;
     Ok(())
 }
 
@@ -1556,11 +1636,12 @@ fn negotiated_payload_type(codecs: &[RTCRtpCodecParameters], mime_type: &str) ->
 /// refusing to send guarantees a blank screen, whereas sending gets
 /// the un-fragmented frames through — so this warns and uses it.
 ///
-/// The profile preference breaks ties between mode-1 entries.
-/// `register_default_codecs` registers baseline, constrained-baseline
-/// and high-profile entries, and a browser may negotiate several, so
-/// without a tie-break the choice falls to intersection order and can
-/// name a profile we never produce. The renderer pins none, which
+/// The profile preference breaks ties between mode-1 entries. Only
+/// one is registered today (see [`register_sendable_codecs`]), so
+/// with the bridge's own MediaEngine this and the mode-0 branch above
+/// are defensive: they keep the choice right if a second entry is
+/// ever registered, rather than leaving it to intersection order,
+/// which can name a profile we never produce. The renderer pins none, which
 /// leaves openh264 at its own defaults: `iEntropyCodingModeFlag` is 0
 /// (CAVLC) in `param_svc.h:164` and nothing in `EncoderConfig` or
 /// `H264Encoder::new` overrides it, so `encoder_ext.cpp:662` resolves
@@ -1656,7 +1737,7 @@ fn is_baseline_profile(sdp_fmtp_line: &str) -> bool {
 }
 
 /// The H.264 codec description, shared by the MediaEngine registration
-/// in [`register_h264`] and the video track's codings.
+/// in [`register_sendable_codecs`] and the video track's codings.
 ///
 /// One function rather than two literals so the two cannot drift: if
 /// the coding names a codec the MediaEngine does not have, `add_track`
@@ -1675,8 +1756,8 @@ fn h264_codec() -> RTCRtpCodec {
 
 /// The Opus codec description for the audio track's codings.
 ///
-/// Matches the entry `MediaEngine::register_default_codecs` installs at
-/// payload type 111 — 48 kHz stereo per RFC 7587 §4.1, which is the
+/// Matches the entry [`register_sendable_codecs`] installs at payload
+/// type 111 — 48 kHz stereo per RFC 7587 §4.1, which is the
 /// signalled rate regardless of the mono content we actually send. The
 /// fmtp line is left empty on purpose: matching falls back to mime_type
 /// alone, and the negotiated fmtp comes from the registered entry, so
@@ -2031,12 +2112,7 @@ impl WebrtcBridge {
     pub(crate) async fn create_offer_and_gather(&self) -> Result<String> {
         let offer = self.pc.create_offer(None).await?;
         self.pc.set_local_description(offer).await?;
-        crate::test_client::wait_for_gathering(
-            &self.pc,
-            &self.gathered,
-            crate::test_client::GATHER_TIMEOUT,
-        )
-        .await?;
+        self.wait_for_gathering(GATHER_TIMEOUT).await?;
         let local = self
             .pc
             .local_description()
@@ -3056,7 +3132,10 @@ mod tests {
         let answer = bridge.pc.create_answer(None).await.expect("answer");
         bridge.pc.set_local_description(answer).await.expect("sld");
 
-        bridge.wait_for_gathering().await;
+        bridge
+            .wait_for_gathering(GATHER_TIMEOUT)
+            .await
+            .expect("gathering should complete on a loopback bridge");
 
         let local = bridge
             .pc
@@ -3077,11 +3156,57 @@ mod tests {
         // late-subscriber path is covered at all — without it a
         // regression that made `wait_for_gathering` hang for late
         // callers could pass the suite.
-        tokio::time::timeout(Duration::from_millis(100), bridge.wait_for_gathering())
-            .await
-            .expect("a late wait_for_gathering must return via the sticky flag");
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            bridge.wait_for_gathering(GATHER_TIMEOUT),
+        )
+        .await
+        .expect("a late wait_for_gathering must return via the sticky flag")
+        .expect("a late wait_for_gathering must report success");
 
         client.close().await.expect("client close");
+        bridge.close().await.expect("bridge close");
+    }
+
+    /// The gathering wait gives up rather than parking forever.
+    ///
+    /// A fresh bridge has never had a local description set, so
+    /// nothing has kicked ICE gathering and the signal cannot be
+    /// raised: this is the "never completes" case, deterministically.
+    /// Before the bound, `accept_offer` awaited this signal with no
+    /// ceiling, so a wedged driver or a silent STUN server held the
+    /// `POST /offer` request — and the encoder restarted for it — for
+    /// the life of the process.
+    ///
+    /// The error has to be a [`crate::GatheringTimeout`]: ryll's
+    /// handler answers 504 on that type rather than blaming the
+    /// browser's offer, and nothing else distinguishes the two.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_gathering_wait_is_bounded_and_says_why() {
+        let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::for_tests(tx))
+            .await
+            .expect("bridge");
+
+        let started = std::time::Instant::now();
+        let err = bridge
+            .wait_for_gathering(Duration::from_millis(200))
+            .await
+            .expect_err("gathering cannot have completed: nothing started it");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the wait should give up at its bound, not run to the test's patience"
+        );
+        assert!(
+            err.downcast_ref::<crate::GatheringTimeout>().is_some(),
+            "the error must be recognisable as a gathering timeout: {err:#}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no local description at all"),
+            "the error should say how far gathering got: {msg}"
+        );
+
         bridge.close().await.expect("bridge close");
     }
 

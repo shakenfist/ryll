@@ -12,6 +12,7 @@ pub(crate) mod control;
 pub(crate) mod cursor;
 pub(crate) mod inputs;
 pub(crate) mod lifecycle;
+pub(crate) mod notifications;
 pub(crate) mod server;
 pub(crate) mod signalling;
 
