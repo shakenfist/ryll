@@ -13,16 +13,16 @@
 //! the giant value anyway).
 //!
 //! The entry cap exists because `bytes` counts payload only.  Each
-//! entry also costs a boxed LRU node, a hash-map slot and the
-//! allocator header on its own `Vec` — see
-//! [`PER_ENTRY_OVERHEAD_BYTES`] — none of which `bytes` can see.  A
-//! stream of 1x1 RGBA images therefore accounts for 4 bytes apiece
-//! while really costing around a hundred, so a payload-only cap of
-//! 256 MiB would admit ~67 million entries and multiple gigabytes of
-//! RSS.  Capping entries at `cap_bytes / PER_ENTRY_OVERHEAD_BYTES`
-//! budgets container overhead at no more than the payload budget, so
-//! the worst-case footprint is about twice `cap_bytes` rather than
-//! twenty-five times it.
+//! entry also costs a boxed LRU node, the `ArcInner` behind its
+//! shared value, a hash-map slot and the allocator header on its own
+//! `Vec` — see [`PER_ENTRY_OVERHEAD_BYTES`] — none of which `bytes`
+//! can see.  A stream of 1x1 RGBA images therefore accounts for 4
+//! bytes apiece while really costing around 120, so a payload-only
+//! cap of 256 MiB would admit ~67 million entries and multiple
+//! gigabytes of RSS.  Capping entries at
+//! `cap_bytes / PER_ENTRY_OVERHEAD_BYTES` budgets container overhead
+//! at no more than the payload budget, so the worst-case footprint is
+//! about twice `cap_bytes` rather than twenty-five times it.
 //!
 //! Eviction counters (`evictions_total`, `evicted_bytes_total`) are
 //! session-wide: they survive [`clear`][ByteBoundedLru::clear] so
@@ -42,16 +42,35 @@ use std::sync::Arc;
 /// Per-entry container overhead charged when deriving the entry cap,
 /// in bytes.
 ///
-/// Not measured at runtime — a floor estimated from the layout an
-/// entry actually occupies: the boxed `LruCache` node (key, shared value
-/// header, two list pointers), the hash-map slot that points at it at
-/// hashbrown's load factor, and allocation headers. Sharing values
-/// adds an Arc allocation while reducing the value header in the LRU
-/// node; this remains a rough floor rather than an exact RSS cap. Around 96
-/// bytes in total; the real figure varies with allocator and target,
-/// and the point is that the accounting is now the right order of
-/// magnitude rather than exact.
-pub const PER_ENTRY_OVERHEAD_BYTES: usize = 96;
+/// Not measured at runtime — derived from the layout one entry
+/// occupies on x86-64 against glibc's allocator:
+///
+/// - the boxed `lru` node (`key: u64`, `val: Arc<Vec<u8>>` and two
+///   list pointers) is a 32-byte request, which malloc serves from a
+///   48-byte chunk;
+/// - the `ArcInner` behind each value — two atomic counters plus the
+///   24-byte `Vec` header — is a 40-byte request, also a 48-byte
+///   chunk;
+/// - the hash-map slot pointing at the node is 16 bytes plus a
+///   control byte, carried at hashbrown's 7/8 load factor, so about
+///   19;
+/// - the payload `Vec`'s own allocation costs an 8-byte malloc header
+///   that `bytes` cannot see, though it does count the payload.
+///
+/// That totals about 123 bytes, and counting the load factor or
+/// allocator rounding less kindly puts it in a 120-145 band. Sharing
+/// values moved the figure up rather than down: the node sheds a
+/// 24-byte `Vec` header for an 8-byte pointer, but every value gains
+/// an `ArcInner` allocation of its own.
+///
+/// 128 is charged rather than the derived figure because it is a
+/// round number at the low end of that band, and charging slightly
+/// over the estimate tightens the entry cap rather than loosening
+/// it. It keeps the worst-case footprint at about twice `cap_bytes` (see
+/// the module docs) instead of the twenty-five times a payload-only
+/// cap would allow. It is not an exact RSS bound and is not meant to
+/// be read as one.
+pub const PER_ENTRY_OVERHEAD_BYTES: usize = 128;
 
 /// Outcome of a [`ByteBoundedLru::insert`] call.
 #[derive(Debug, PartialEq, Eq)]

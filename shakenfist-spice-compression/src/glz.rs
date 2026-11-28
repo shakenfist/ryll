@@ -70,8 +70,26 @@ impl GlzDictionary {
 
     /// Create a new empty dictionary with an explicit byte cap.
     pub fn with_cap(cap_bytes: usize) -> Self {
+        Self::from_lru(ByteBoundedLru::new(cap_bytes))
+    }
+
+    /// Create a dictionary with an explicit entry cap as well as a
+    /// byte cap, for tests of the byte-cap arithmetic at small caps.
+    ///
+    /// [`with_cap`][Self::with_cap] derives the entry cap from the
+    /// byte cap, which is what production wants; see
+    /// [`ByteBoundedLru::with_caps`] for why a test that means to
+    /// exercise the byte cap has to say so.
+    #[cfg(test)]
+    fn with_caps(cap_bytes: usize, max_entries: usize) -> Self {
+        Self::from_lru(ByteBoundedLru::with_caps(cap_bytes, max_entries))
+    }
+
+    /// The one initialiser, so a new field is added in one place and
+    /// the test-only constructor cannot drift from the production one.
+    fn from_lru(images: ByteBoundedLru) -> Self {
         Self {
-            images: Mutex::new(ByteBoundedLru::new(cap_bytes)),
+            images: Mutex::new(images),
             notify: tokio::sync::Notify::new(),
             evicted_ids: Mutex::new(LruCache::new(
                 NonZeroUsize::new(EVICTED_ID_TOMBSTONES).expect("tombstone capacity is non-zero"),
@@ -216,6 +234,33 @@ impl Default for GlzDictionary {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Advance `out_idx` past a cross-image reference that could not be
+/// satisfied, clamped to the end of the output.
+///
+/// Skipping the whole reference leaves the pixels it would have
+/// written as zeros and keeps everything after it in place. The
+/// clipping path does the opposite — a hit whose source runs short
+/// advances only by what it copied, so later pixels shift — which
+/// `clipped_cross_reference_leaves_next_literal_at_actual_copy_end`
+/// pins as deliberate. A third case is a hit whose pixel offset lies
+/// past the end of its source: it copies nothing and advances
+/// nothing, the same shape as a fully clipped hit. All three are
+/// lenient readings of a malformed stream, and which one is right is
+/// a question about the decoder's contract rather than about these
+/// two lines.
+///
+/// The clamp is what makes `out_idx <= output_size` an invariant of
+/// the decode loop instead of a property of where its `continue`
+/// statements happen to sit: `length` grows with `0xFF` continuation
+/// bytes under the sender's control. The arithmetic saturates so that
+/// a 32-bit target cannot wrap it either, where `length * 4` would
+/// overflow at about 4 MiB of continuation bytes.
+fn skip_unsatisfied_reference(out_idx: usize, length: usize, output_size: usize) -> usize {
+    out_idx
+        .saturating_add(length.saturating_mul(4))
+        .min(output_size)
 }
 
 #[expect(
@@ -458,7 +503,7 @@ pub async fn decompress_glz(data: &[u8], dictionary: &GlzDictionary) -> Result<D
                             image_id,
                             image_dist
                         );
-                        out_idx += length * 4;
+                        out_idx = skip_unsatisfied_reference(out_idx, length, output_size);
                         continue;
                     }
                     None => {
@@ -506,7 +551,7 @@ pub async fn decompress_glz(data: &[u8], dictionary: &GlzDictionary) -> Result<D
                                     image_id,
                                     image_dist
                                 );
-                                out_idx += length * 4;
+                                out_idx = skip_unsatisfied_reference(out_idx, length, output_size);
                                 continue;
                             }
                         }
@@ -537,6 +582,11 @@ pub async fn decompress_glz(data: &[u8], dictionary: &GlzDictionary) -> Result<D
         }
     }
 
+    debug_assert!(
+        out_idx <= output_size,
+        "decode loop left out_idx past the end of the output: {out_idx} > {output_size}"
+    );
+
     if !top_down {
         let row_bytes = width as usize * 4;
         let mut flipped = vec![0u8; output.len()];
@@ -555,6 +605,18 @@ pub async fn decompress_glz(data: &[u8], dictionary: &GlzDictionary) -> Result<D
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    /// A current-thread runtime with the clock paused, so a test can
+    /// assert on `CROSS_REF_TIMEOUT_MS` without spending it and
+    /// without a loaded runner's deschedule deciding the outcome.
+    fn paused_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .start_paused(true)
+            .build()
+            .expect("current-thread runtime with a paused clock")
+    }
 
     /// Repeated two-pixel references with changing source images and
     /// offsets exercise the same source allocations across many fragments.
@@ -604,7 +666,9 @@ mod tests {
         let (data, first, second, expected) = fragmented_cross_ref_image();
         let dict = GlzDictionary::with_cap(1024);
         dict.insert(8, second);
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        // Paused: the 100 ms safety-net timer must not be left running
+        // behind a test whose ordering is already deterministic.
+        let rt = paused_runtime();
         rt.block_on(async {
             let mut decode = Box::pin(decompress_glz(&data, &dict));
             // Poll once to register the missing-image notification. This
@@ -833,7 +897,9 @@ mod tests {
 
     #[test]
     fn dict_insert_over_cap_evicts_oldest() {
-        let dict = GlzDictionary::with_cap(300);
+        // An explicit entry cap: this test is about the byte cap, and
+        // the entry cap derived from 300 bytes would evict first.
+        let dict = GlzDictionary::with_caps(300, 8);
         dict.insert(1, vec![0u8; 100]);
         dict.insert(2, vec![0u8; 100]);
         dict.insert(3, vec![0u8; 100]);
@@ -882,7 +948,9 @@ mod tests {
 
     #[test]
     fn dict_tombstones_cap_evicted_ids_only() {
-        let dict = GlzDictionary::with_cap(300);
+        // As in dict_insert_over_cap_evicts_oldest: the eviction under
+        // test is a byte-cap one, so the entry cap is set explicitly.
+        let dict = GlzDictionary::with_caps(300, 8);
         dict.insert(1, vec![0u8; 100]);
         dict.insert(2, vec![0u8; 100]);
         dict.insert(3, vec![0u8; 100]);
@@ -931,7 +999,7 @@ mod tests {
 
     #[test]
     fn cross_ref_to_evicted_id_does_not_wait() {
-        let dict = GlzDictionary::with_cap(200);
+        let dict = GlzDictionary::with_caps(200, 8);
         // Insert id 4, then push it out with two more images so the
         // cap evicts it and leaves a tombstone.
         dict.insert(4, vec![0u8; 100]);
@@ -940,15 +1008,20 @@ mod tests {
         assert!(dict.was_evicted(4), "test setup: id 4 should be evicted");
 
         let data = glz_cross_ref_image(5);
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let start = std::time::Instant::now();
-        let result = rt.block_on(decompress_glz(&data, &dict));
-        let elapsed = start.elapsed();
+        let rt = paused_runtime();
+        let (result, elapsed) = rt.block_on(async {
+            let start = tokio::time::Instant::now();
+            let result = decompress_glz(&data, &dict).await;
+            (result, start.elapsed())
+        });
 
         assert!(result.is_ok(), "decode should still succeed: {result:?}");
-        assert!(
-            elapsed < std::time::Duration::from_millis(CROSS_REF_TIMEOUT_MS / 2),
-            "reference to an evicted id must not wait for the timeout (took {elapsed:?})"
+        // On a paused clock the fast path is exact rather than
+        // approximate: it awaits no timer at all.
+        assert_eq!(
+            elapsed,
+            Duration::ZERO,
+            "a reference to an evicted id must not wait"
         );
     }
 
@@ -962,15 +1035,127 @@ mod tests {
         assert!(!dict.was_evicted(4));
 
         let data = glz_cross_ref_image(5);
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let start = std::time::Instant::now();
-        let result = rt.block_on(decompress_glz(&data, &dict));
-        let elapsed = start.elapsed();
+        let rt = paused_runtime();
+        let (result, elapsed) = rt.block_on(async {
+            let start = tokio::time::Instant::now();
+            let result = decompress_glz(&data, &dict).await;
+            (result, start.elapsed())
+        });
 
         assert!(result.is_ok(), "decode should still succeed: {result:?}");
-        assert!(
-            elapsed >= std::time::Duration::from_millis(CROSS_REF_TIMEOUT_MS),
-            "an unknown id should still wait out the timeout (took {elapsed:?})"
+        assert_eq!(
+            elapsed,
+            Duration::from_millis(CROSS_REF_TIMEOUT_MS),
+            "an unknown id should wait out the whole timeout"
         );
+    }
+
+    /// The clamp itself, independent of the decode loop: the two
+    /// end-to-end skip tests below decode to the same pixels with or
+    /// without it, and the `debug_assert!` that does notice is compiled
+    /// out of a build without debug assertions.
+    #[test]
+    fn skip_unsatisfied_reference_stops_at_the_end_of_the_output() {
+        // Within the output: advances by the whole reference.
+        assert_eq!(skip_unsatisfied_reference(0, 1, 8), 4);
+        assert_eq!(skip_unsatisfied_reference(4, 1, 8), 8);
+        // The skip fixtures' shape: 1022 pixels against two.
+        assert_eq!(skip_unsatisfied_reference(0, 1022, 8), 8);
+        // Already at the end stays there.
+        assert_eq!(skip_unsatisfied_reference(8, 1, 8), 8);
+    }
+
+    #[test]
+    fn skip_unsatisfied_reference_saturates_instead_of_wrapping() {
+        // The addition would wrap past usize::MAX: MAX - 4 + 8. (With
+        // a length of 1 it would land exactly on MAX and prove
+        // nothing.)
+        assert_eq!(skip_unsatisfied_reference(usize::MAX - 4, 2, 8), 8);
+        // The multiplication would wrap: `length * 4` overflows.
+        assert_eq!(skip_unsatisfied_reference(0, usize::MAX, 8), 8);
+        assert_eq!(skip_unsatisfied_reference(0, usize::MAX / 4 + 1, 8), 8);
+    }
+
+    #[test]
+    fn evicted_cross_reference_longer_than_the_output_is_skipped_whole() {
+        let dict = GlzDictionary::with_caps(200, 8);
+        dict.insert(0, vec![7u8; 100]);
+        dict.insert(1, vec![8u8; 100]);
+        dict.insert(2, vec![9u8; 100]);
+        assert!(dict.was_evicted(0), "test setup: id 0 must be tombstoned");
+
+        // ctrl 0xE0 asks for the extended length form; three 0xFF
+        // continuations and a 250 make it 1022 pixels, against an
+        // output of two. Then code1 0, image_dist 1 (so source id 0,
+        // the tombstoned one), then one literal pixel. The skip fills
+        // the output, so the literal is never decoded; it is there so
+        // that a skip which failed to advance `out_idx` would decode
+        // it at pixel 0 and fail the assertion below.
+        let payload = [0xE0, 0xFF, 0xFF, 0xFF, 250, 0x00, 0x01, 0x00, 9, 10, 11];
+        let data = glz_rgb32_row(2, &payload);
+        let rt = paused_runtime();
+        let image = rt.block_on(decompress_glz(&data, &dict)).unwrap();
+
+        // This catches a skip that does not advance. It does not, on
+        // its own, catch one that advances unclamped: the output is
+        // the same either way, and only the `debug_assert!` on
+        // `out_idx` at the end of the decode loop notices, so in a
+        // build without debug assertions it passes regardless. The
+        // clamp's regression guard is
+        // `skip_unsatisfied_reference_stops_at_the_end_of_the_output`.
+        assert_eq!(image.pixels, vec![0u8; 8]);
+    }
+
+    #[test]
+    fn timed_out_cross_reference_longer_than_the_output_is_skipped_whole() {
+        // The counterpart of the test above on the other miss path:
+        // there the source was tombstoned and the skip is immediate,
+        // here it is an id the dictionary has never held, so the skip
+        // happens after the timeout. Both advance `out_idx` past a
+        // reference the sender sized far beyond the output, and both
+        // have to leave it no further than the end. The same caveat
+        // applies: this catches a skip that does not advance, and only
+        // a debug-assertions build catches an unclamped one here.
+        let dict = GlzDictionary::with_cap(1024);
+        assert!(!dict.was_evicted(0), "test setup: id 0 is simply unknown");
+
+        let payload = [0xE0, 0xFF, 0xFF, 0xFF, 250, 0x00, 0x01, 0x00, 9, 10, 11];
+        let data = glz_rgb32_row(2, &payload);
+        let rt = paused_runtime();
+        let (image, elapsed) = rt.block_on(async {
+            let start = tokio::time::Instant::now();
+            let image = decompress_glz(&data, &dict).await.unwrap();
+            (image, start.elapsed())
+        });
+
+        assert_eq!(elapsed, Duration::from_millis(CROSS_REF_TIMEOUT_MS));
+        assert_eq!(image.pixels, vec![0u8; 8]);
+    }
+
+    #[test]
+    fn cross_reference_to_a_cleared_id_waits_instead_of_short_circuiting() {
+        // `clear` is server-driven invalidation, not a cap eviction, so
+        // it leaves no tombstone: the id may still arrive from another
+        // display channel, and the decode has to wait for it rather
+        // than take the evicted-id fast path.
+        let dict = GlzDictionary::with_cap(1024);
+        dict.insert(0, vec![5u8; 8]);
+        dict.clear();
+        assert!(!dict.was_evicted(0), "clear must not tombstone an id");
+
+        let data = glz_rgb32_row(2, &[0x40, 0x00, 0x01]);
+        let rt = paused_runtime();
+        let (image, elapsed) = rt.block_on(async {
+            let start = tokio::time::Instant::now();
+            let image = decompress_glz(&data, &dict).await.unwrap();
+            (image, start.elapsed())
+        });
+
+        assert_eq!(
+            elapsed,
+            Duration::from_millis(CROSS_REF_TIMEOUT_MS),
+            "a cleared id must take the wait path, not the tombstone path"
+        );
+        assert_eq!(image.pixels, vec![0u8; 8]);
     }
 }

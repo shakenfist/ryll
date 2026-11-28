@@ -30,3 +30,4 @@
 - PLAN-untrusted-value-sweep.md: Untrusted value and text sweep
 - PLAN-crate-boundaries.md: Crate boundaries and transcoding out
 - PLAN-bugreport-split.md: Splitting bugreport.rs
+- PLAN-pr739-followup.md: PR 739 follow-up
